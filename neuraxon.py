@@ -28,7 +28,7 @@ from enum import Enum
 @dataclass
 class NetworkParameters:
     """Default network parameters with biologically plausible ranges"""
-    
+    network_name: str = "My Neuraxon Net"     # For identification and saving
     # Network Architecture
     num_input_neurons: int = 5         # Range: [1, 100]
     num_hidden_neurons: int = 20      # Range: [1, 1000]
@@ -619,7 +619,10 @@ def load_network(filename: str) -> NeuraxonNetwork:
     """
     with open(filename, 'r') as f:
         data = json.load(f)
-    
+     # For backward compatibility, add a default name if not present
+    if 'parameters' in data and 'network_name' not in data['parameters']:
+        data['parameters']['network_name'] = "My Neuraxon Net"
+        
     # Reconstruct parameters
     params = NetworkParameters(**data['parameters'])
     
