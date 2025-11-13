@@ -30,6 +30,10 @@ No installation required—just open your browser and explore!
 
 <hr />
 
+## Git Hub Star History
+<div align="center">
+<img src="images/star-history-20251113.png" alt="Github Star History" width="40%"/>
+</div>
 ## 👋 Overview
 
 **Neuraxon** is a bio-inspired neural network framework that extends beyond traditional perceptrons through **trinary logic** (-1, 0, 1), capturing excitatory, neutral, and inhibitory dynamics found in biological neurons.
@@ -188,10 +192,10 @@ Neuraxon is particularly suited for:
 Visit our [HuggingFace Space](https://huggingface.co/spaces/DavidVivancos/Neuraxon) for a fully interactive 3D visualization where you can:
 
 - **Configure** all network parameters through an intuitive GUI
-- **Visualize** neurons color-coded by type (Blue input, pink mid, red output) and state:
-  -  High Intesity = Excitatory (+1)
-  -  Mid Intesity = Inhibitory (-1)
-  -  Dark = Neutral (0)
+- **Visualize** neurons color-coded by state:
+  - 🔴 Red = Excitatory (+1)
+  - 🔵 Blue = Inhibitory (-1)
+  - ⚪ Gray = Neutral (0)
 - **Watch** neuromodulator particles (emoji sprites) flow along synaptic pathways
 - **Control** input patterns and observe how they propagate through the network
 - **Experiment** with different neuromodulator levels and see their effects
@@ -254,7 +258,7 @@ If you use Neuraxon in your research, please cite:
     year={2025},
     journal={ResearchGate Preprint},
     institution={Artificiology Research, UNIR University, Qubic Science},
-    url={https://www.researchgate.net/publication/397331336_Neuraxon}
+    url={https://www.researchgate.net/}
 }
 ```
 
@@ -314,5 +318,4 @@ Special thanks to the Qubic's Aigarth team for the evolutionary tissue framework
 
 <div align="center">
 <i>Building brain-inspired AI, one Neuraxon at a time</i> 🧠✨
-
 </div>
