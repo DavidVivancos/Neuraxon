@@ -30,10 +30,10 @@ No installation required—just open your browser and explore!
 
 <hr />
 
-## Git Hub Star History
-<div align="center">
-<img src="images/star-history-20251113.png" alt="Github Star History" width="80%"/>
-</div>
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=DavidVivancos/Neuraxon&type=date&legend=top-left)](https://www.star-history.com/#DavidVivancos/Neuraxon&type=date&legend=top-left)
+
 ## 👋 Overview
 
 **Neuraxon** is a bio-inspired neural network framework that extends beyond traditional perceptrons through **trinary logic** (-1, 0, 1), capturing excitatory, neutral, and inhibitory dynamics found in biological neurons.
