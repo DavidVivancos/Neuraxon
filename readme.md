@@ -258,7 +258,7 @@ If you use Neuraxon in your research, please cite:
     year={2025},
     journal={ResearchGate Preprint},
     institution={Artificiology Research, UNIR University, Qubic Science},
-    url={https://www.researchgate.net/}
+    url={https://www.researchgate.net/publication/397331336_Neuraxon}
 }
 ```
 
@@ -319,3 +319,4 @@ Special thanks to the Qubic's Aigarth team for the evolutionary tissue framework
 <div align="center">
 <i>Building brain-inspired AI, one Neuraxon at a time</i> 🧠✨
 </div>
+
