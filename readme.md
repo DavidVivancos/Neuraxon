@@ -32,7 +32,7 @@ No installation required—just open your browser and explore!
 
 ## Git Hub Star History
 <div align="center">
-<img src="images/star-history-20251113.png" alt="Github Star History" width="40%"/>
+<img src="images/star-history-20251113.png" alt="Github Star History" width="80%"/>
 </div>
 ## 👋 Overview
 
