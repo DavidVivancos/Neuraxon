@@ -1,6 +1,3 @@
-I'll update the README.md to include the Neuraxon Game of Life simulation. Here's the enhanced version:
-
-```markdown
 # Neuraxon
 
 <div align="center">
@@ -452,3 +449,4 @@ Special thanks to the Qubic's Aigarth team for the evolutionary tissue framework
 5. **Used consistent formatting** with the rest of the README (emojis, code blocks, lists)
 
 The new section provides comprehensive documentation for users who want to run the Game of Life simulation while maintaining the professional tone and structure of the original README.
+
