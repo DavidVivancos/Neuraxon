@@ -9,9 +9,31 @@
 <a href="https://github.com/DavidVivancos/Neuraxon"><img alt="GitHub stars" src="https://img.shields.io/github/stars/DavidVivancos/Neuraxon?style=social"></a>
 </div>
 
-Experience Neuraxon's trinary neural dynamics with our **interactive 3D visualization** at [HuggingFace Spaces](https://huggingface.co/spaces/DavidVivancos/Neuraxon).
 
-### Demo Features:
+
+New: Experience Neuraxon's  **Game of Life** Lite at [HuggingFace](https://huggingface.co/spaces/DavidVivancos/NeuraxonLife).
+
+### Lite Version Features, (Research edition bellow):
+- 🌍 **Procedurally Generated Worlds**: Island-like terrains with land, sea, and obstacles
+- 🧬 **Evolutionary Dynamics**: Agents reproduce, passing neural parameters to offspring
+- 🍖 **Resource Competition**: Food sources respawn dynamically; agents must forage to survive
+- 🤝 **Social Behaviors**: Mating, cooperation, and competition emerge from neural dynamics
+- 🧠 **Neural Diversity**: Each agent has unique network parameters (learning rates, timescales, connectivity)
+- 📊 **Real-time Analytics**: Track food consumption, exploration, mating success, and fitness scores
+
+No installation required—just open your browser and explore!
+
+## 📸 Game Screenshot
+<div align="center">
+  <img src="images/NeuraxonGameOfLifeDemoSreenshot.png" alt="Neuraxon GAme of Life Visualization" width="90%"/>  
+</div>
+
+<hr />
+
+
+New: Experience Neuraxon's trinary neural dynamics with our **interactive 3D visualization** at [HuggingFace](https://huggingface.co/spaces/DavidVivancos/Neuraxon).
+
+### Interactive Network Builder Demo Features:
 - 🧠 **Build Custom Networks**: Configure neurons, synapses, and plasticity parameters
 - 🎯 **Interactive Controls**: Manually set input neuron states (excitatory/neutral/inhibitory)
 - 🔬 **Live Neuromodulation**: Adjust dopamine 🎯, serotonin 😊, acetylcholine 💡, and norepinephrine ⚡ in real-time
@@ -449,4 +471,5 @@ Special thanks to the Qubic's Aigarth team for the evolutionary tissue framework
 5. **Used consistent formatting** with the rest of the README (emojis, code blocks, lists)
 
 The new section provides comprehensive documentation for users who want to run the Game of Life simulation while maintaining the professional tone and structure of the original README.
+
 
