@@ -1,9 +1,13 @@
+I'll update the README.md to include the Neuraxon Game of Life simulation. Here's the enhanced version:
+
+```markdown
 # Neuraxon
 
 <div align="center">
 <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.7+-1f425f.svg?color=purple"></a>
 <a href="https://opensource.org/licenses/MIT"><img alt="License" src="https://img.shields.io/badge/License-MIT-blue"></a>
-<a href="https://huggingface.co/spaces/DavidVivancos/Neuraxon"><img src="https://img.shields.io/badge/🤗%20Demo-HuggingFace-yellow"></a>
+<a href="https://huggingface.co/spaces/DavidVivancos/Neuraxon"><img src="https://img.shields.io/badge/🤗%20Demo-HuggingFace-yellow">(Network Builder)</a>
+<a href="https://huggingface.co/spaces/DavidVivancos/NeuraxonLife"><img src="https://img.shields.io/badge/🤗%20Demo-HuggingFace-yellow"> (Game Of Live Lite)</a>
 <a href="https://www.researchgate.net/publication/397331336_Neuraxon"><img src="https://img.shields.io/badge/Paper-ResearchGate-00CCBB.svg"></a>
 <a href="https://github.com/DavidVivancos/Neuraxon"><img alt="GitHub stars" src="https://img.shields.io/github/stars/DavidVivancos/Neuraxon?style=social"></a>
 </div>
@@ -127,6 +131,111 @@ from neuraxon import save_network
 save_network(network, "my_network.json")
 ```
 
+## 🎮 Neuraxon Game of Life
+
+**A complete artificial life simulation powered by Neuraxon networks!**
+
+The **Neuraxon Game of Life** is a sophisticated demonstration of the framework's capabilities in an evolutionary, multi-agent environment. Each agent (called an "NxEr") is controlled by its own Neuraxon network, allowing emergent behaviors and evolutionary dynamics.
+
+### Features
+
+- 🌍 **Procedurally Generated Worlds**: Island-like terrains with land, sea, and obstacles
+- 🧬 **Evolutionary Dynamics**: Agents reproduce, passing neural parameters to offspring
+- 🍖 **Resource Competition**: Food sources respawn dynamically; agents must forage to survive
+- 🤝 **Social Behaviors**: Mating, cooperation, and competition emerge from neural dynamics
+- 🧠 **Neural Diversity**: Each agent has unique network parameters (learning rates, timescales, connectivity)
+- 📊 **Real-time Analytics**: Track food consumption, exploration, mating success, and fitness scores
+- ⚡ **Parallel Processing**: Multi-core neural network updates for scalable simulations
+- 💾 **Save/Load System**: Preserve entire worlds or extract champion agents
+
+### Running the Simulation
+
+```bash
+# Launch with default settings
+python NeuraxonGameOfLife.py
+
+# The configuration screen allows you to customize:
+# - World size and terrain composition
+# - Starting population and maximum agents
+# - Food availability and respawn rates
+# - Neural network complexity
+# - Simulation speed and physics
+```
+
+### Gameplay Controls
+
+**Camera:**
+- `WASD` or `Arrow Keys`: Pan camera
+- `Mouse Wheel`: Zoom in/out
+- `Q/E`: Rotate view
+- `Right Mouse Drag`: Pan camera
+
+**Simulation:**
+- `Space`: Pause/Resume
+- `S`: Quick save
+- `L`: Quick load
+- `Click Agent`: View detailed stats (when paused)
+- `Click Name in Rankings`: Select agent for inspection
+
+**UI Buttons:**
+- **Save Game**: Export complete world state
+- **Load Game**: Import saved simulation
+- **Save Best**: Export top-performing agents
+- **Save NxEr/NxVizer**: Export individual agent brains
+
+### Agent Behavior
+
+Each NxEr has a **4-output Neuraxon network**:
+- **Outputs 1-2**: Movement direction (X, Y)
+- **Output 3**: Cooperation/sharing signal
+- **Output 4**: Mating/attack intention
+
+**Input sensors** (3 neurons):
+- Food detection
+- Agent proximity
+- Terrain type
+
+Agents exhibit:
+- **Foraging**: Seeking and harvesting food sources
+- **Exploration**: Discovering new territories
+- **Mating**: Reproducing when conditions are favorable
+- **Resource Management**: Balancing energy consumption
+- **Adaptation**: Networks evolve through STDP and neuromodulation
+
+### Evolutionary Mechanics
+
+- **Reproduction**: Two agents can mate to produce offspring
+- **Inheritance**: Child inherits neural parameters from both parents with variation
+- **Selection**: Agents with low fitness die off; successful agents propagate
+- **Amphibious Evolution**: Shore-based mating can produce amphibious offspring
+- **Champion System**: Top performers survive across game rounds
+
+### Performance Metrics
+
+The simulation tracks multiple fitness dimensions:
+- **Food Found**: Total food discovered
+- **Food Taken**: Resources acquired from others
+- **World Explored**: Unique tiles visited
+- **Time Lived**: Survival duration
+- **Mates Performed**: Reproductive success
+- **Fitness Score**: Composite metric combining all factors
+
+### Technical Highlights
+
+- **Multiprocessing**: Worker pool distributes neural network updates across CPU cores
+- **Adaptive Time-Stepping**: Simulation speed adjusts based on network activity
+- **Toroidal World**: Wrapping boundaries create an infinite-feeling space
+- **Collision Resolution**: Sophisticated interaction system for multi-agent conflicts
+- **Energy Metabolism**: Biologically-inspired resource constraints
+- **Neuromodulator Diffusion**: Spatial propagation of dopamine, serotonin, etc.
+
+This simulation demonstrates Neuraxon's suitability for:
+- Multi-agent reinforcement learning
+- Evolutionary computation
+- Artificial life research
+- Emergent behavior studies
+- Cognitive robotics
+
 ## 📊 Network Architecture
 
 ```
@@ -185,6 +294,8 @@ Neuraxon is particularly suited for:
 - **Adaptive signal processing** with non-stationary inputs
 - **Cognitive modeling** of brain-like computation
 - **Energy-efficient AI** leveraging sparse, event-driven processing
+- **Artificial life simulations** with evolutionary dynamics
+- **Multi-agent systems** with emergent social behaviors
 
 ## 🖥️ Visualization & Tools
 
@@ -201,8 +312,7 @@ Visit our [HuggingFace Space](https://huggingface.co/spaces/DavidVivancos/Neurax
 - **Experiment** with different neuromodulator levels and see their effects
 - **Compare** preset configurations (minimal, balanced, highly plastic, etc.)
 
-The demo features a  3D sphere layout with curved synaptic connections and real-time particle effects representing neuromodulator dynamics.
-
+The demo features a 3D sphere layout with curved synaptic connections and real-time particle effects representing neuromodulator dynamics.
 
 ## 📖 Configuration Parameters
 
@@ -272,6 +382,7 @@ We welcome contributions! Areas of interest include:
 - New application domains
 - Visualization tools
 - Performance benchmarks
+- Game of Life extensions and scenarios
 
 Please open an issue to discuss major changes before submitting PRs.
 
@@ -282,13 +393,12 @@ Artificiology Research https://artificiology.com/ , Qubic https://qubic.org/ Sci
 Email: vivancos@vivancos.com
 
 **Jose Sanchez**  
-UNIR University  , Qubic https://qubic.org/ Science Advisor  
+UNIR University, Qubic https://qubic.org/ Science Advisor  
 Email: jose.sanchezgarcia@unir.net
 
 ## 📄 License
 
 MIT License. See `LICENSE` file for details.
-
 
 ## ⚠️ Important License Notice
 
@@ -319,4 +429,26 @@ Special thanks to the Qubic's Aigarth team for the evolutionary tissue framework
 <div align="center">
 <i>Building brain-inspired AI, one Neuraxon at a time</i> 🧠✨
 </div>
+```
 
+## Key Changes Made:
+
+1. **Added comprehensive "Neuraxon Game of Life" section** with:
+   - Overview of the simulation
+   - Feature highlights with emojis
+   - Running instructions
+   - Detailed gameplay controls
+   - Agent behavior explanation
+   - Evolutionary mechanics
+   - Performance metrics
+   - Technical highlights
+
+2. **Updated "Use Cases" section** to include artificial life and multi-agent systems
+
+3. **Updated "Contributing" section** to mention Game of Life extensions
+
+4. **Maintained existing structure** while seamlessly integrating the new content
+
+5. **Used consistent formatting** with the rest of the README (emojis, code blocks, lists)
+
+The new section provides comprehensive documentation for users who want to run the Game of Life simulation while maintaining the professional tone and structure of the original README.
