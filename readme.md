@@ -255,7 +255,6 @@ class NetworkParameters:
     stdp_window: float = 20.0    # ms [10.0, 50.0]
     
     # ... see code for complete parameter set
-```
 
 ## 🧬 Aigarth Integration
 
@@ -474,6 +473,7 @@ Special thanks to the Qubic's Aigarth team for the evolutionary tissue framework
 5. **Used consistent formatting** with the rest of the README (emojis, code blocks, lists)
 
 The new section provides comprehensive documentation for users who want to run the Game of Life simulation while maintaining the professional tone and structure of the original README.
+
 
 
 
