@@ -26,6 +26,7 @@
 </div>
 
 **Multi Neuraxon 2.0  Multi-Sphere 3D Network Builder Demo:** : (https://huggingface.co/spaces/DavidVivancos/MultiNeuraxon2)
+<br> (Update March 31st 2026: Include brain preset for the abstraction of the fruit fly connectome: Drosophila melanogaster.)
 <div align="center">
   <img src="images/MultiNeuraxon2.0.png" alt="Neuraxon 2.0 Multshpere" width="90%"/>  
 </div>
