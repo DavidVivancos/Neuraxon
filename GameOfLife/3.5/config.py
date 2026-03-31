@@ -1,10 +1,11 @@
-# Neuraxon Game of Life 3.5 config (Neuraxon 2.0 Compliant) Internal version 104
+# Neuraxon Game of Life 3.5 config (Neuraxon 2.0 Compliant) Internal version 125
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
 # https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint  (Neuraxon V2.0 )
 # https://www.researchgate.net/publication/397331336_Neuraxon (V1) 
 # Play the Lite Version of the Game of Life 3 at https://huggingface.co/spaces/DavidVivancos/NeuraxonLife
+
 import random
 from dataclasses import dataclass, field
 from typing import Set, Dict, Optional, List, Set, Tuple
@@ -151,13 +152,13 @@ class NetworkParameters:
     network_name: str = "Neuraxon NxEr"
     # UPDATED v3.1: 6 original + DayNight, Temperature, Proprioception = 9 inputs
     # Input neurons (trinary -1/0/1):
-    #   0: Movement result (-1=blocked, 0=moved, 1=food found)
-    #   1: Terrain encounter (-1=rock, 0=empty, 1=nxer present)
-    #   2: Terrain type (-1=rock, 0=sea, 1=land)
+    #   0: Movement result (-1=blocked, 0=moved/idle, 1=food found)
+    #   1: Terrain encounter (-1=rock/threat, 0=none, 1=salient encounter)
+    #   2: Terrain constraint (-1=blocked/unsafe substrate, 0=traversable context, 1=unused spare channel)
     #   3: Hunger (-1=starving, 0=normal, 1=satiated) 
-    #   4: Sight (-1=enemy/nothing, 0=clan/neutral, 1=food)
-    #   5: Smell (-1=nothing, 0=nxer nearby, 1=food nearby)
-    #   6: DayNight (-1=night, 0=transition dawn/dusk, 1=day)
+    #   4: Sight (-1=aversive/threatening cue, 0=no salient cue, 1=food/reward cue)
+    #   5: Smell (-1=aversive cue, 0=no salient cue, 1=food/reward cue)
+    #   6: DayNight (-1=night drive, 0=background/transition, 1=day drive)
     #   7: Temperature (-1=cold/hypothermic, 0=normal, 1=hot/hyperthermic)
     #   8: Proprioception (-1=repeatedly blocked, 0=normal, 1=clear path history)
     num_input_neurons: int = 9  
@@ -248,8 +249,18 @@ class NetworkParameters:
     w_meta_init_max: float = 0.3
     
     # v3.31: LTP/LTD rebalance — Results-97 overcorrected to 70.6% LTP, target ~55-60%
-    hebbian_ltp_rate: float = 0.18        # v3.31: Down from 0.3 — less pure Hebbian LTP
-    ltd_neutral_scale: float = 0.12       # v3.31: Up from 0.08 — slightly more neutral LTD
+    # v112 FIX (M25+M7+M1): hebbian_ltp_rate 0.02→0.08.
+    # v111 AUTOPSY: 0.02 was too aggressive — with D1²≈0.03 at operating DA,
+    # ALL learning (LTP+LTD) was suppressed to ~3%, killing M1 (C→F),
+    # M7 (A→D), M14 (A→B). The DA-gated component must DOMINATE but
+    # a moderate Hebbian floor (0.08) ensures baseline connectivity forms.
+    # At D1≈0.49 (baseline DA), ratio is DA:Hebbian = 6:1 → DA dominates.
+    # At D1≈0.77 (burst DA), ratio = 10:1 → strong differential.
+    # Paper §4: "coincident firing" drives basic Hebbian; DA modulates magnitude.
+    hebbian_ltp_rate: float = 0.12        # v113: Raise to compensate lower average D1 activation.
+                                           # With D1 EC50=0.45, quiet D1≈0.23 vs old D1≈0.97.
+                                           # Hebbian floor keeps baseline learning alive.
+    ltd_neutral_scale: float = 0.12       # v3.31: Kept
     ltd_inhibitory_scale: float = 0.6     # v3.31: Kept from v3.3
     # v3.31: Slow weight differentiation
     w_slow_post_trace_fraction: float = 0.85 # v3.31: Up from 0.8 — more post-trace in w_slow
@@ -282,24 +293,59 @@ class NetworkParameters:
     norepinephrine_baseline: float = 0.12
     norepinephrine_high_affinity_threshold: float = 0.01
     norepinephrine_low_affinity_threshold: float = 1.0
-    neuromod_decay_rate: float = 0.06
+    # v109: Reduced from 0.6 to 0.15. With the /10.0 divisor removed,
+    # 0.6 would cause instantaneous snap-to-baseline (too aggressive).
+    # v110 FIX (M18): Increased from 0.15 to 0.25 to match the stronger
+    # sync-backed decay. With bidirectional dict↔v2.0 sync, decay now
+    # persists across ticks and 0.25 gives ~4 tick time constant.
+    neuromod_decay_rate: float = 0.25
+    
+    # v108 NEW: Concentration-dependent excess decay rate
+    # BIOINSPIRED: At high extracellular concentrations, enzymatic degradation
+    # and reuptake both increase. Models the non-linear clearance seen in vivo
+    # when monoamine overflow exceeds transporter capacity.
+    neuromod_excess_decay_rate: float = 0.15  # Additional decay per unit above 3× baseline
+    neuromod_excess_threshold_mult: float = 3.0  # Trigger excess decay at 3× baseline
+    
+    # v107 FIX (M02): Dopamine negative prediction error on obstacle collision
+    # BIOINSPIRED: DA encodes reward prediction errors (Schultz 1997).
+    # Unexpected obstacle = negative prediction error = DA dip.
+    # Paper: "Dopamine – triggered by... prediction errors"
+    collision_da_punishment: float = 0.15       # DA reduction on rock collision
+    collision_ne_boost: float = 0.08            # NE surprise/startle on collision
+    proprioception_lead_ticks: int = 1          # Ticks of warning before forced turn
     # v3.33: Enzymatic clearance (MAO/COMT analog) — Michaelis-Menten per-transporter
     # BIOINSPIRED: Each monoamine has a distinct reuptake transporter with different kinetics:
     #   NET (norepinephrine transporter): fast clearance
     #   DAT (dopamine transporter): moderate
     #   SERT (serotonin transporter): slow (SSRIs block this)
     #   AChE (acetylcholinesterase): fastest enzymatic degradation
-    reuptake_vmax_ne: float = 0.08
-    reuptake_vmax_da: float = 0.05
-    reuptake_vmax_5ht: float = 0.03
-    reuptake_vmax_ach: float = 0.10
+    # v108 FIX: Increased Vmax across the board to counterbalance circadian injection
+    reuptake_vmax_ne: float = 0.15
+    reuptake_vmax_da: float = 0.20        # v113 FIX (M25): 0.10→0.20. Dopamine transporter
+                                           # (DAT) has the highest Vmax of all monoamine
+                                           # transporters. Doubling clearance rate pulls
+                                           # DA mean down faster after behavioral boosts.
+                                           # BIOINSPIRED: Striatal DA half-life ~200ms
+                                           # vs 5-HT ~1-2s (Cragg & Rice 2004).
+    # v107 FIX (M04): Increased from 0.03 to match NET kinetics.
+    # Old value caused chronic 5-HT saturation (~1.97) destroying all modulatory range.
+    # BIOINSPIRED: SERT reuptake is slower than NET but not 3x slower.
+    # Paper says 5-HT modulates risk/social behavior — needs dynamic range.
+    reuptake_vmax_5ht: float = 0.12
+    reuptake_vmax_ach: float = 0.15
     reuptake_km: float = 0.5  # Half-saturation constant (shared, Michaelis-Menten)
     # v3.33: Autoreceptor negative feedback strength
     # BIOINSPIRED: Presynaptic autoreceptors (5-HT1A, α2-adrenergic, D2-short)
     # detect high extracellular concentration and suppress further vesicle release
     autoreceptor_strength: float = 1.0  # Scaling exponent for feedback (1.0 = quadratic)
     diffusion_rate: float = 0.05
-    dopamine_reward_magnitude: float = 0.25 
+    dopamine_reward_magnitude: float = 0.10   # v113 FIX (M25): 0.25→0.10. With surprise×2.0,
+                                               # old peak was +0.50 — catapulting DA to ceiling.
+                                               # 0.10 × 2.0 = 0.20 peak is a genuine phasic burst
+                                               # without pushing DA permanently above D1 EC50.
+                                               # BIOINSPIRED: VTA phasic bursts are transient
+                                               # (Schultz 1997), not sustained step functions. 
     
     # --- Oscillators & Synchronization (Section 7) ---
     oscillator_low_freq: float = 0.05  
@@ -406,10 +452,13 @@ class NetworkParameters:
     chrono_omega_min: float = 0.05
     chrono_omega_max: float = 0.95
     chrono_omega_smoothing: float = 0.2
+    chrono_plastic_enabled: bool = True
+    chrono_carry_gain: float = 0.24
+    chrono_plasticity_gain: float = 0.28
 
     # --- AGMP Astrocyte-Gated Plasticity (Eqs 8-10) ---
-    agmp_lambda_e: float = 0.95
-    agmp_lambda_a: float = 0.999
+    agmp_lambda_e: float = 0.9
+    agmp_lambda_a: float = 0.95
     agmp_eta: float = 0.005
     agmp_enabled: bool = True
 
@@ -423,14 +472,68 @@ class NetworkParameters:
     msth_slow_tau: float = 3600000.0
     msth_slow_gain: float = 0.0001
 
+    # v112 FIX (M25): DA-specific phasic release multiplier.
+    # v111 AUTOPSY: tau_phasic=50 correctly made phasic transients short,
+    # but without increasing injection magnitude, DA barely varied
+    # (mean=0.13, 90%-range=0.085). D1 sat at 0.15 constantly → no gating.
+    # With 4× DA phasic release: active periods push DA to ~0.30-0.45,
+    # creating genuine D1 swing (0.38→0.92). Other modulators unchanged.
+    # BIOINSPIRED: DA release in VTA is 3-5× higher per spike than
+    # cortical glutamate release (Garris et al. 1994), reflecting
+    # DA's role as a salience/reward signal, not a basal transmitter.
+    da_phasic_release_multiplier: float = 2.0  # v113 FIX (M25): 4.0→2.0. The 4× was compensating
+                                                # for D1 EC50=0.18 being below the DA range.
+                                                # With EC50=0.45 properly centered, 2× provides
+                                                # enough phasic swing (DA 0.15→0.35 during bursts)
+                                                # to cross D1's switching zone.
+    # v117: Stronger DA→ACh antagonism to match Algorithm 5 and prevent reward periods
+    # from drifting into an exploratory/high-ACh state. This is architecture-level
+    # crosstalk, not a game-scripted behavior rule.
+    da_ach_crosstalk_strength: float = 0.35
+    da_ach_tonic_suppression: float = 0.08
+
     # --- Receptor Subtypes (Algorithm 2/5) ---
     # Slopes control Hill-sigmoid steepness (tonic=high-affinity, phasic=low-affinity)
     receptor_concentration_cap: float = 1.0
-    receptor_slope_tonic: float = 4.0
-    receptor_slope_phasic: float = 3.0
-    tau_tonic: float = 5000.0
-    tau_phasic: float = 200.0
-    neuromod_release_rate: float = 0.02
+    # v111 FIX (M25): receptor_slope_tonic 4→12, phasic 3→10.
+    # Paper §1 Neuromodulation describes high-affinity (nM) tonic receptors
+    # versus low-affinity (μM) phasic receptors. With slopes 3-4, the Hill
+    # sigmoid was too shallow: D1 varied only 0.35→0.60 across the full DA
+    # range, making D1-gated LTP almost DA-independent.
+    # At slope 12/10, D1 switches sharply around its EC50 (0.35):
+    #   DA=0.15 → D1≈0.05 (LTP suppressed)
+    #   DA=0.50 → D1≈0.82 (LTP enabled)
+    # D2 (tonic, EC50=0.25) also sharpens:
+    #   DA_tonic=0.10 → D2≈0.10 (LTD suppressed)
+    #   DA_tonic=0.30 → D2≈0.85 (LTD enabled)
+    # This creates the phasic/tonic separation the paper requires.
+    receptor_slope_tonic: float = 12.0
+    receptor_slope_phasic: float = 6.0    # v113 FIX (M25): 10.0→6.0. Steep slope compressed
+                                           # D1's useful range to a narrow DA window. With slope=6:
+                                           #   DA=0.20: D1=0.18 (LTP suppressed)
+                                           #   DA=0.35: D1=0.35 (moderate LTP)
+                                           #   DA=0.55: D1=0.65 (strong LTP)
+                                           #   DA=0.70: D1=0.82 (peak LTP)
+                                           # This spreads D1 across the full DA operating range.
+    # v110 FIX (M18): tau_tonic 5000→200. With tau=5000, internal tonic decay
+    # was dt/5000 = 0.0002/tick — 60× weaker than activity injection.
+    # Tonic levels rose monotonically to ceiling and never returned.
+    # tau=200 gives dt/200 = 0.005/tick, matching biological seconds-scale
+    # clearance for tonic (volume transmission) monoamine components.
+    tau_tonic: float = 200.0
+    # v111 FIX (M25): tau_phasic 200→50. Phasic transients must decay
+    # faster than tonic baseline to create distinct DA episodes.
+    # BIOINSPIRED: Synaptic DA clearance is ~100-400ms (Garris 1994).
+    # At dt=1, tau=50 gives ~50-tick phasic transient half-life,
+    # creating sharp phasic bursts that differentially activate D1.
+    # This directly enables the tonic/phasic separation in §1.
+    tau_phasic: float = 50.0
+    # v110 FIX (M18): release_rate 0.02→0.005. With bidirectional sync,
+    # game-loop behavioral boosts now persist into the v2.0 system (they
+    # were previously overwritten). Internal activity-driven release can
+    # be reduced to avoid double-counting. Net release rate stays similar
+    # because external boosts (circadian, reward, satiety) now stick.
+    neuromod_release_rate: float = 0.005
 
     # --- Oscillator Bank (Multi-band PAC, Section 6) ---
     oscillator_coupling: float = 0.1
@@ -451,6 +554,12 @@ class NetworkParameters:
     aigarth_mutation_wf_prob: float = 0.3
     aigarth_mutation_ws_prob: float = 0.1
     aigarth_mutation_wm_prob: float = 0.05
+    # v117: Encourage circle-level functional niches so ITUs diversify instead of all
+    # collapsing onto the same oscillator regime.
+    itu_niche_strength: float = 0.30
+    itu_target_cohesion: float = 0.20
+    itu_freq_mutation_scale: float = 0.06
+    itu_timescale_mutation_scale: float = 0.08
 
     recovery_rate: float = 0.5 
     
@@ -471,12 +580,12 @@ class NetworkParameters:
     # processing. The neutral state is the computational "buffer" where integration occurs.
     adaptive_threshold_enabled: bool = True
     adaptive_threshold_check_interval: int = 12  # v2.36: More frequent checks
-    adaptive_threshold_adjustment: float = 0.06  # v2.37b: Even stronger correction  
-    min_excitatory_fraction: float = 0.15  # v2.36: Floor for maintaining some activity
-    max_excitatory_fraction: float = 0.28  # v2.37b: Slightly lower
+    adaptive_threshold_adjustment: float = 0.04  # gentler global correction to avoid chronic suppression
+    min_excitatory_fraction: float = 0.17  # preserve excitatory drive without losing the neutral buffer
+    max_excitatory_fraction: float = 0.27  # slightly tighter upper bound
     target_excitatory_fraction: float = 0.22  # v2.36: NEW - optimal target for criticality
-    min_inhibitory_fraction: float = 0.10  # v2.37b: NEW - minimum inhibitory for E/I balance
-    target_inhibitory_fraction: float = 0.10  # v2.36: NEW - ensures inhibitory presence
+    min_inhibitory_fraction: float = 0.16  # keep a meaningful inhibitory pool without over-forcing it
+    target_inhibitory_fraction: float = 0.24  # moderate inhibitory target; avoids the 124 over-correction
     
     # --- Aigarth Hybridization (Section 8) ---
     itu_circle_radius: int = 8 
@@ -501,6 +610,12 @@ class NetworkParameters:
     sensory_gating_enabled: bool = True
     sensory_gating_threshold: float = 0.45  # v2.36: Raised - stronger gating
     sensory_gating_suppression: float = 0.25  # v2.36: Stronger suppression during driven input
+    
+    # v107 FIX (M02): Stronger proprioceptive-to-motor pathway 
+    # BIOINSPIRED: Proprioceptive afferents have strong, reliable connections
+    # to motor neurons (stretch reflex, withdrawal reflex).
+    proprioceptive_afferent_gain: float = 1.8   # Boosted vs normal afferent_synapse_strength=1.1
+    proprioceptive_stdp_boost: float = 2.5      # STDP multiplier for proprio→motor synapses
     max_intrinsic_timescale: float = 80.0  # Reduced from 100 for stricter bound
     spontaneous_as_current: bool = True
     spontaneous_current_magnitude: float = 1.2  # Reduced from 1.5

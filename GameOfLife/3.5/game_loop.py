@@ -1,10 +1,11 @@
-# Neuraxon Game of Life 3.5 game loop (Neuraxon 2.0 Compliant) Internal version 104
+# Neuraxon Game of Life 3.5 game loop (Neuraxon 2.0 Compliant) Internal version 125
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
 # https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint  (Neuraxon V2.0 )
 # https://www.researchgate.net/publication/397331336_Neuraxon (V1) 
 # Play the Lite Version of the Game of Life 3 at https://huggingface.co/spaces/DavidVivancos/NeuraxonLife
+
 import os
 import sys
 import time
@@ -49,6 +50,67 @@ from ui.renderer import Renderer
 
 # Import config constants
 from config import CIRCADIAN_CYCLE_TICKS, TEMP_BASELINE, TEMP_MIN, TEMP_MAX, TEMP_NIGHT_DROP, TEMP_ACTIVITY_GAIN, TEMP_SOCIAL_GAIN, TEMP_FOOD_GAIN, TEMP_DECAY_RATE, TEMP_BASELINE_VARIANCE, RESTING_METABOLISM_MULTIPLIER, RESTING_METABOLISM_MULT, TEMP_CIRCADIAN_CORR_WINDOW, SYNAPSE_SILENCING_ACTIVITY_THRESHOLD
+
+# ============================================================================
+# v4.1: SPATIAL HASH GRID — O(1) neighbor lookups (was O(r²) per agent)
+# ============================================================================
+
+class SpatialGrid:
+    """Grid-based spatial index for O(1) neighbor queries."""
+    __slots__ = ('cell_size', 'world_n', 'grid', '_pos_to_id')
+    
+    def __init__(self, world_n, cell_size=4):
+        self.cell_size = cell_size
+        self.world_n = world_n
+        self.grid = {}
+        self._pos_to_id = {}
+    
+    def _cell(self, pos):
+        return (pos[0] // self.cell_size, pos[1] // self.cell_size)
+    
+    def clear(self):
+        self.grid.clear()
+        self._pos_to_id.clear()
+    
+    def insert(self, eid, pos):
+        c = self._cell(pos)
+        if c not in self.grid:
+            self.grid[c] = set()
+        self.grid[c].add(eid)
+        self._pos_to_id[pos] = eid
+    
+    def remove(self, eid, pos):
+        c = self._cell(pos)
+        bucket = self.grid.get(c)
+        if bucket:
+            bucket.discard(eid)
+            if not bucket:
+                del self.grid[c]
+        self._pos_to_id.pop(pos, None)
+    
+    def move(self, eid, old_pos, new_pos):
+        self.remove(eid, old_pos)
+        self.insert(eid, new_pos)
+    
+    def occupant_at(self, pos):
+        return self._pos_to_id.get(pos)
+    
+    def count_nearby(self, pos, radius=2):
+        """Count entities within radius. O(cells_in_radius) amortized."""
+        cs = self.cell_size
+        cx0 = (pos[0] - radius) // cs
+        cx1 = (pos[0] + radius) // cs
+        cy0 = (pos[1] - radius) // cs
+        cy1 = (pos[1] + radius) // cs
+        count = 0
+        for cx in range(cx0, cx1 + 1):
+            for cy in range(cy0, cy1 + 1):
+                bucket = self.grid.get((cx, cy))
+                if bucket:
+                    count += len(bucket)
+        if self._pos_to_id.get(pos) is not None:
+            count -= 1
+        return max(0, count)
 
 # ============================================================================
 # v4.0: AUTORECEPTOR NEGATIVE FEEDBACK SYSTEM
@@ -111,11 +173,15 @@ def get_circadian_modulation(phase: float) -> dict:
     day_mod = max(0, day_signal)
     night_mod = max(0, night_signal)
     
+    # v109 FIX: Further reduced to 10-15% of baseline (biologically accurate).
+    # SCN circadian output in biology shifts tonic baselines by ~10-20%,
+    # not by 50-80% as v108 values did relative to 0.12-0.15 baselines.
+    # These values now add at most 0.02/tick, well within the decay budget.
     return {
-        'dopamine': day_mod * 0.25,       # Active during day
-        'serotonin': night_mod * 0.3,     # Sleep/rest at night
-        'norepinephrine': day_mod * 0.2,  # Alertness during day
-        'acetylcholine': day_mod * 0.15,  # Attention during day
+        'dopamine': day_mod * 0.02,
+        'serotonin': night_mod * 0.03,
+        'norepinephrine': day_mod * 0.015,
+        'acetylcholine': day_mod * 0.012,
     }
 
 def get_circadian_metabolic_multiplier(phase: float) -> float:
@@ -235,7 +301,8 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                TexturesAlpha: float = 0.7, MateCooldownSeconds: int = 10, 
                random_seed: Optional[int] = None, limit_minutes: Optional[int] = None, 
                auto_save: bool = False, auto_save_prefix: str = "", 
-               auto_start: bool = False, save_on_round_end: bool = True):
+               auto_start: bool = False, save_on_round_end: bool = True,
+               max_rounds: Optional[int] = None, round_time_limit: Optional[int] = None):  
     """
     The main function that initializes and runs the entire Game of Life simulation.
     """
@@ -244,7 +311,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
     NxWorldSea = _clamp(float(NxWorldSea), 0.0, 0.95)
     NxWorldRocks = _clamp(float(NxWorldRocks), 0.0, 0.9)
     StartingNxErs = _clamp(int(StartingNxErs), 1, 150)
-    MaxNxErs = _clamp(int(MaxNxErs), 100, 180) # Clamped atm to 180 to prevent the exponential in compute
+    MaxNxErs = _clamp(int(MaxNxErs), 100, 50000) # v4.1: Raised from 180 — optimized engine handles 10K+
     MaxFood = _clamp(int(MaxFood), 10, 1000)
     FoodRespan = _clamp(int(FoodRespan), 10, 3000)
     StartFood = _clamp(float(StartFood), 10.0, 250.0)
@@ -263,6 +330,9 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
     nxers: Dict[int, NxEr] = {}
     foods: Dict[int, Food] = {}
     occupied = set()
+    # v4.1: Spatial hash grids for O(1) position lookups
+    _agent_grid = SpatialGrid(NxWorldSize, cell_size=max(4, NxWorldSize // 64))
+    _food_grid = SpatialGrid(NxWorldSize, cell_size=max(4, NxWorldSize // 64))
     births_count = 0
     deaths_count = 0
     effects: List[dict] = []
@@ -295,6 +365,20 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
     global_circadian_phase = 0.0
 
     def wrap_pos(p: Tuple[int, int]) -> Tuple[int, int]: return (p[0] % world.N, p[1] % world.N)
+
+    def _heading_would_be_blocked(agent: NxEr, heading: int) -> bool:
+        """One-step lookahead used to expose pre-motor obstacle warnings to the brain."""
+        dx, dy = DIR_OFFSETS.get(int(heading), (0, 0))
+        target = wrap_pos((agent.pos[0] + dx, agent.pos[1] + dy))
+        tt = world.terrain(target)
+        if tt == T_ROCK:
+            return True
+        if tt == T_LAND and not agent.can_land:
+            return True
+        if tt == T_SEA and not agent.can_sea:
+            return True
+        occ = _agent_grid.occupant_at(target)
+        return occ is not None and occ != agent.id
     
     def find_free(allow_sea=True, allow_land=True, forbid=None, near=None, search_radius=5):
         """Finds a valid, unoccupied coordinate in the world, optionally near a specific point."""
@@ -401,7 +485,10 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
         p.norepinephrine_high_affinity_threshold = random.uniform(0.005, 0.05)
         p.norepinephrine_low_affinity_threshold = random.uniform(0.5, 1.5)
         
-        p.neuromod_decay_rate = random.uniform(0.005, 0.05)  
+        # v110 FIX (M18): Evolution range [0.005,0.05]→[0.10,0.35].
+        # Old range was 3-30× weaker than default (0.15), ensuring every
+        # evolved offspring had critically insufficient decay.
+        p.neuromod_decay_rate = random.uniform(0.10, 0.35)
         # v4.0: Evolvable reuptake transporter kinetics
         p.reuptake_vmax_ne = random.uniform(0.05, 0.12)
         p.reuptake_vmax_da = random.uniform(0.03, 0.08)
@@ -504,6 +591,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
             stats=NxErStats(), 
             visited=set([pos]), 
             parents=(None, None),
+            parent_ids=(None, None),
             ancestors=[],  # No ancestors for original NxErs
             rounds_survived=0,
             mate_cooldown_until_tick=0, 
@@ -532,6 +620,79 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
         # UPDATED v3.1: 9 inputs
         nx.last_inputs = (0, 0, 0, 0, 0, 0, 0, 0, 0)
         return nx
+
+    nxer_archive: Dict[int, dict] = {}
+
+    def _serialize_nxer(a: NxEr) -> dict:
+        parent_ids = tuple(getattr(a, 'parent_ids', (None, None)) or (None, None))
+        parent_names = tuple(getattr(a, 'parents', (None, None)) or (None, None))
+        ancestors = list(getattr(a, 'ancestors', []) or [])
+        return {
+            "id": a.id,
+            "name": a.name,
+            "color": a.color,
+            "pos": a.pos,
+            "can_land": a.can_land,
+            "can_sea": a.can_sea,
+            "food": a.food,
+            "is_male": a.is_male,
+            "alive": a.alive,
+            "born_ts": a.born_ts,
+            "died_ts": a.died_ts,
+            "last_inputs": a.last_inputs,
+            "last_outputs": a.last_outputs,
+            "ticks_per_action": a.ticks_per_action,
+            "tick_accum": a.tick_accum,
+            "harvesting": a.harvesting,
+            "mating_with": a.mating_with,
+            "mating_end_tick": a.mating_end_tick,
+            "visited": list(a.visited),
+            "dopamine_boost_ticks": a.dopamine_boost_ticks,
+            "_last_O4": a._last_O4,
+            "mating_intent_until_tick": a.mating_intent_until_tick,
+            "parents": list(parent_names),
+            "parent_ids": list(parent_ids),
+            "parent_0": parent_ids[0],
+            "parent_1": parent_ids[1],
+            "parent_name_0": parent_names[0],
+            "parent_name_1": parent_names[1],
+            "ancestors": ancestors,
+            "ancestors_count": len(ancestors),
+            "founder": parent_ids == (None, None),
+            "mate_cooldown_until_tick": a.mate_cooldown_until_tick,
+            "last_move_tick": a.last_move_tick,
+            "last_pos": a.last_pos,
+            "stats": asdict(a.stats),
+            "net": a.net.to_dict(),
+            "receptor_activations": getattr(a, 'receptor_activations', {}),
+            "astrocyte_activity": getattr(a, 'astrocyte_activity', 0.0),
+            "vision_range": a.vision_range,
+            "smell_radius": a.smell_radius,
+            "heading": a.heading,
+            "clan_id": a.clan_id,
+            "rounds_survived": getattr(a, 'rounds_survived', 0),
+            "body_temperature": getattr(a, 'body_temperature', 37.0),
+            "circadian_phase": getattr(a, 'circadian_phase', 0.0),
+            "is_resting": getattr(a, 'is_resting', False),
+            "proprioceptron_rock_hits": a.proprioceptron.total_rock_hits if hasattr(a, 'proprioceptron') else 0,
+            "proprioceptron_forced_turns": a.proprioceptron.forced_turn_count if hasattr(a, 'proprioceptron') else 0,
+            "proprioceptron_brain_warnings": a.proprioceptron.brain_warning_count if hasattr(a, 'proprioceptron') else 0,
+            "proprioceptron_brain_turns": a.proprioceptron.brain_avoidance_turn_count if hasattr(a, 'proprioceptron') else 0,
+            "proprioceptron_successful_streak": a.proprioceptron.successful_move_streak if hasattr(a, 'proprioceptron') else 0,
+            "proprioceptron_last_move_result": a.proprioceptron.last_move_result if hasattr(a, 'proprioceptron') else 0,
+            "consecutive_successful_moves": getattr(a, '_consecutive_successful_moves', 0),
+            "brain_movement_weight": getattr(a, 'brain_movement_weight', 0.5),
+            "temperature_tolerance_cold": getattr(a, 'temperature_tolerance_cold', 35.5),
+            "temperature_tolerance_hot": getattr(a, 'temperature_tolerance_hot', 38.5),
+            "resting_metabolism_multiplier": getattr(a, 'resting_metabolism_multiplier', 0.3),
+        }
+
+    def _archive_nxer(a: NxEr):
+        nxer_archive[a.id] = _serialize_nxer(a)
+
+    def _archive_all_nxers():
+        for a in nxers.values():
+            _archive_nxer(a)
     
     def spawn_child(A: NxEr, B: NxEr, near_pos: Tuple[int, int]) -> Optional[NxEr]:
         """Creates a new NxEr from two parents."""
@@ -626,6 +787,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
             stats=NxErStats(),
             visited=set(),
             parents=(A.name, B.name),
+            parent_ids=(A.id, B.id),
             ancestors=child_ancestors,
             rounds_survived=0,
             mate_cooldown_until_tick=0,
@@ -665,10 +827,27 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
         child.pos = find_free(allow_sea=can_sea, allow_land=can_land, near=near_pos, search_radius=3) or near_pos
         nxers[child.id] = child
         occupied.add(child.pos)
+        _archive_nxer(child)
         A.stats.mates_performed += 1
         B.stats.mates_performed += 1
         births_count += 1
         child.stats.fitness_score = (A.stats.fitness_score + B.stats.fitness_score) / 2
+
+        get_data_logger().log_nxer_event(
+            step_tick,
+            'born',
+            child.id,
+            {
+                'name': child.name,
+                'founder': False,
+                'parent_0': A.id,
+                'parent_1': B.id,
+                'parent_name_0': A.name,
+                'parent_name_1': B.name,
+                'ancestors_count': len(child.ancestors),
+                'clan_id': new_clan_id,
+            }
+        )
         
         # Paper Claim: Norepinephrine activated somewhat by the birth of offspring per se
         _neuromod_boost(A.net.neuromodulators, 'norepinephrine', 0.15, A.net.params)
@@ -680,6 +859,22 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
         a = make_nxer()
         nxers[a.id] = a
         occupied.add(a.pos)
+        _archive_nxer(a)
+        get_data_logger().log_nxer_event(
+            0,
+            'born',
+            a.id,
+            {
+                'name': a.name,
+                'founder': True,
+                'parent_0': None,
+                'parent_1': None,
+                'parent_name_0': None,
+                'parent_name_1': None,
+                'ancestors_count': 0,
+                'clan_id': a.clan_id,
+            }
+        )
     
     # CHANGE in V2.0: Start unpaused if auto_start is True
     running = True
@@ -693,7 +888,10 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
     
     # Time tracking for Limit Mode
     game_start_real_time = time.time()
-    
+    # Time tracking for Limit Mode    
+    round_start_real_time = time.time() # <--- NEW: Track current round start time
+
+
     def push_effect(kind: str, pos: Tuple[int, int]): effects.append({'kind': kind, 'pos': pos, 'start': step_tick})
     
     # --- Save/Load Functions ---
@@ -703,11 +901,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
         default = save_name or f"{config._session_id}_nxer_{a.name}_{_now_str()}.json"
         path = _pick_save_file(default)
         if not path: return
-        data = {"meta": {"created": _now_str(), "type": "NxEr", "session_id": config._session_id, "game_id": config._game_id}, "nxer": {"id": a.id, "name": a.name, "color": a.color, "pos": a.pos, "can_land": a.can_land, "can_sea": a.can_sea, 
-        "food": a.food, "is_male": a.is_male, "alive": a.alive, "born_ts": a.born_ts, "died_ts": a.died_ts, "last_inputs": a.last_inputs, "last_outputs": a.last_outputs, "ticks_per_action": a.ticks_per_action, "tick_accum": a.tick_accum, "harvesting": a.harvesting, "mating_with": a.mating_with, "mating_end_tick": a.mating_end_tick, "visited": list(a.visited), "dopamine_boost_ticks": a.dopamine_boost_ticks, "_last_O4": a._last_O4, "mating_intent_until_tick": a.mating_intent_until_tick, "parents": list(a.parents) if a.parents else [None, None], "mate_cooldown_until_tick": a.mate_cooldown_until_tick, "last_move_tick": a.last_move_tick, "last_pos": a.last_pos, "stats": asdict(a.stats), "net": a.net.to_dict(),
-                "receptor_activations": getattr(a, 'receptor_activations', {}),
-                "astrocyte_activity": getattr(a, 'astrocyte_activity', 0.0),
-        "vision_range": a.vision_range, "smell_radius": a.smell_radius, "heading": a.heading, "clan_id": a.clan_id, "ancestors": a.ancestors, "rounds_survived": a.rounds_survived}}
+        data = {"meta": {"created": _now_str(), "type": "NxEr", "session_id": config._session_id, "game_id": config._game_id}, "nxer": _serialize_nxer(a)}
         if get_data_logger().log_level >= 2:
             data["nxer"]["network_detailed"] = _extract_detailed_network_state(a.net)
         with open(path, "w") as f: json.dump(data, f)
@@ -727,13 +921,14 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
         alive_names = {a.name for a in nxers.values() if a.alive}
         while name in alive_names: name = f"{base_name}{counter}"; counter += 1
         a = NxEr(id=(max(nxers.keys()) + 1) if nxers else 0, name=name, color=tuple(nd.get("color", (200, 200, 200))), pos=pos, can_land=nd["can_land"], can_sea=nd["can_sea"], 
-        net=net, food=float(StartFood), is_male=bool(nd.get("is_male", random.random() < 0.5)), alive=True, born_ts=time.time(), died_ts=None, last_inputs=tuple(nd.get("last_inputs", (0, 0, 0, 0, 0, 0, 0, 0, 0))), last_outputs=tuple(nd.get("last_outputs", (0, 0, 0, 0, 0, 0))), ticks_per_action=int(nd.get("ticks_per_action", 1)), tick_accum=int(nd.get("tick_accum", 0)), harvesting=nd["harvesting"], mating_with=nd["mating_with"], mating_end_tick=nd["mating_end_tick"], stats=NxErStats(**nd.get("stats", {})), visited=set(map(tuple, nd.get("visited", []))), dopamine_boost_ticks=int(nd.get("dopamine_boost_ticks", 0)), _last_O4=int(nd.get("_last_O4", 0)), mating_intent_until_tick=int(nd.get("mating_intent_until_tick", 0)), parents=tuple(nd.get("parents", [None, None])), mate_cooldown_until_tick=int(nd.get("mate_cooldown_until_tick", 0)), last_move_tick=int(nd.get("last_move_tick", step_tick)), last_pos=tuple(nd.get("last_pos", pos)),
+        net=net, food=float(StartFood), is_male=bool(nd.get("is_male", random.random() < 0.5)), alive=True, born_ts=time.time(), died_ts=None, last_inputs=tuple(nd.get("last_inputs", (0, 0, 0, 0, 0, 0, 0, 0, 0))), last_outputs=tuple(nd.get("last_outputs", (0, 0, 0, 0, 0, 0))), ticks_per_action=int(nd.get("ticks_per_action", 1)), tick_accum=int(nd.get("tick_accum", 0)), harvesting=nd["harvesting"], mating_with=nd["mating_with"], mating_end_tick=nd["mating_end_tick"], stats=NxErStats(**nd.get("stats", {})), visited=set(map(tuple, nd.get("visited", []))), dopamine_boost_ticks=int(nd.get("dopamine_boost_ticks", 0)), _last_O4=int(nd.get("_last_O4", 0)), mating_intent_until_tick=int(nd.get("mating_intent_until_tick", 0)), parents=tuple(nd.get("parents", [None, None])), parent_ids=tuple(nd.get("parent_ids", [nd.get("parent_0"), nd.get("parent_1")])) if (nd.get("parent_ids") is not None or nd.get("parent_0") is not None or nd.get("parent_1") is not None) else (None, None), ancestors=list(nd.get("ancestors", [])), rounds_survived=int(nd.get("rounds_survived", 0)), mate_cooldown_until_tick=int(nd.get("mate_cooldown_until_tick", 0)), last_move_tick=int(nd.get("last_move_tick", step_tick)), last_pos=tuple(nd.get("last_pos", pos)),
                  vision_range=nd.get("vision_range", 5), smell_radius=nd.get("smell_radius", 3), heading=nd.get("heading", 0), clan_id=nd.get("clan_id", None))
         a.tick_accum = 0; a.harvesting = None; a.mating_with = None; a.mating_end_tick = None; a.mating_intent_until_tick = 0; a.mate_cooldown_until_tick = 0
         nxers[a.id] = a
         if get_data_logger().log_level >= 2 and "network_detailed" in nd:
             _apply_detailed_network_state(a.net, nd["network_detailed"])
         occupied.add(a.pos)
+        _archive_nxer(a)
         print(f"[LOAD NxEr] spawned {a.name} at {a.pos}")
         # Neuraxon v2.0: Restore per-NxEr v2.0 state
         a.receptor_activations = nd.get('receptor_activations', {})
@@ -767,9 +962,10 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
         
         vision = random.randint(2, 15); smell = random.randint(2, 5); heading = random.randint(0, 7)
         
-        a = NxEr(id=(max(nxers.keys()) + 1) if nxers else 0, name=name, color=_rand_color(list(used_colors)), pos=pos, can_land=can_land, can_sea=can_sea, net=net, food=float(StartFood), is_male=random.random() < 0.5, alive=True, born_ts=time.time(), died_ts=None, last_inputs=(0, 0, 0, 0, 0, 0, 0, 0, 0), ticks_per_action=max(1, int(GlobalTimeSteps / max(1, params.simulation_steps))), tick_accum=0, harvesting=None, mating_with=None, mating_end_tick=None, stats=NxErStats(), visited=set([pos]), dopamine_boost_ticks=0, _last_O4=0, mating_intent_until_tick=0, parents=(None, None), mate_cooldown_until_tick=0, last_move_tick=step_tick, last_pos=pos,
+        a = NxEr(id=(max(nxers.keys()) + 1) if nxers else 0, name=name, color=_rand_color(list(used_colors)), pos=pos, can_land=can_land, can_sea=can_sea, net=net, food=float(StartFood), is_male=random.random() < 0.5, alive=True, born_ts=time.time(), died_ts=None, last_inputs=(0, 0, 0, 0, 0, 0, 0, 0, 0), ticks_per_action=max(1, int(GlobalTimeSteps / max(1, params.simulation_steps))), tick_accum=0, harvesting=None, mating_with=None, mating_end_tick=None, stats=NxErStats(), visited=set([pos]), dopamine_boost_ticks=0, _last_O4=0, mating_intent_until_tick=0, parents=(None, None), parent_ids=(None, None), mate_cooldown_until_tick=0, last_move_tick=step_tick, last_pos=pos,
                  vision_range=vision, smell_radius=smell, heading=heading, clan_id=None)
         used_colors.add(a.color); nxers[a.id] = a; occupied.add(a.pos)
+        _archive_nxer(a)
         print(f"[LOAD NxVizer] spawned {a.name} at {a.pos}")
     
     def _extract_detailed_network_state(net: NeuraxonNetwork) -> dict:
@@ -841,6 +1037,8 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
         # Include session ID in filename
         name = name or f"{config._session_id}_nx_world_save_{_now_str()}.json"
         
+        _archive_all_nxers()
+
         data = {
             "meta": {
                 "created": _now_str(), 
@@ -864,61 +1062,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                 'active': v['active']
             } for k, v in config._clan_history.items()},
             "world": {"N": world.N, "grid": world.grid},
-            "nxers": [{
-                "id": a.id, 
-                "name": a.name, 
-                "color": a.color, 
-                "pos": a.pos, 
-                "can_land": a.can_land, 
-                "can_sea": a.can_sea, 
-                "food": a.food, 
-                "is_male": a.is_male, 
-                "alive": a.alive, 
-                "born_ts": a.born_ts, 
-                "died_ts": a.died_ts,
-                "last_inputs": a.last_inputs, 
-                "last_outputs": a.last_outputs, 
-                "ticks_per_action": a.ticks_per_action, 
-                "tick_accum": a.tick_accum, 
-                "harvesting": a.harvesting, 
-                "mating_with": a.mating_with, 
-                "mating_end_tick": a.mating_end_tick, 
-                "visited": list(a.visited), 
-                "dopamine_boost_ticks": a.dopamine_boost_ticks, 
-                "_last_O4": a._last_O4, 
-                "mating_intent_until_tick": a.mating_intent_until_tick, 
-                "parents": list(a.parents) if a.parents else [None, None],
-                "ancestors": a.ancestors,
-                "rounds_survived": a.rounds_survived,
-                "mate_cooldown_until_tick": a.mate_cooldown_until_tick, 
-                "last_move_tick": a.last_move_tick, 
-                "last_pos": a.last_pos, 
-                "stats": asdict(a.stats), 
-                "net": a.net.to_dict(),
-                "receptor_activations": getattr(a, 'receptor_activations', {}),
-                "astrocyte_activity": getattr(a, 'astrocyte_activity', 0.0),
-                "vision_range": a.vision_range, 
-                "smell_radius": a.smell_radius, 
-                "heading": a.heading, 
-                "clan_id": a.clan_id,
-                # NEW v3.0
-                "body_temperature": getattr(a, 'body_temperature', 37.0),
-                "circadian_phase": getattr(a, 'circadian_phase', 0.0),
-                "is_resting": getattr(a, 'is_resting', False),
-                "proprioceptron_rock_hits": a.proprioceptron.total_rock_hits if hasattr(a, 'proprioceptron') else 0,
-                "proprioceptron_forced_turns": a.proprioceptron.forced_turn_count if hasattr(a, 'proprioceptron') else 0,
-                # NEW v3.1: Additional proprioceptron and brain data
-                "proprioceptron_successful_streak": a.proprioceptron.successful_move_streak if hasattr(a, 'proprioceptron') else 0,
-                "proprioceptron_last_move_result": a.proprioceptron.last_move_result if hasattr(a, 'proprioceptron') else 0,
-                "consecutive_successful_moves": getattr(a, '_consecutive_successful_moves', 0),
-                "brain_movement_weight": getattr(a, 'brain_movement_weight', 0.5),
-                # v4.0: FIX — Export inherited metabolism attributes to JSON
-                # Results-97: Still NaN because save_state never included these fields
-                # GenParket reads nxer.get('temperature_tolerance_cold') → None → NaN
-                "temperature_tolerance_cold": getattr(a, 'temperature_tolerance_cold', 35.5),
-                "temperature_tolerance_hot": getattr(a, 'temperature_tolerance_hot', 38.5),
-                "resting_metabolism_multiplier": getattr(a, 'resting_metabolism_multiplier', 0.3),
-            } for a in nxers.values()],
+            "nxers": [nxer_archive[k] for k in sorted(nxer_archive)],
             "foods": [{"id": f.id, "anchor": f.anchor, "pos": f.pos, "alive": f.alive, "respawn_at_tick": f.respawn_at_tick, "remaining": f.remaining, "progress": f.progress} for f in foods.values()],
             "all_time_best": {k: [{"name": a.name, "is_male": a.is_male, "stats": asdict(a.stats), "net": a.net.to_dict(),
                 "receptor_activations": getattr(a, 'receptor_activations', {}),
@@ -1020,6 +1164,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                 _last_O4=int(nd.get("_last_O4", 0)), 
                 mating_intent_until_tick=int(nd.get("mating_intent_until_tick", 0)), 
                 parents=tuple(nd.get("parents", [None, None])),
+                parent_ids=tuple(nd.get("parent_ids", [nd.get("parent_0"), nd.get("parent_1")])) if (nd.get("parent_ids") is not None or nd.get("parent_0") is not None or nd.get("parent_1") is not None) else (None, None),
                 ancestors=nd.get("ancestors", []),
                 rounds_survived=nd.get("rounds_survived", 0),
                 mate_cooldown_until_tick=int(nd.get("mate_cooldown_until_tick", 0)), 
@@ -1035,7 +1180,9 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                 is_resting=nd.get("is_resting", False),
                 proprioceptron=Proprioceptron(
                     total_rock_hits=nd.get("proprioceptron_rock_hits", 0),
-                    forced_turn_count=nd.get("proprioceptron_forced_turns", 0))
+                    forced_turn_count=nd.get("proprioceptron_forced_turns", 0),
+                    brain_warning_count=nd.get("proprioceptron_brain_warnings", 0),
+                    brain_avoidance_turn_count=nd.get("proprioceptron_brain_turns", 0))
             )
             # NEW v3.1
             if hasattr(a, 'proprioceptron'):
@@ -1058,6 +1205,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
             a.last_outputs = last_outputs
             
             nxers[a.id] = a
+            _archive_nxer(a)
             if a.alive: occupied.add(a.pos)
         
         foods = {}
@@ -1201,6 +1349,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
     def restart_game_with_champions():
         nonlocal world, nxers, foods, occupied, births_count, deaths_count, effects, game_index, used_colors
         
+        _archive_all_nxers()
         update_all_time_best()
         champs = champions_from_last_game()
         
@@ -1244,6 +1393,10 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                 'active': True
             }
             
+            carryover_ancestors = [a.name]
+            carryover_ancestors.extend(getattr(a, 'ancestors', []) or [])
+            carryover_ancestors = list(dict.fromkeys(carryover_ancestors))
+
             nx = NxEr(
                 id=config._next_nxer_id, 
                 name=new_name, 
@@ -1257,8 +1410,9 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                 ticks_per_action=max(1, int(GlobalTimeSteps / max(1, net_copy.params.simulation_steps))), 
                 stats=NxErStats(), 
                 visited=set([pos]), 
-                parents=a.parents if hasattr(a, 'parents') else (None, None),
-                ancestors=a.ancestors.copy() if hasattr(a, 'ancestors') else [],
+                parents=(a.name, None),
+                parent_ids=(a.id, None),
+                ancestors=carryover_ancestors,
                 rounds_survived=a.rounds_survived + 1 if hasattr(a, 'rounds_survived') else 1,
                 mate_cooldown_until_tick=0, 
                 last_move_tick=0, 
@@ -1279,12 +1433,45 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
             config._next_nxer_id += 1
             nxers[nx.id] = nx
             occupied.add(nx.pos)
+            _archive_nxer(nx)
+            get_data_logger().log_nxer_event(
+                step_tick,
+                'born',
+                nx.id,
+                {
+                    'name': nx.name,
+                    'founder': False,
+                    'parent_0': a.id,
+                    'parent_1': None,
+                    'parent_name_0': a.name,
+                    'parent_name_1': None,
+                    'ancestors_count': len(nx.ancestors),
+                    'clan_id': clan_id,
+                    'carryover': True,
+                }
+            )
         
         # Fill remaining slots with new NxErs
         while len(nxers) < StartingNxErs:
             a = make_nxer()
             nxers[a.id] = a
             occupied.add(a.pos)
+            _archive_nxer(a)
+            get_data_logger().log_nxer_event(
+                step_tick,
+                'born',
+                a.id,
+                {
+                    'name': a.name,
+                    'founder': True,
+                    'parent_0': None,
+                    'parent_1': None,
+                    'parent_name_0': None,
+                    'parent_name_1': None,
+                    'ancestors_count': 0,
+                    'clan_id': a.clan_id,
+                }
+            )
         
         print(f"[RESTART] Game #{game_index} started with {len(champs)} champions and {len(nxers) - len(champs)} new NxErs.")
 
@@ -1393,15 +1580,23 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                     update_all_time_best()
                     
                     if save_on_round_end:
-                    # 1. Autosave the round
+                        # 1. Autosave the round
                         timestamp = _now_str().replace(":", "-")
-                        #game_id = "".join([str(random.randint(0, 9)) for _ in range(10)])
                         filename = f"{config._session_id}_{config._game_id}_{game_index}_Completed_{timestamp}.json"
                         save_state(filename)
                         print(f"[SAVING ROUND] {game_index} saved as {filename}")
+                        
+                    # --- MAX ROUNDS CHECK ---
+                    if max_rounds is not None and game_index >= max_rounds:
+                        print(f"Max rounds ({max_rounds}) reached. Stopping game.")
+                        running = False
+                        continue
                                         
                     game_over = False; paused = False; restart_game_with_champions(); step_tick = 0; accumulator = 0.0
                     renderer.clear_detail(); game_over_start_time = None; user_declined_restart = False
+                    
+                    # Reset the round timer for the new round
+                    round_start_real_time = time.time()
                     
             renderer.handle_input(frame_dt)
             
@@ -1415,8 +1610,9 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                         break
             
             for _ in range(steps_to_process):
-                step_tick += 1                
-                data_logger.log_tick(step_tick, nxers)
+                step_tick += 1
+                # v4.1: Throttle detailed logging — Level 2 analytics every 10 ticks
+                data_logger.log_tick(step_tick, nxers, full_analytics=(step_tick % 10 == 0))
                 # --- A. Update Game World State & Agent Vitals ---
                 effects[:] = [ef for ef in effects if (step_tick - ef['start']) < GlobalTimeSteps]
                 
@@ -1434,20 +1630,15 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                     metabolic_circadian_mult = 1.0
                     is_night = False
                 
-                # Build occupant proximity map for temperature calculations
-                occupant_positions = {a.pos: a.id for a in nxers.values() if a.alive}
+                # v4.1: Rebuild spatial grid once per tick (O(N)) — enables O(1) neighbor counting
+                _agent_grid.clear()
+                for a in nxers.values():
+                    if a.alive:
+                        _agent_grid.insert(a.id, a.pos)
                 
                 def count_nearby_nxers(pos, radius=2):
-                    """Count NxErs within a given radius."""
-                    count = 0
-                    for dy in range(-radius, radius + 1):
-                        for dx in range(-radius, radius + 1):
-                            if dx == 0 and dy == 0:
-                                continue
-                            check_pos = wrap_pos((pos[0] + dx, pos[1] + dy))
-                            if check_pos in occupant_positions:
-                                count += 1
-                    return count
+                    """Count NxErs within a given radius — O(1) via spatial grid."""
+                    return _agent_grid.count_nearby(pos, radius)
                 
                 for a in nxers.values():
                     if not a.alive: continue
@@ -1469,11 +1660,11 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                         
                         # Apply circadian modulation to neuromodulators
                         for mod, mod_val in circadian_mods.items():
-                            current = a.net.neuromodulators.get(mod, 0.12)
-                            baseline = getattr(a.net.params, f'{mod}_baseline', 0.12)
-                            # Gradual modulation toward circadian-adjusted baseline
-                            target = baseline + mod_val
-                            a.net.neuromodulators[mod] = current + 0.01 * (target - current)
+                            # v109 FIX: Use additive modulation with autoreceptor gating,
+                            # NOT target-chasing. Target-chasing accumulates when already above
+                            # baseline because target > current > baseline creates upward pressure.
+                            # Additive injection with autoreceptor feedback self-limits.
+                            _neuromod_boost(a.net.neuromodulators, mod, mod_val * FIXED_DT, a.net.params)
                         
                         # v4.0: Resting-circadian coupling — STRONGER
                         # Results-97: day_night vs resting r=0.00024 — completely broken
@@ -1522,6 +1713,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                         a.alive = False; a.died_ts = time.time(); deaths_count += 1
                         data_logger.log_nxer_event(step_tick, 'died', a.id, {'cause': 'starvation', 'name': a.name})
                         data_logger.update_nxer_stats(a)
+                        _archive_nxer(a)
                         if a.pos in occupied: occupied.discard(a.pos)
                         push_effect('skull', a.pos)
                 for a in nxers.values():
@@ -1531,7 +1723,8 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                         a.mate_cooldown_until_tick = max(a.mate_cooldown_until_tick, step_tick + mate_cooldown_ticks)
 
                 # --- B. Gather and Execute Network Updates (Sequential Optimization) ---
-                occupant_at = {a.pos: a.id for a in nxers.values() if a.alive}
+                # v4.1: Use spatial grid for occupant lookups (already rebuilt above)
+                occupant_at = _agent_grid._pos_to_id
                 food_at = {f.pos: 1 for f in foods.values() if f.alive}
                 
                 # Track which NxErs ate food this tick for temperature
@@ -1607,10 +1800,15 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                             if getattr(a, 'is_resting', False):
                                 # Reduce dopamine during rest (less reward-seeking)
                                 a.net.neuromodulators['dopamine'] = max(0.05, da_level * 0.9)
-                                # v4.0: Elevate serotonin during rest (additive + autoreceptor)
-                                # BIOINSPIRED: 5-HT release during NREM sleep is a fixed vesicle event,
-                                # not a percentage amplification; autoreceptors limit at high concentration
-                                _neuromod_boost(a.net.neuromodulators, 'serotonin', 0.03, a.net.params)
+                                ser_base = getattr(a.net.params, 'serotonin_baseline', 0.12)
+                                # v110 FIX: Tighter ceiling (1.5× baseline, was 2.0×) and
+                                # reduced boost (0.015, was 0.03). Even with v108's ceiling
+                                # check, 2.0× baseline = 0.24 for 5-HT — still too permissive.
+                                # BIOINSPIRED: Serotonergic raphe neurons reduce firing during
+                                # NREM sleep (McGinty & Harper 1976). The small residual 5-HT
+                                # release during rest should be modest, not a saturation pump.
+                                if ser_level < ser_base * 1.5:
+                                    _neuromod_boost(a.net.neuromodulators, 'serotonin', 0.015, a.net.params)
 
                             # Hyperactivity scenario*: High DA but low ACh.
                             is_hyperactive = (da_level > 0.6 and ach_level < 0.3)
@@ -1633,7 +1831,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                             if a.food < (StartFood * 0.2): hunger_val = -1
                             
                             # 5. Sight (Line of sight in heading)
-                            sight_val = -1
+                            sight_val = 0
                             seen_neighbors_count = 0
                             seen_different_clan = False
                             vx, vy = DIR_OFFSETS[a.heading]
@@ -1658,9 +1856,9 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                                     found_obj = True;
                                     # [DOPAMINE UPDATE] Anticipation (Possible Mating)
                                     if a.is_male != other_a.is_male and can_mate(a, other_a, step_tick):
-                                        _neuromod_boost(a.net.neuromodulators, 'dopamine', 0.05, a.net.params)
+                                        _neuromod_boost(a.net.neuromodulators, 'dopamine', 0.02, a.net.params)
                                     break
-                            if not found_obj: sight_val = -1
+                            if not found_obj: sight_val = 0
                             
                             # Paper Claim: NE activated by high population density and proximity to members of different clans
                             ne_boost = 0.0
@@ -1670,7 +1868,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                                 _neuromod_boost(a.net.neuromodulators, 'norepinephrine', ne_boost, a.net.params)
                             
                             # 6. Smell (Square Radius)
-                            smell_val = -1
+                            smell_val = 0
                             found_food_smell = False; found_nxer_smell = False
                             for dy in range(-a.smell_radius, a.smell_radius + 1):
                                 for dx in range(-a.smell_radius, a.smell_radius + 1):
@@ -1684,7 +1882,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                                 # Paper Claim: "Dopamine – triggered by olfactory... food cues"
                                 _neuromod_boost(a.net.neuromodulators, 'dopamine', 0.02, a.net.params)
                             elif found_nxer_smell: smell_val = 0
-                            else: smell_val = -1
+                            else: smell_val = 0
 
                             # =========================================================
                             # INPUT 6: DAY/NIGHT SIGNAL (NEW v3.1)
@@ -1725,24 +1923,52 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                             # =========================================================
                             # INPUT 8: PROPRIOCEPTION SIGNAL (NEW v3.1)
                             # =========================================================
-                            # BIOINSPIRED: Body awareness of movement success/failure history
-                            # Trinary: -1=repeatedly blocked, 0=normal, 1=clear path
+                            # BIOINSPIRED: Proprioception must reach the brain BEFORE
+                            # the reflex layer overrides behaviour. Use both collision
+                            # history and a one-step lookahead of the current heading.
                             proprio_val = 0
                             prop = getattr(a, 'proprioceptron', None)
+                            a._proprio_warning_active = False
+                            a._proprio_warning_source = None
+                            a._proprio_warning_heading = getattr(a, 'heading', 0)
                             if prop is not None:
-                                # Check recent movement success
                                 clear_threshold = getattr(a.net.params, 'proprioceptron_clear_path_threshold', 5)
-                                if prop.consecutive_blocked >= 2:
-                                    proprio_val = -1  # Repeatedly blocked - suggests obstacle
+                                force_threshold = getattr(a.net.params, 'proprioceptron_force_turn_threshold', 3)
+                                heading_to_check = getattr(a, 'heading', 0)
+                                history_warning = prop.should_warn_brain(heading_to_check, force_threshold)
+                                lookahead_warning = _heading_would_be_blocked(a, heading_to_check)
+
+                                if history_warning or lookahead_warning:
+                                    proprio_val = -1
+                                    a._proprio_warning_active = True
+                                    a._proprio_warning_heading = heading_to_check
+                                    if history_warning and lookahead_warning:
+                                        a._proprio_warning_source = 'history+lookahead'
+                                    elif history_warning:
+                                        a._proprio_warning_source = 'history'
+                                    else:
+                                        a._proprio_warning_source = 'lookahead'
+
+                                    if prop.register_brain_warning(step_tick):
+                                        data_logger.log_nxer_event(
+                                            step_tick,
+                                            'proprioceptron_brain_warning',
+                                            a.id,
+                                            {
+                                                'heading': heading_to_check,
+                                                'source': a._proprio_warning_source,
+                                                'consecutive_blocked': prop.consecutive_blocked,
+                                                'rock_hits_same_heading': sum(1 for h in prop.rock_hit_history if h == heading_to_check)
+                                            }
+                                        )
                                 elif prop.consecutive_blocked == 0 and len(prop.rock_hit_history) == 0:
-                                    # Check if we've had clear movement for a while
                                     if hasattr(a, '_consecutive_successful_moves'):
                                         if a._consecutive_successful_moves >= clear_threshold:
-                                            proprio_val = 1  # Clear path - confident movement
+                                            proprio_val = 1
                                     else:
                                         a._consecutive_successful_moves = 0
                                 else:
-                                    proprio_val = 0  # Normal - mixed history
+                                    proprio_val = 0
                             
                             # Combine with physical inputs from previous step (UPDATED v3.1: 9 inputs)
                             inputs = list(a.last_inputs)
@@ -1770,13 +1996,25 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                             a.net.params.metabolic_rate *= (1.0 + METABOLIC_RAMP_PER_SEC * idle_seconds)
                         
                         if a.dopamine_boost_ticks > 0:
-                            nd = a.net.neuromodulators
-                            nd['dopamine'] = max(nd.get('dopamine', 0.12), 0.9); nd['serotonin'] = max(nd.get('serotonin', 0.12), 0.6)
+                            # v110 FIX (M18): Use _neuromod_boost with autoreceptor gating
+                            # instead of hard floor at DA=0.9, 5-HT=0.6.
+                            # PROBLEM: max(current, 0.9) set DA to AT LEAST 0.9 every tick
+                            # during reward, completely overriding all decay mechanics.
+                            # With ~5-10 boost ticks per food event and frequent food finds,
+                            # this alone kept DA pinned near ceiling permanently.
+                            # BIOINSPIRED: Reward triggers a phasic DA burst (Schultz 1997)
+                            # that is autoreceptor-limited, not a sustained concentration floor.
+                            # v113 FIX (M25): 0.15→0.06. Phasic reward burst, not
+                            # sustained elevation. With dopamine_boost_ticks (~5-10),
+                            # total per-food DA = 0.06×7 = 0.42 (was 0.15×7 = 1.05).
+                            _neuromod_boost(a.net.neuromodulators, 'dopamine', 0.06, a.net.params)
+                            _neuromod_boost(a.net.neuromodulators, 'serotonin', 0.08, a.net.params)
                             a.dopamine_boost_ticks -= 1
                         
                         # --- SIMULATION EXECUTION (Directly on object) ---
                         steps_to_sim = max(1, a.net.params.simulation_steps // GlobalTimeSteps)
                         for _ in range(steps_to_sim):
+                            a.net.current_game_tick = step_tick
                             a.net.set_input_states(list(a.last_inputs))
                             a.net.simulate_step()
 
@@ -1855,23 +2093,39 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                                 a.is_resting = True
                         
                         dx = -O1; dy = -O2
+                        pre_motor_heading = getattr(a, 'heading', 0)
+                        warned_heading = getattr(a, '_proprio_warning_heading', pre_motor_heading)
                         # Apply temperature-based movement modification
                         if abs(dx) > 0: dx = int(dx * temp_movement_mod) if temp_movement_mod > 1 else dx
                         if abs(dy) > 0: dy = int(dy * temp_movement_mod) if temp_movement_mod > 1 else dy
-                        a.heading = get_heading_from_move(dx, dy, a.heading)
+                        chosen_heading = get_heading_from_move(dx, dy, pre_motor_heading)
+                        a.heading = chosen_heading
                         a._pending_move = (dx, dy, O3, O4, O5)
                         
                         # =========================================================
                         # PROPRIOCEPTRON: BRAIN-MOVEMENT INTEGRATION (NEW v3.0)
                         # =========================================================
-                        # Check if we should override movement based on collision history
+                        # The warning must exist BEFORE the forward pass. At this stage we
+                        # only observe whether the brain used that warning to change course,
+                        # and then fall back to a reflexive forced turn if still needed.
                         prop = getattr(a, 'proprioceptron', None)
                         if prop is not None:
-                            # Get brain's intended heading
                             brain_heading = a.heading
-                            
-                            # Check if we need to force a turn
                             force_threshold = getattr(a.net.params, 'proprioceptron_force_turn_threshold', 3)
+
+                            if getattr(a, '_proprio_warning_active', False) and (dx != 0 or dy != 0) and brain_heading != warned_heading:
+                                prop.register_brain_avoidance_turn()
+                                data_logger.log_nxer_event(
+                                    step_tick,
+                                    'proprioceptron_brain_turn',
+                                    a.id,
+                                    {
+                                        'old_heading': warned_heading,
+                                        'new_heading': brain_heading,
+                                        'source': getattr(a, '_proprio_warning_source', 'unknown')
+                                    }
+                                )
+                            
                             if prop.should_force_turn(brain_heading, force_threshold):
                                 # Override with proprioceptron suggestion
                                 new_heading = prop.get_suggested_heading(brain_heading)
@@ -1880,7 +2134,6 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                                 
                                 # Recalculate movement based on new heading
                                 vx, vy = DIR_OFFSETS.get(new_heading, (0, 0))
-                                # Blend brain output magnitude with new direction
                                 move_magnitude = max(abs(dx), abs(dy), 1)
                                 dx = vx * move_magnitude
                                 dy = vy * move_magnitude
@@ -1890,15 +2143,11 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                                 data_logger.log_nxer_event(step_tick, 'proprioceptron_forced_turn', a.id, 
                                     {'old_heading': brain_heading, 'new_heading': new_heading})
 
-                # Track successful moves for proprioception input
+                # v4.1: Merged proprioception tracking + resting temperature into single pass
                 for a in nxers.values():
                     if not a.alive: continue
                     if not hasattr(a, '_consecutive_successful_moves'):
                         a._consecutive_successful_moves = 0
-                        
-                # v4.0: Update resting body temperature (drops when resting)
-                for a in nxers.values():
-                    if not a.alive: continue
                     if getattr(a, 'is_resting', False):
                         temp_drop = getattr(a.net.params, 'resting_temp_drop_rate', 0.1) * FIXED_DT
                         a.body_temperature = max(35.0, getattr(a, 'body_temperature', 37.0) - temp_drop)
@@ -1922,8 +2171,8 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                         continue
                     pm = getattr(a, "_pending_move", None)
                     # UPDATED v3.1: Standard input now 9 values
-                    terrain_val = (1 if world.terrain(a.pos) == T_LAND else (0 if world.terrain(a.pos) == T_SEA else -1))
-                    std_input = (-1, 0, terrain_val, 0, -1, -1, 0, 0, 0)
+                    terrain_val = 0 if world.terrain(a.pos) in (T_LAND, T_SEA) else -1
+                    std_input = (0, 0, terrain_val, 0, 0, 0, 0, 0, 0)
                     if pm is None: a.last_inputs = std_input; continue
                     
                     dx, dy, O3, O4, O5 = pm; delattr(a, "_pending_move")
@@ -1970,6 +2219,21 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                             # Track consecutive blocks
                             if hasattr(nxer, '_consecutive_successful_moves'):
                                 nxer._consecutive_successful_moves = 0
+                            
+                            # =========================================================
+                            # v107 FIX (M02): DOPAMINE PUNISHMENT ON COLLISION
+                            # =========================================================
+                            # BIOINSPIRED: Hitting a rock = negative prediction error.
+                            # The agent expected to move but was blocked → DA dip.
+                            # Paper: "Dopamine – triggered by... prediction errors"
+                            # This creates the error signal STDP needs to learn
+                            # input_8 (blocked) → change output_0/1 (new direction)
+                            da_punishment = getattr(nxer.net.params, 'collision_da_punishment', 0.15)
+                            ne_startle = getattr(nxer.net.params, 'collision_ne_boost', 0.08)
+                            nd = nxer.net.neuromodulators
+                            nd['dopamine'] = max(0.01, nd.get('dopamine', 0.12) - da_punishment)
+                            # NE startle response — alerting signal
+                            _neuromod_boost(nd, 'norepinephrine', ne_startle, nxer.net.params)
                             
                             # =========================================================
                             # PROPRIOCEPTRON: RECORD ROCK HIT (NEW v3.0)
@@ -2055,7 +2319,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                                 A.net.neuromodulators['serotonin'] = max(0.0, ser_A * 0.98)
                                 
                                 # Stress scenario*: High DA (Reward), very high NA (Stress).
-                                A.net.neuromodulators['dopamine'] = min(2.0, A.net.neuromodulators.get('dopamine', 0.12) + 0.1)
+                                A.net.neuromodulators['dopamine'] = min(2.0, A.net.neuromodulators.get('dopamine', 0.12) + 0.04)
                                 A.net.neuromodulators['norepinephrine'] = min(2.0, A.net.neuromodulators.get('norepinephrine', 0.12) + 0.2)
                             
                     A._last_O4 = O4; handled_swap.add(aid); handled_swap.add(occ)
@@ -2078,7 +2342,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                             # v4.0: FIX - Input 0 = 1 only when food found, 0 for normal success
                             prev[0] = 1  # Food found = +1
                             prev[1] = 0  # No encounter (food, not NxEr)
-                            prev[2] = (1 if tt == T_LAND else 0)  # Terrain type
+                            prev[2] = 0 if tt in (T_LAND, T_SEA) else -1  # Terrain constraint
                             # v4.0: Update proprioceptron for food success
                             prop = getattr(a, 'proprioceptron', None)
                             if prop:
@@ -2103,10 +2367,13 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                                     a.net.neuromodulators['dopamine'] + (base_reward * surprise_multiplier)
                                 )
                                 
-                                # Exploration scenario: If something works, DA increases and ACh increases.
-                                a.net.neuromodulators['acetylcholine'] = min(
-                                    2.0,
-                                    a.net.neuromodulators.get('acetylcholine', 0.12) + 0.05
+                                # v117 FIX: successful reward should shift the system toward DA-led exploitation
+                                # rather than co-elevating ACh into a chronic exploratory state.
+                                ach_now = a.net.neuromodulators.get('acetylcholine', 0.12)
+                                ach_floor = getattr(a.net.params, 'acetylcholine_baseline', 0.12) * 0.75
+                                a.net.neuromodulators['acetylcholine'] = max(
+                                    ach_floor,
+                                    ach_now - (0.02 * surprise_multiplier)
                                 )
                                 
                                 # Paper Claim: NE activated by proximity to food after a rise in dopamine
@@ -2117,6 +2384,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                                     a.alive = False; a.died_ts = time.time(); deaths_count += 1
                                     data_logger.log_nxer_event(step_tick, 'died', a.id, {'cause': 'harvesting_exhaustion', 'name': a.name})
                                     data_logger.update_nxer_stats(a)
+                                    _archive_nxer(a)
                                     if a.pos in occupied: occupied.discard(a.pos)
                                     push_effect('skull', a.pos)
                         if f.remaining <= 0:
@@ -2237,7 +2505,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                         if len(prev) < 9: prev = list(prev) + [0]*(9-len(prev))
                         prev[0] = 0  # Normal successful move = 0 (not blocked=-1, not food=+1)
                         prev[1] = 0  # Empty cell encountered
-                        prev[2] = (1 if terrain_here == T_LAND else 0)  # Terrain type
+                        prev[2] = 0 if terrain_here in (T_LAND, T_SEA) else -1  # Terrain constraint
                         # v4.0: Update proprioceptron for movement success
                         prop = getattr(a, 'proprioceptron', None)
                         if prop:
@@ -2249,6 +2517,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                             a.alive = False; a.died_ts = time.time(); deaths_count += 1
                             data_logger.log_nxer_event(step_tick, 'died', a.id, {'cause': 'movement_exhaustion', 'name': a.name})
                             data_logger.update_nxer_stats(a)
+                            _archive_nxer(a)
                             if a.pos in occupied: occupied.discard(a.pos)
                             push_effect('skull', a.pos)
                 
@@ -2302,9 +2571,16 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                 save_state(f"{auto_save_prefix}.json")
                 running = False
                 continue
+            # --- ROUND TIME LIMIT CHECK ---
+            if round_time_limit is not None and not game_over:
+                elapsed_round_mins = (time.time() - round_start_real_time) / 60.0
+                if elapsed_round_mins >= round_time_limit:
+                    print(f"Round time limit reached ({round_time_limit} mins). Ending round early.")
+                    paused = True; game_over = True; game_over_start_time = time.time(); user_declined_restart = False
 
             if alive_count == 0 and not game_over:
                 paused = True; game_over = True; game_over_start_time = time.time(); user_declined_restart = False
+            
             best_scores = {}
             title_to_stat = {"Food found": "food_found", "Food taken": "food_taken", "World explored": "explored", "Time lived (s)": "time_lived_s", "Mates": "mates_performed", "Fitness": "fitness_score"}
             for title, stat_name in title_to_stat.items():

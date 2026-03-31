@@ -1,10 +1,11 @@
-# Neuraxon Game of Life 3.5 Neuron Genetics (Neuraxon 2.0 Compliant) Internal version 104
+# Neuraxon Game of Life 3.5 Neuron Genetics (Neuraxon 2.0 Compliant) Internal version 125
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
 # https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint  (Neuraxon V2.0 )
 # https://www.researchgate.net/publication/397331336_Neuraxon (V1) 
 # Play the Lite Version of the Game of Life 3 at https://huggingface.co/spaces/DavidVivancos/NeuraxonLife
+
 import random
 import math
 from typing import Any, Tuple, Optional
@@ -40,8 +41,8 @@ def Inheritance(father: 'NxEr', mother: 'NxEr') -> 'NeuraxonNetwork':
     # ==========================================================================
     # DETERMINE FITTER PARENT (NEW in v2.34)
     # ==========================================================================
-    father_fitness = father.stats.food_found + father.stats.time_lived_s * 0.1
-    mother_fitness = mother.stats.food_found + mother.stats.time_lived_s * 0.1
+    father_fitness = father.stats.food_found + father.stats.time_lived_s * 0.1 + father.stats.explored * 0.05
+    mother_fitness = mother.stats.food_found + mother.stats.time_lived_s * 0.1 + mother.stats.explored * 0.05
     father_is_fitter = father_fitness >= mother_fitness
     
     # ==========================================================================
@@ -52,16 +53,27 @@ def Inheritance(father: 'NxEr', mother: 'NxEr') -> 'NeuraxonNetwork':
         """50% chance to pick from father or mother."""
         return father_val if random.random() < 0.5 else mother_val
     
-    def pick_biased(father_val, mother_val, bias: float = 0.7):
+    def pick_biased(father_val, mother_val, bias: float = 0.75):
         """Pick from fitter parent with bias probability."""
         if father_is_fitter:
             return father_val if random.random() < bias else mother_val
         else:
             return mother_val if random.random() < bias else father_val
     
-    def blend(father_val, mother_val, variation: float = 0.05):
-        """Blend two numerical values with small random variation."""
-        avg = (father_val + mother_val) / 2.0
+    def blend(father_val, mother_val, variation: float = 0.03):
+        """v111 FIX (M21/M23): Blend biased toward fitter parent.
+        
+        OLD: 50/50 average + 5% noise → regression to mean, zero heritability.
+        NEW: 70/30 weighted toward fitter parent + 3% noise.
+        BIOINSPIRED: Biological inheritance preserves more of the fitter
+        genotype via dominance effects. Paper §7 Algorithm 7 prescribes
+        'mutated deep-copies of top half' — children should resemble
+        successful parents, not average the population.
+        """
+        if father_is_fitter:
+            avg = father_val * 0.7 + mother_val * 0.3
+        else:
+            avg = mother_val * 0.7 + father_val * 0.3
         return avg * random.uniform(1.0 - variation, 1.0 + variation)
     
     def blend_int(father_val, mother_val, variation: float = 0.1):
@@ -70,15 +82,15 @@ def Inheritance(father: 'NxEr', mother: 'NxEr') -> 'NeuraxonNetwork':
         return max(1, int(round(result)))
     
     def blend_bounded(father_val, mother_val, low: float, high: float, variation: float = 0.05):
-        """Blend two values and clamp to bounds."""
-        result = blend(father_val, mother_val, variation)
+        """v111 FIX (M21/M23): Reduced default variation 0.05→0.03."""
+        result = blend(father_val, mother_val, min(variation, 0.03))
         return max(low, min(high, result))
     
     def pick_or_blend(father_val, mother_val, blend_prob: float = 0.7):
-        """With blend_prob probability, blend values; otherwise pick one."""
+        """v111 FIX (M21/M23): Replaced pick() with pick_biased() for non-blend path."""
         if random.random() < blend_prob:
             return blend(father_val, mother_val)
-        return pick(father_val, mother_val)
+        return pick_biased(father_val, mother_val)
     
     def proportional_index(child_idx: int, child_count: int, parent_count: int) -> int:
         """
@@ -205,8 +217,12 @@ def Inheritance(father: 'NxEr', mother: 'NxEr') -> 'NeuraxonNetwork':
     
     # --- Core Neuron Properties ---
     child_params.membrane_time_constant = pick_or_blend(father_params.membrane_time_constant, mother_params.membrane_time_constant)
-    child_params.firing_threshold_excitatory = blend_bounded(father_params.firing_threshold_excitatory, mother_params.firing_threshold_excitatory, 0.3, 2.0)
-    child_params.firing_threshold_inhibitory = blend_bounded(father_params.firing_threshold_inhibitory, mother_params.firing_threshold_inhibitory, -2.5, -0.3)
+    # v111 FIX (M23): Firing thresholds use pick_biased, not blend.
+    # MUTATIONAL MELTDOWN ROOT CAUSE: Blending thresholds averaged them
+    # toward population mean, destroying beneficial threshold configurations
+    # that underlie exploration and avoidance behaviors.
+    child_params.firing_threshold_excitatory = pick_biased(father_params.firing_threshold_excitatory, mother_params.firing_threshold_excitatory)
+    child_params.firing_threshold_inhibitory = pick_biased(father_params.firing_threshold_inhibitory, mother_params.firing_threshold_inhibitory)
     child_params.adaptation_rate = blend_bounded(father_params.adaptation_rate, mother_params.adaptation_rate, 0.0, 0.3)
     child_params.spontaneous_firing_rate = blend_bounded(father_params.spontaneous_firing_rate, mother_params.spontaneous_firing_rate, 0.0, 0.15)
     child_params.neuron_health_decay = blend_bounded(father_params.neuron_health_decay, mother_params.neuron_health_decay, 0.0001, 0.01)
@@ -217,11 +233,15 @@ def Inheritance(father: 'NxEr', mother: 'NxEr') -> 'NeuraxonNetwork':
     child_params.plateau_decay = pick_or_blend(father_params.plateau_decay, mother_params.plateau_decay)
     
     # --- Synaptic Properties & Plasticity ---
-    child_params.tau_fast = pick_or_blend(father_params.tau_fast, mother_params.tau_fast)
-    child_params.tau_slow = pick_or_blend(father_params.tau_slow, mother_params.tau_slow)
-    child_params.tau_meta = pick_or_blend(father_params.tau_meta, mother_params.tau_meta)
-    child_params.tau_ltp = pick_or_blend(father_params.tau_ltp, mother_params.tau_ltp)
-    child_params.tau_ltd = pick_or_blend(father_params.tau_ltd, mother_params.tau_ltd)
+    # v111 FIX (M23): Time constants use pick_biased to preserve
+    # the fitter parent's temporal dynamics. Blending tau values
+    # averages intrinsic timescales, collapsing the multi-timescale
+    # separation (§3) that evolution may have optimized.
+    child_params.tau_fast = pick_biased(father_params.tau_fast, mother_params.tau_fast)
+    child_params.tau_slow = pick_biased(father_params.tau_slow, mother_params.tau_slow)
+    child_params.tau_meta = pick_biased(father_params.tau_meta, mother_params.tau_meta)
+    child_params.tau_ltp = pick_biased(father_params.tau_ltp, mother_params.tau_ltp)
+    child_params.tau_ltd = pick_biased(father_params.tau_ltd, mother_params.tau_ltd)
     
     # v3.31: Inherit meta-plasticity, LTP/LTD, and meta-behavior coupling params
     child_params.meta_target_gain = blend_bounded(
@@ -234,8 +254,8 @@ def Inheritance(father: 'NxEr', mother: 'NxEr') -> 'NeuraxonNetwork':
         getattr(father_params, 'meta_clamp_max', 1.0),
         getattr(mother_params, 'meta_clamp_max', 1.0), 0.5, 1.0)
     child_params.hebbian_ltp_rate = blend_bounded(
-        getattr(father_params, 'hebbian_ltp_rate', 0.18),
-        getattr(mother_params, 'hebbian_ltp_rate', 0.18), 0.05, 0.4)
+        getattr(father_params, 'hebbian_ltp_rate', 0.12),
+        getattr(mother_params, 'hebbian_ltp_rate', 0.12), 0.05, 0.20)
     child_params.ltd_neutral_scale = blend_bounded(
         getattr(father_params, 'ltd_neutral_scale', 0.12),
         getattr(mother_params, 'ltd_neutral_scale', 0.12), 0.03, 0.25)
@@ -269,9 +289,10 @@ def Inheritance(father: 'NxEr', mother: 'NxEr') -> 'NeuraxonNetwork':
     child_params.w_meta_init_max = pick_or_blend(father_params.w_meta_init_max, mother_params.w_meta_init_max)
     
     # --- Learning and Plasticity Rules ---
-    child_params.learning_rate = blend_bounded(father_params.learning_rate, mother_params.learning_rate, 0.001, 0.1)
+    # v111 FIX (M21): Learning rate inherits from fitter parent.
+    child_params.learning_rate = pick_biased(father_params.learning_rate, mother_params.learning_rate)
     child_params.stdp_window = pick_or_blend(father_params.stdp_window, mother_params.stdp_window)
-    child_params.learning_rate_mod = pick_or_blend(father_params.learning_rate_mod, mother_params.learning_rate_mod)
+    child_params.learning_rate_mod = pick_biased(father_params.learning_rate_mod, mother_params.learning_rate_mod)
     child_params.plasticity_threshold = blend_bounded(father_params.plasticity_threshold, mother_params.plasticity_threshold, 0.2, 0.9)
     child_params.associativity_strength = blend_bounded(father_params.associativity_strength, mother_params.associativity_strength, 0.01, 0.3)
     
@@ -294,10 +315,12 @@ def Inheritance(father: 'NxEr', mother: 'NxEr') -> 'NeuraxonNetwork':
     child_params.norepinephrine_baseline = blend_bounded(father_params.norepinephrine_baseline, mother_params.norepinephrine_baseline, 0.05, 0.4)
     child_params.norepinephrine_high_affinity_threshold = pick_or_blend(father_params.norepinephrine_high_affinity_threshold, mother_params.norepinephrine_high_affinity_threshold)
     child_params.norepinephrine_low_affinity_threshold = pick_or_blend(father_params.norepinephrine_low_affinity_threshold, mother_params.norepinephrine_low_affinity_threshold)
-    child_params.neuromod_decay_rate = blend_bounded(father_params.neuromod_decay_rate, mother_params.neuromod_decay_rate, 0.001, 0.2)
+    # v110 FIX (M18): Tighter blending bounds [0.08, 0.40] prevent offspring
+    # from inheriting fatally low decay rates that cause chronic saturation.
+    child_params.neuromod_decay_rate = blend_bounded(father_params.neuromod_decay_rate, mother_params.neuromod_decay_rate, 0.08, 0.40)
     # v3.33: Inherit reuptake transporter kinetics
     child_params.reuptake_vmax_ne = blend_bounded(father_params.reuptake_vmax_ne, mother_params.reuptake_vmax_ne, 0.03, 0.15)
-    child_params.reuptake_vmax_da = blend_bounded(father_params.reuptake_vmax_da, mother_params.reuptake_vmax_da, 0.02, 0.10)
+    child_params.reuptake_vmax_da = blend_bounded(father_params.reuptake_vmax_da, mother_params.reuptake_vmax_da, 0.10, 0.30)
     child_params.reuptake_vmax_5ht = blend_bounded(father_params.reuptake_vmax_5ht, mother_params.reuptake_vmax_5ht, 0.01, 0.07)
     child_params.reuptake_vmax_ach = blend_bounded(father_params.reuptake_vmax_ach, mother_params.reuptake_vmax_ach, 0.04, 0.20)
     child_params.reuptake_km = blend_bounded(father_params.reuptake_km, mother_params.reuptake_km, 0.2, 1.0)
@@ -348,6 +371,23 @@ def Inheritance(father: 'NxEr', mother: 'NxEr') -> 'NeuraxonNetwork':
     # --- Homeostasis ---
     child_params.target_firing_rate = blend_bounded(father_params.target_firing_rate, mother_params.target_firing_rate, 0.02, 0.3)
     child_params.homeostatic_plasticity_rate = blend_bounded(father_params.homeostatic_plasticity_rate, mother_params.homeostatic_plasticity_rate, 0.0001, 0.005)
+    child_params.min_excitatory_fraction = blend_bounded(getattr(father_params, 'min_excitatory_fraction', 0.17), getattr(mother_params, 'min_excitatory_fraction', 0.17), 0.10, 0.25)
+    child_params.max_excitatory_fraction = blend_bounded(getattr(father_params, 'max_excitatory_fraction', 0.27), getattr(mother_params, 'max_excitatory_fraction', 0.27), 0.22, 0.35)
+    child_params.target_excitatory_fraction = blend_bounded(getattr(father_params, 'target_excitatory_fraction', 0.22), getattr(mother_params, 'target_excitatory_fraction', 0.22), 0.15, 0.28)
+    child_params.min_inhibitory_fraction = blend_bounded(getattr(father_params, 'min_inhibitory_fraction', 0.16), getattr(mother_params, 'min_inhibitory_fraction', 0.16), 0.10, 0.28)
+    child_params.target_inhibitory_fraction = blend_bounded(getattr(father_params, 'target_inhibitory_fraction', 0.24), getattr(mother_params, 'target_inhibitory_fraction', 0.24), 0.16, 0.40)
+    child_params.adaptive_threshold_adjustment = blend_bounded(getattr(father_params, 'adaptive_threshold_adjustment', 0.04), getattr(mother_params, 'adaptive_threshold_adjustment', 0.04), 0.005, 0.08)
+    
+    # --- ChronoPlasticity ---
+    child_params.chrono_alpha_f = pick_or_blend(father_params.chrono_alpha_f, mother_params.chrono_alpha_f)
+    child_params.chrono_alpha_s = pick_or_blend(father_params.chrono_alpha_s, mother_params.chrono_alpha_s)
+    child_params.chrono_lambda_f = pick_or_blend(father_params.chrono_lambda_f, mother_params.chrono_lambda_f)
+    child_params.chrono_lambda_s = pick_or_blend(father_params.chrono_lambda_s, mother_params.chrono_lambda_s)
+    child_params.chrono_omega_min = blend_bounded(father_params.chrono_omega_min, mother_params.chrono_omega_min, 0.01, 0.25)
+    child_params.chrono_omega_max = blend_bounded(father_params.chrono_omega_max, mother_params.chrono_omega_max, 0.50, 0.99)
+    child_params.chrono_omega_smoothing = blend_bounded(father_params.chrono_omega_smoothing, mother_params.chrono_omega_smoothing, 0.05, 0.5)
+    child_params.chrono_carry_gain = blend_bounded(getattr(father_params, 'chrono_carry_gain', 0.24), getattr(mother_params, 'chrono_carry_gain', 0.24), 0.08, 0.45)
+    child_params.chrono_plasticity_gain = blend_bounded(getattr(father_params, 'chrono_plasticity_gain', 0.28), getattr(mother_params, 'chrono_plasticity_gain', 0.28), 0.08, 0.50)
     
     # --- Aigarth Hybridization ---
     child_params.itu_circle_radius = blend_int(father_params.itu_circle_radius, mother_params.itu_circle_radius)
@@ -392,8 +432,8 @@ def Inheritance(father: 'NxEr', mother: 'NxEr') -> 'NeuraxonNetwork':
         
         # --- Individualized Membrane Properties ---
         child_neuron.membrane_time_constant = pick_or_blend(f_neuron.membrane_time_constant, m_neuron.membrane_time_constant)
-        child_neuron.firing_threshold_excitatory = pick_or_blend(f_neuron.firing_threshold_excitatory, m_neuron.firing_threshold_excitatory)
-        child_neuron.firing_threshold_inhibitory = pick_or_blend(f_neuron.firing_threshold_inhibitory, m_neuron.firing_threshold_inhibitory)
+        child_neuron.firing_threshold_excitatory = pick_biased(f_neuron.firing_threshold_excitatory, m_neuron.firing_threshold_excitatory)
+        child_neuron.firing_threshold_inhibitory = pick_biased(f_neuron.firing_threshold_inhibitory, m_neuron.firing_threshold_inhibitory)
         child_neuron.adaptation_rate = pick_or_blend(f_neuron.adaptation_rate, m_neuron.adaptation_rate)
         child_neuron.spontaneous_firing_rate = pick_or_blend(f_neuron.spontaneous_firing_rate, m_neuron.spontaneous_firing_rate)
         child_neuron.neuron_health_decay = pick_or_blend(f_neuron.neuron_health_decay, m_neuron.neuron_health_decay)

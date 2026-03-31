@@ -1,10 +1,11 @@
-# Neuraxon Game of Life 3.5 Neuron Network (Neuraxon 2.0 Compliant) Internal version 104
+# Neuraxon Game of Life 3.5 Neuron Network (Neuraxon 2.0 Compliant) Internal version 125
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
 # https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint  (Neuraxon V2.0 )
 # https://www.researchgate.net/publication/397331336_Neuraxon (V1) 
 # Play the Lite Version of the Game of Life 3 at https://huggingface.co/spaces/DavidVivancos/NeuraxonLife
+
 import math
 import random
 import cmath
@@ -46,6 +47,7 @@ class NeuraxonNetwork:
         # --- Neuraxon v2.0: Full Neuromodulator System with receptor subtypes ---
         self.neuromod_system = NeuromodulatorSystem(self.params)
         self.receptor_activations = {}
+        self.current_game_tick = 0
 
         # --- Neuraxon v2.0: Multi-band Oscillator Bank with PAC ---
         osc_coupling = getattr(self.params, 'oscillator_coupling', 0.1)
@@ -65,7 +67,11 @@ class NeuraxonNetwork:
                 syn.update_chrono_traces(pre.trinary_state)
                 syn.update_eligibility(pre.trinary_state, post.trinary_state, self.params)
                 m_t = self.neuromod_system.levels['DA']['phasic']
-                a_t = getattr(post, 'astrocyte_state', 0.0)
+                lambda_a = getattr(self.params, 'agmp_lambda_a', 0.95)
+                s_tilde = getattr(post, 'state_tilde', float(abs(post.trinary_state)))
+                prev_astro = getattr(post, 'astrocyte_state', 0.0)
+                a_t = lambda_a * prev_astro + (1.0 - lambda_a) * abs(s_tilde)
+                post.astrocyte_state = a_t
                 eta = getattr(self.params, 'agmp_eta', 0.005)
                 delta_agmp = eta * m_t * a_t * syn.eligibility
                 syn.w_fast = max(-1.0, min(1.0, syn.w_fast + delta_agmp * 0.3))
@@ -104,6 +110,22 @@ class NeuraxonNetwork:
         self._initialize_neurons()
         self._initialize_synapses()
         self._initialize_itu_circles()
+        
+        # v4.1: Pre-indexed synapse lookup maps — eliminates O(N*S) scans
+        self._rebuild_synapse_indexes()
+    
+    def _rebuild_synapse_indexes(self):
+        """v4.1: Build O(1) lookup maps for synapses. Called after init and structural changes."""
+        from collections import defaultdict
+        self._syn_by_pre = defaultdict(list)
+        self._syn_by_post = defaultdict(list)
+        self._neuron_map = {n.id: n for n in self.all_neurons}
+        self._afferent_by_pre = defaultdict(list)
+        for s in self.synapses:
+            self._syn_by_pre[s.pre_id].append(s)
+            self._syn_by_post[s.post_id].append(s)
+            if s.is_afferent:
+                self._afferent_by_pre[s.pre_id].append(s)
     
     def _initialize_neurons(self):
         """Creates the populations of input, hidden, and output neurons."""
@@ -191,18 +213,22 @@ class NeuraxonNetwork:
                     neuron_degrees[pre.id] += 1
                     neuron_degrees[post.id] += 1
                     
+        # v4.1: Build neighbor_synapses using pre-indexed groups — O(S*degree) not O(S²)
+        _pre_groups = defaultdict(list)
         for s in self.synapses:
-            s.neighbor_synapses = [ns for ns in self.synapses if ns.pre_id == s.pre_id and ns.post_id != s.post_id]
+            _pre_groups[s.pre_id].append(s)
+        for s in self.synapses:
+            s.neighbor_synapses = [ns for ns in _pre_groups[s.pre_id] if ns.post_id != s.post_id]
     
     def _initialize_itu_circles(self):
         """Groups hidden neurons into ITUs for the Aigarth evolutionary process."""
         if len(self.hidden_neurons) < self.params.itu_circle_radius * 2: return
         num_circles = max(1, len(self.hidden_neurons) // self.params.itu_circle_radius)
-        neurons_per_circle = len(self.hidden_neurons) // num_circles
+        neurons_per_circle = max(1, len(self.hidden_neurons) // num_circles)
         for circle_idx in range(num_circles):
             start = circle_idx * neurons_per_circle
-            end = start + neurons_per_circle
-            self.itu_circles.append(ITUCircle(circle_idx, self.hidden_neurons[start:end], self.params))
+            end = len(self.hidden_neurons) if circle_idx == num_circles - 1 else start + neurons_per_circle
+            self.itu_circles.append(ITUCircle(circle_idx, self.hidden_neurons[start:end], self.params, total_circles=num_circles))
     
     def _global_oscillatory_drive(self) -> float:
         """Generates a complex, global oscillatory signal."""
@@ -212,6 +238,37 @@ class NeuraxonNetwork:
         high = math.sin(2.0 * math.pi * self.params.oscillator_high_freq * t + self.oscillator_phase_offsets[2])
         return self.params.oscillator_strength * (low * 0.5 + low * mid * 0.3 + mid * high * 0.2)
     
+    def _sync_neuromod_to_system(self):
+        """v110 FIX (M18): Bidirectional sync — dict → NeuromodulatorSystem.
+        
+        ROOT CAUSE: simulate_step() line 7167 does:
+            self.neuromodulators = self.neuromod_system.get_flat_levels()
+        This overwrites the dict (where all decay and behavioral boosts live)
+        with the v2.0 system's internal state (which was never decayed).
+        
+        This method syncs the authoritative dict values BACK into the v2.0
+        system so that:
+          1. Decay from _update_neuromodulator_diffusion persists across ticks
+          2. Game-loop behavioral boosts survive through simulate_step
+          3. Receptor activations are computed from actual (decayed) levels
+        
+        BIOINSPIRED: In vivo, there is ONE extracellular concentration per
+        monoamine. Reuptake, enzymatic degradation, diffusion, and receptor
+        binding all operate on the same pool. The tonic/phasic decomposition
+        is an analytical convenience, not a separate physical reservoir.
+        """
+        _mapping = {'dopamine': 'DA', 'serotonin': '5HT',
+                    'acetylcholine': 'ACh', 'norepinephrine': 'NA'}
+        for name, key in _mapping.items():
+            total = self.neuromodulators.get(name, 0.12)
+            phasic = self.neuromod_system.levels[key]['phasic']
+            # Attribute the total to tonic, preserving the current phasic component.
+            # Tonic = total - phasic (clamped to [0, 2.0]).
+            # This way phasic transients from the v2.0 update() are preserved,
+            # while the tonic baseline tracks the actual (decayed) concentration.
+            new_tonic = max(0.0, min(2.0, total - phasic))
+            self.neuromod_system.levels[key]['tonic'] = new_tonic
+
     def _update_neuromodulator_diffusion(self, dt: float):
         """Simulates the spatial diffusion of neuromodulators across the environment grid."""
         for i, mod in enumerate(['dopamine', 'serotonin', 'acetylcholine', 'norepinephrine']):
@@ -234,8 +291,25 @@ class NeuraxonNetwork:
             local_decay = self.params.neuromod_decay_rate  # new update v2.47 3.0
             if mod == 'norepinephrine':
                 local_decay *= 3.0   
-            # Existing baseline drift (kept for sub-baseline recovery)
-            self.neuromodulators[mod] += (base - self.neuromodulators[mod]) * local_decay * decay_factor * dt / 100.0
+            # v109 FIX (M18): REMOVED the residual /10.0 divisor entirely.
+            # v108 changed /100.0 to /10.0 but that still left decay 10x too weak.
+            # With neuromod_decay_rate=0.6, effective per-tick pull is now:
+            #   (0.15 - 1.87) * 0.6 * 1.0 * 1.0 = -1.032 per tick for DA at saturation
+            # This robustly counterbalances circadian injection (~0.08/tick) and
+            # behavioral boosts, allowing neuromodulators to return to baseline.
+            # BIOINSPIRED: Tonic neuromodulator clearance in vivo is fast —
+            # monoamine half-lives range from seconds (DA in striatum) to minutes.
+            self.neuromodulators[mod] += (base - self.neuromodulators[mod]) * local_decay * decay_factor * dt
+            
+            # v108 NEW: Concentration-dependent excess decay (KEPT — serves as safety net)
+            # BIOINSPIRED: When monoamine concentration exceeds ~3× baseline,
+            # enzymatic degradation (MAO/COMT) and overflow metabolism kick in.
+            # This prevents ceiling-pinning while preserving dynamics near baseline.
+            excess_threshold = base * getattr(self.params, 'neuromod_excess_threshold_mult', 3.0)
+            if self.neuromodulators[mod] > excess_threshold:
+                excess = self.neuromodulators[mod] - excess_threshold
+                excess_rate = getattr(self.params, 'neuromod_excess_decay_rate', 0.15)
+                self.neuromodulators[mod] -= excess * excess_rate * dt
             
             # v3.33: Enzymatic degradation + reuptake transporter (MAO/COMT/NET/SERT/DAT/AChE)
             # BIOINSPIRED: Monoamine clearance follows Michaelis-Menten kinetics —
@@ -266,15 +340,20 @@ class NeuraxonNetwork:
         for neuron in self.all_neurons:
             if neuron.type == NeuronType.HIDDEN and len(neuron.state_history) > 0:
                 recent_activity = sum(abs(s) for s in neuron.state_history) / len(neuron.state_history)
-                old_threshold = neuron.params.firing_threshold_excitatory
+                old_threshold = neuron.firing_threshold_excitatory
                 
                 if recent_activity > self.params.target_firing_rate * 1.2:
-                    neuron.params.firing_threshold_excitatory += self.params.homeostatic_plasticity_rate
+                    neuron.firing_threshold_excitatory += self.params.homeostatic_plasticity_rate
+                    neuron.firing_threshold_inhibitory += self.params.homeostatic_plasticity_rate * 0.35
                 elif recent_activity < self.params.target_firing_rate * 0.8:
-                    neuron.params.firing_threshold_excitatory -= self.params.homeostatic_plasticity_rate
+                    neuron.firing_threshold_excitatory -= self.params.homeostatic_plasticity_rate
+                    neuron.firing_threshold_inhibitory -= self.params.homeostatic_plasticity_rate * 0.35
+                
+                neuron.firing_threshold_excitatory = max(0.25, min(1.2, neuron.firing_threshold_excitatory))
+                neuron.firing_threshold_inhibitory = max(-1.2, min(-0.10, neuron.firing_threshold_inhibitory))
                 
                 # NEW: Log if threshold changed
-                new_threshold = neuron.params.firing_threshold_excitatory
+                new_threshold = neuron.firing_threshold_excitatory
                 if old_threshold != new_threshold and logger.log_level >= 2:
                     logger.log_homeostatic_event(
                         self.step_count, 
@@ -341,17 +420,18 @@ class NeuraxonNetwork:
         
         # Only skip adjustment if BOTH criticality AND excitatory fraction are good
         # v2.37b: Also check inhibitory fraction
-        min_inh = getattr(self.params, 'min_inhibitory_fraction', 0.10)
-        inh_ok = inhibitory_fraction >= min_inh
+        min_inh = getattr(self.params, 'min_inhibitory_fraction', 0.16)
+        target_inh = getattr(self.params, 'target_inhibitory_fraction', max(min_inh, 0.24))
+        inh_ok = inhibitory_fraction >= min_inh and abs(inhibitory_fraction - target_inh) < 0.10
         
         if sigma_ok and exc_ok and inh_ok:
             return
         
         # v2.37b: PRIORITY 1 - Fix inhibitory deficit (most critical for E/I balance)
-        if not inh_ok and inhibitory_fraction < min_inh:
+        if not inh_ok and inhibitory_fraction < target_inh:
             # Need more inhibitory - lower inhibitory threshold for ALL neurons
-            deficit = min_inh - inhibitory_fraction
-            adjustment_strength = min(0.05, deficit * 0.5)  # Proportional to deficit
+            deficit = target_inh - inhibitory_fraction
+            adjustment_strength = min(0.04, deficit * 0.35)
             
             for neuron in active_neurons:
                 # Move inhibitory threshold toward zero (make it easier to reach)
@@ -365,7 +445,7 @@ class NeuraxonNetwork:
                     tick=self.step_count,
                     neuron_id=-2,  # -2 = inhibitory homeostasis
                     old_value=inhibitory_fraction,
-                    new_value=min_inh,
+                    new_value=target_inh,
                     activity=excitatory_fraction
                 )
             return  # Don't compound adjustments
@@ -430,9 +510,11 @@ class NeuraxonNetwork:
                 new_exc_threshold = neuron.firing_threshold_excitatory + adjustment
                 neuron.firing_threshold_excitatory = max(0.25, min(1.2, new_exc_threshold))
                 
-                # Inhibitory threshold: adjust symmetrically, range [-1.2, -0.25]
-                new_inh_threshold = neuron.firing_threshold_inhibitory - adjustment
-                neuron.firing_threshold_inhibitory = max(-1.2, min(-0.25, new_inh_threshold))
+                # Inhibitory threshold must move in the same signed direction as the
+                # excitatory correction: toward zero when the network is too active,
+                # away from zero when it is too quiet.
+                new_inh_threshold = neuron.firing_threshold_inhibitory + adjustment
+                neuron.firing_threshold_inhibitory = max(-1.2, min(-0.10, new_inh_threshold))
                 
                 neurons_adjusted += 1
             
@@ -591,10 +673,11 @@ class NeuraxonNetwork:
 
     def _get_neighbor_phases(self, neuron_id: int) -> dict:
         """v2.40: Get phases of synaptically connected neighbors for Kuramoto coupling.
-        Returns dict of {neighbor_id: (phase, weight)} for weighted coupling."""
+        v4.1: Uses pre-indexed synapse maps — O(degree) instead of O(S)."""
         neighbor_phases = {}
-        neuron_map = {n.id: n for n in self.all_neurons}
-        for syn in self.synapses:
+        neuron_map = self._neuron_map
+        # Check incoming synapses
+        for syn in self._syn_by_post.get(neuron_id, ()):
             if syn.is_silent or syn.integrity < 0.1:
                 continue
             weight = abs(syn.w_fast) + abs(syn.w_slow) * 0.5
@@ -609,14 +692,20 @@ class NeuraxonNetwork:
                         neighbor_phases[syn.pre_id] = (pre_n.phase, old_weight + weight)
                     else:
                         neighbor_phases[syn.pre_id] = (pre_n.phase, weight)
-            elif syn.pre_id == neuron_id and syn.post_id in neuron_map:
-                post_n = neuron_map[syn.post_id]
-                if post_n.is_active:
-                    if syn.post_id in neighbor_phases:
-                        _, old_weight = neighbor_phases[syn.post_id]
-                        neighbor_phases[syn.post_id] = (post_n.phase, old_weight + weight)
-                    else:
-                        neighbor_phases[syn.post_id] = (post_n.phase, weight)
+        # Check outgoing synapses
+        for syn in self._syn_by_pre.get(neuron_id, ()):
+            if syn.is_silent or syn.integrity < 0.1:
+                continue
+            weight = abs(syn.w_fast) + abs(syn.w_slow) * 0.5
+            if weight < 0.05:
+                continue
+            post_n = neuron_map.get(syn.post_id)
+            if post_n and post_n.is_active:
+                if syn.post_id in neighbor_phases:
+                    _, old_weight = neighbor_phases[syn.post_id]
+                    neighbor_phases[syn.post_id] = (post_n.phase, old_weight + weight)
+                else:
+                    neighbor_phases[syn.post_id] = (post_n.phase, weight)
         return neighbor_phases
     
     def _compute_phase_coherence(self) -> float:
@@ -647,14 +736,27 @@ class NeuraxonNetwork:
         return self.branching_ratio
     
     def _get_sensory_input_dict(self) -> Dict[int, float]:
-        """Generate external inputs from clamped input neuron states."""
+        """Generate external inputs from clamped input neuron states.
+        v4.1: Uses pre-indexed afferent map — O(afferents) instead of O(inputs * S).
+
+        v117 FIX: Afferents must respect their actual synaptic weights instead of adding
+        the same scalar to every target. Otherwise sensorimotor couplings cannot emerge —
+        all sensory channels look equivalent at the neuron interface."""
         external_inputs = {}
+        meta_gain = getattr(self.params, 'meta_influence_gain', 0.25)
+        reliability = float(getattr(self.params, 'afferent_synapse_reliability', 1.0))
         for inp_neuron in self.input_neurons:
-            if inp_neuron.is_active and inp_neuron.trinary_state != 0:
-                input_signal = inp_neuron.trinary_state * self.params.sensory_input_gain
-                for syn in self.synapses:
-                    if syn.pre_id == inp_neuron.id and syn.is_afferent:
-                        external_inputs[syn.post_id] = external_inputs.get(syn.post_id, 0.0) + input_signal
+            if not inp_neuron.is_active or inp_neuron.trinary_state == 0:
+                continue
+            input_signal = float(inp_neuron.trinary_state) * float(self.params.sensory_input_gain)
+            for syn in self._afferent_by_pre.get(inp_neuron.id, ()):
+                if syn.integrity <= 0.0 or syn.is_silent:
+                    continue
+                if reliability < 1.0 and random.random() > reliability:
+                    continue
+                aff_gain = getattr(self.params, 'proprioceptive_afferent_gain', 1.8) if inp_neuron.id == 8 else getattr(self.params, 'afferent_synapse_strength', 1.1)
+                effective_weight = syn.w_fast + syn.w_slow + syn.w_meta * meta_gain
+                external_inputs[syn.post_id] = external_inputs.get(syn.post_id, 0.0) + input_signal * effective_weight * aff_gain
         return external_inputs
 
     def _assign_branch_positions(self):
@@ -675,9 +777,24 @@ class NeuraxonNetwork:
         for nid, val in sensory_inputs.items():
             external_inputs[nid] = external_inputs.get(nid, 0.0) + val
         
-        dt = max(self.params.min_dt, min(self.params.max_dt, self.params.dt / (1.0 + np.var(list(self.activation_history)[-10:]) if len(self.activation_history) > 10 else self.params.dt)))
+        # v4.1: Avoid list() + np.var overhead — compute variance inline
+        _ah = self.activation_history
+        if len(_ah) > 10:
+            _slice = list(_ah)[-10:]
+            _mean = sum(_slice) / 10.0
+            _var = sum((x - _mean) ** 2 for x in _slice) / 10.0
+            dt = max(self.params.min_dt, min(self.params.max_dt, self.params.dt / (1.0 + _var)))
+        else:
+            dt = max(self.params.min_dt, min(self.params.max_dt, self.params.dt))
         
         osc_drive = self._global_oscillatory_drive()
+        event_tick = int(getattr(self, 'current_game_tick', self.step_count))
+
+        # v110 FIX (M18): Sync dict → v2.0 system BEFORE update.
+        # Game-loop code (circadian boosts, behavioral scenarios, reward boosts)
+        # modifies self.neuromodulators between ticks. Without this sync, all
+        # those changes are overwritten by get_flat_levels() below.
+        self._sync_neuromod_to_system()
 
         # === NEURAXON v2.0: Neuromodulator System Update ===
         v2_activity = {
@@ -691,30 +808,36 @@ class NeuraxonNetwork:
             v2_activity['state_change_rate'] = sum(1 for n in active_ns if n.trinary_state != getattr(n, 'prev_state', 0)) / len(active_ns)
         self.neuromod_system.update(v2_activity, dt)
         self.receptor_activations = self.neuromod_system.compute_receptor_activations()
+        # v109 FIX (M16): Actually log receptor activations to time-series output.
+        # The NeuromodulatorSystem computes all 9 receptor activations correctly,
+        # but they were never persisted to the per_nxer_time_series parquet.
+        # This caused M16 to report all NaN values.
+        logger = get_data_logger()
+        if logger.log_level >= 2:
+            for r_name, r_val in self.receptor_activations.items():
+                logger.current_step_data[f'receptor_{r_name}'] = r_val
         self.neuromodulators = self.neuromod_system.get_flat_levels()
 
         # === NEURAXON v2.0: Oscillator Bank Update ===
         self.oscillator_bank.update(dt)
 
         
+        # v4.1: Use _neuron_map for O(1) lookup; simplified delay handling
         syn_inputs = {n.id: [] for n in self.all_neurons}
         mod_inputs = {n.id: [] for n in self.all_neurons}
-        delayed_inputs = defaultdict(list)
+        _nm = self._neuron_map
+        _cur_time = self.time
         for s in self.synapses:
             if s.integrity <= 0: continue
-            pre = self.all_neurons[s.pre_id]
-            if not pre.is_active: continue
-            immediate, delayed = s.compute_input(pre.trinary_state, self.time)
+            pre = _nm.get(s.pre_id)
+            if pre is None or not pre.is_active: continue
+            immediate, delayed = s.compute_input(pre.trinary_state, _cur_time)
             syn_inputs[s.post_id].append(immediate)
-            if delayed > 0: delayed_inputs[s.post_id].append((delayed, self.time + s.axonal_delay))
+            if delayed > 0:
+                if s.axonal_delay < dt:
+                    syn_inputs[s.post_id].append(delayed)
             me = s.get_modulatory_effect()
             if me != 0: mod_inputs[s.post_id].append(me)
-        
-        for post_id, delays in list(delayed_inputs.items()):
-            for value, delivery_time in delays:
-                if abs(delivery_time - self.time) < dt:
-                    syn_inputs[post_id].append(value)
-                    delayed_inputs[post_id].remove((value, delivery_time))
 
         step_activity_sum = 0.0
         active_neuron_count = 0
@@ -723,7 +846,8 @@ class NeuraxonNetwork:
             if not n.is_active: continue
             ext = external_inputs.get(n.id, 0.0) + osc_drive
             neighbor_phases = self._get_neighbor_phases(n.id)
-            n.update(syn_inputs[n.id], mod_inputs[n.id], ext, self.neuromodulators, dt, osc_drive, neighbor_phases)
+            n.update(syn_inputs[n.id], mod_inputs[n.id], ext, self.neuromodulators, dt, osc_drive, neighbor_phases,
+                     receptor_activations=self.receptor_activations)
             
             # Aggregate activity for this specific tick
             step_activity_sum += abs(n.trinary_state)
@@ -739,7 +863,27 @@ class NeuraxonNetwork:
             pre = self.all_neurons[s.pre_id]
             post = self.all_neurons[s.post_id]
             if pre.is_active and post.is_active:
-                s.potential_delta_w = s.calculate_delta_w(pre.trinary_state, post.trinary_state, self.neuromodulators, dt)
+                delta_w = s.calculate_delta_w(
+                    pre.trinary_state, post.trinary_state, self.neuromodulators, dt,
+                    receptor_activations=self.receptor_activations, tick=event_tick)
+                
+                # v107 FIX (M02): Boost STDP for proprioceptive→motor pathways
+                # BIOINSPIRED: Proprioceptive afferents have enhanced plasticity
+                # for motor learning (cerebellar-like error-driven learning)
+                is_proprio_to_motor = (
+                    pre.type == NeuronType.INPUT
+                    and pre.id == 8
+                    and post.type == NeuronType.OUTPUT
+                    and post.id in (
+                        self.params.num_input_neurons + self.params.num_hidden_neurons,      # output 0
+                        self.params.num_input_neurons + self.params.num_hidden_neurons + 1   # output 1
+                    )
+                )
+                if is_proprio_to_motor:
+                    boost = getattr(self.params, 'proprioceptive_stdp_boost', 2.5)
+                    delta_w *= boost
+                
+                s.potential_delta_w = delta_w
                 
         for s in self.synapses:
             if s.integrity <= 0: continue
@@ -747,11 +891,12 @@ class NeuraxonNetwork:
             post = self.all_neurons[s.post_id]
             if pre.is_active and post.is_active:
                 neighbor_deltas = [ns.potential_delta_w for ns in s.neighbor_synapses]
-                s.apply_update(dt, self.neuromodulators, neighbor_deltas)
+                s.apply_update(dt, self.neuromodulators, neighbor_deltas,
+                               receptor_activations=self.receptor_activations, tick=event_tick)
 
         # === NEURAXON v2.0: AGMP Astrocyte-Gated Plasticity (Algorithm 1 Step 5) ===
         if getattr(self.params, 'agmp_enabled', False):
-            neuron_map = {n.id: n for n in self.all_neurons}
+            neuron_map = self._neuron_map  # v4.1: Use pre-built map
             for syn in self.synapses:
                 if syn.integrity <= 0: continue
                 pre = neuron_map.get(syn.pre_id)
@@ -760,13 +905,18 @@ class NeuraxonNetwork:
                 syn.update_chrono_traces(pre.trinary_state)
                 syn.update_eligibility(pre.trinary_state, post.trinary_state, self.params)
                 m_t = self.neuromod_system.levels['DA']['phasic']
-                a_t = getattr(post, 'astrocyte_state', 0.0)
+                lambda_a = getattr(self.params, 'agmp_lambda_a', 0.95)
+                s_tilde = getattr(post, 'state_tilde', float(abs(post.trinary_state)))
+                prev_astro = getattr(post, 'astrocyte_state', 0.0)
+                a_t = lambda_a * prev_astro + (1.0 - lambda_a) * abs(s_tilde)
+                post.astrocyte_state = a_t
                 eta = getattr(self.params, 'agmp_eta', 0.005)
                 delta_agmp = eta * m_t * a_t * syn.eligibility
                 syn.w_fast = max(-1.0, min(1.0, syn.w_fast + delta_agmp * 0.3))
                 syn.w_slow = max(-1.0, min(1.0, syn.w_slow + delta_agmp * 0.1))
 
         # === NEURAXON v2.0: Homeostatic Synaptic Scaling ===
+        # v4.1: O(S) via pre-indexed _syn_by_post instead of O(N*S) nested scan
         h_rate = getattr(self.params, 'homeostatic_rate', 0.0005)
         target_fr = getattr(self.params, 'target_firing_rate', 0.2)
         for neuron in self.all_neurons:
@@ -775,8 +925,8 @@ class NeuraxonNetwork:
             med_gain = getattr(neuron, 'msth', None)
             mg = med_gain.medium_gain if med_gain else 1.0
             scale = 1.0 + h_rate * (target_fr - fr_avg) * mg
-            for syn in self.synapses:
-                if syn.post_id == neuron.id and syn.integrity > 0:
+            for syn in self._syn_by_post.get(neuron.id, ()):
+                if syn.integrity > 0:
                     syn.w_fast = max(-1.0, min(1.0, syn.w_fast * scale))
                     syn.w_slow = max(-1.0, min(1.0, syn.w_slow * scale))
 
@@ -786,8 +936,19 @@ class NeuraxonNetwork:
                 self.total_energy_consumed += n.firing_energy_cost * activity * dt
                         
         self._update_neuromodulator_diffusion(dt)
+        # v110 FIX (M18): Sync dict → v2.0 system AFTER diffusion decay.
+        # _update_neuromodulator_diffusion applies baseline decay, excess decay,
+        # and Michaelis-Menten reuptake to self.neuromodulators. Without syncing
+        # back, all this decay is overwritten next tick by get_flat_levels().
+        # This is the second half of the bidirectional sync — it closes the loop.
+        self._sync_neuromod_to_system()
+
+        # v113 FIX (M25): Reduce DA oscillatory coupling from 0.02→0.005.
+        # The old 0.02 added ~0.01 DA per tick via oscillator drive,
+        # contributing ~30% of the chronic DA elevation.
         for k in ('dopamine', 'serotonin', 'acetylcholine', 'norepinephrine'):
-            self.neuromodulators[k] = max(0.0, min(2.0, self.neuromodulators[k] + osc_drive * (0.02 if k == 'dopamine' else 0.01 if k in ('serotonin', 'acetylcholine') else 0.0)))
+            osc_mod = 0.005 if k == 'dopamine' else 0.01 if k in ('serotonin', 'acetylcholine') else 0.0
+            self.neuromodulators[k] = max(0.0, min(2.0, self.neuromodulators[k] + osc_drive * osc_mod))
         self._apply_homeostatic_plasticity()
         
         # NEW v2.31: Apply synaptic weight homeostasis after plasticity updates
@@ -803,7 +964,9 @@ class NeuraxonNetwork:
     
     def _apply_structural_plasticity(self):
         """Modifies the network's topology over time."""
+        _old_count = len(self.synapses)
         self.synapses = [s for s in self.synapses if s.integrity > self.params.synapse_integrity_threshold]
+        _pruned = _old_count != len(self.synapses)
         
         if random.random() < self.params.synapse_formation_prob:
             act = [n for n in self.all_neurons if n.is_active and n.energy_level > 20.0]
@@ -818,9 +981,15 @@ class NeuraxonNetwork:
                 if pre.id != post.id and not (pre.type == NeuronType.OUTPUT and post.type == NeuronType.INPUT) and not any(ss.pre_id == pre.id and ss.post_id == post.id for ss in self.synapses):
                     self.synapses.append(Synapse(pre.id, post.id, self.params))
                     
+        _structure_changed = False
         for n in self.hidden_neurons:
             if (n.health < self.params.neuron_death_threshold or n.energy_level < 5.0) and random.random() < 0.001:
                 n.is_active = False
+                _structure_changed = True
+        
+        # v4.1: Rebuild indexes if structure changed
+        if _structure_changed or _pruned:
+            self._rebuild_synapse_indexes()
     
 
     def _circle_metrics(self, circle):

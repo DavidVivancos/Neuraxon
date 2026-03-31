@@ -1,10 +1,12 @@
-# Neuraxon Game of Life 3.5 UI Menus (Neuraxon 2.0 Compliant) Internal version 104
+# Neuraxon Game of Life 3.5 UI Menus (Neuraxon 2.0 Compliant) Internal version 125
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
 # https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint  (Neuraxon V2.0 )
 # https://www.researchgate.net/publication/397331336_Neuraxon (V1) 
 # Play the Lite Version of the Game of Life 3 at https://huggingface.co/spaces/DavidVivancos/NeuraxonLife
+
+
 import pygame
 from typing import Optional, Dict, Any
 
@@ -42,7 +44,10 @@ def run_config_screen() -> Optional[Dict[str, Any]]:
         # NEW v3.0: Circadian cycle length
         ("Day/Night Cycle (ticks)", 600, 4800, 600, True, lambda x: x),
         ("Mate Cooldown (sec)", 6, 20, 12, True, lambda x: x), 
-        ("Log Level (1-3)", 1, 3, 3, True, lambda x: x)
+        ("Log Level (1-3)", 1, 3, 3, True, lambda x: x),
+        # --- NEW SETTINGS ---
+        ("Max Rounds (0=Inf)", 0, 100, 5, True, lambda x: None if x == 0 else x),
+        ("Round Time Limit Mins (0=Inf)", 0, 60, 0, True, lambda x: None if x == 0 else x)
     ]
     
     screen_width, screen_height = screen.get_size()
@@ -59,10 +64,10 @@ def run_config_screen() -> Optional[Dict[str, Any]]:
     play_button_x = (screen_width - play_button_width) // 2
     
     # Test Mode Sliders
-    test_slider_y_start = 800
+    test_slider_y_start = 900
     
     # Start Game Button (above test sliders)
-    play_button_y = 700
+    play_button_y = 800
     play_button_rect = pygame.Rect(play_button_x, play_button_y, play_button_width, play_button_height)
     
     # Test Mode Button (below test sliders)
@@ -88,7 +93,12 @@ def run_config_screen() -> Optional[Dict[str, Any]]:
                     for i, slider in enumerate(sliders): # Collect values from all sliders.
                         raw_value = slider.get_value()
                         conversion_func = param_specs[i][5]
-                        param_name = ["NxWorldSize", "NxWorldSea", "NxWorldRocks", "StartingNxErs", "MaxFood", "FoodRespan", "StartFood", "MaxNeurons", "GlobalTimeSteps", "DayNightCycle", "MateCooldownSeconds", "LogLevel"][i]
+                        param_name = [
+                    "NxWorldSize", "NxWorldSea", "NxWorldRocks", "StartingNxErs", 
+                    "MaxFood", "FoodRespan", "StartFood", "MaxNeurons", 
+                    "GlobalTimeSteps", "DayNightCycle", "MateCooldownSeconds", 
+                    "LogLevel", "max_rounds", "round_time_limit"
+                ][i]
                         params[param_name] = conversion_func(raw_value)
                     log_level = params.pop("LogLevel", 2)
                     set_data_logger_level(log_level)

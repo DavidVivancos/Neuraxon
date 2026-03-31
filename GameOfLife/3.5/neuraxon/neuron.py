@@ -1,10 +1,11 @@
-# Neuraxon Game of Life 3.5 Neuron (Neuraxon 2.0 Compliant) Internal version 104
+# Neuraxon Game of Life 3.5 Neuron (Neuraxon 2.0 Compliant) Internal version 125
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
 # https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint  (Neuraxon V2.0 )
 # https://www.researchgate.net/publication/397331336_Neuraxon (V1) 
-# Play the Lite Version of the Game of Life 3.5 at https://huggingface.co/spaces/DavidVivancos/NeuraxonLife
+# Play the Lite Version of the Game of Life 3 at https://huggingface.co/spaces/DavidVivancos/NeuraxonLife
+
 import math
 import random
 import numpy as np
@@ -245,9 +246,10 @@ class Neuraxon:
         self._ctsn_last_phi = float(phi)
         self.complement_h = rho * self.complement_h + (1.0 - rho) * phi
 
-    def update(self, synaptic_inputs: List[float], modulatory_inputs: List[float], external_input: float, neuromodulators: Dict[str, float], dt: float, global_osc: float, neighbor_phases: List[float] = None):
+    def update(self, synaptic_inputs: List[float], modulatory_inputs: List[float], external_input: float, neuromodulators: Dict[str, float], dt: float, global_osc: float, neighbor_phases: List[float] = None, receptor_activations: Dict = None):
         """v2.39: Added neighbor_phases for Kuramoto coupling."""
         if not self.is_active or self.energy_level <= 0: return
+        receptor_activations = receptor_activations or {}
 
         phase_coupling_strength = self.params.phase_coupling_strength
         
@@ -262,6 +264,11 @@ class Neuraxon:
         
         total_synaptic, branch_outputs = self._nonlinear_dendritic_integration(synaptic_inputs, modulatory_inputs, dt)
         
+        # 106: Algorithm 4 — g_NA = 1 + 0.5*β1 + 0.2*α2
+        beta1_act = receptor_activations.get('beta1', 0.0)
+        alpha2_act = receptor_activations.get('alpha2', 0.0)
+        g_NA = 1.0 + 0.5 * beta1_act + 0.2 * alpha2_act
+        
         acetylcholine = neuromodulators.get('acetylcholine', 0.5)
         norepi = neuromodulators.get('norepinephrine', 0.5)
         
@@ -274,7 +281,8 @@ class Neuraxon:
         has_strong_input = total_input_strength > self.params.sensory_gating_threshold
         
         # Spontaneous probability with sensory gating
-        base_spont_prob = self.spontaneous_firing_rate * dt * (1.0 + math.cos(self.phase) * 0.3) * noise_suppression
+        effective_spont_rate = self.spontaneous_firing_rate + 0.3 * alpha2_act
+        base_spont_prob = effective_spont_rate * dt * (1.0 + math.cos(self.phase) * 0.3) * noise_suppression
         if self.params.sensory_gating_enabled and has_strong_input:
             spont_prob = base_spont_prob * self.params.sensory_gating_suppression
         else:
@@ -307,7 +315,7 @@ class Neuraxon:
         # v3.34 RC1-FIX: Bias now 0.0 from config; kept in formula for backward compat
         negative_bias = getattr(self.params, 'membrane_negative_bias', -0.06)
         
-        drive = (total_synaptic + external_input + spontaneous + negative_bias * 2.0) * gain
+        drive = (g_NA * total_synaptic + external_input + spontaneous + negative_bias * 2.0) * gain
         
         tau_eff = max(1.0, self.intrinsic_timescale)
         prev_state = self.trinary_state
@@ -327,8 +335,19 @@ class Neuraxon:
         # Store previous potential for subthreshold logging
         prev_potential = self.membrane_potential
         
-        # Use individualized adaptation_rate indirectly via adaptation variable dynamics
-        self.membrane_potential += dt / tau_eff * (-self.membrane_potential + drive - self.adaptation)
+        osc_component = 0.2 * math.cos(global_osc)  # 106: optional oscillator drive into DSN total_input
+        if getattr(self.params, 'dsn_enabled', True):
+            k = len(self.dsn_input_buffer)
+            self.dsn_input_buffer = self.dsn_input_buffer[1:] + [float(external_input + total_synaptic)]
+            conv_out = sum(self.dsn_input_buffer[i] * self.dsn_kernel_weights[i] for i in range(k))
+            conv_out = max(-50.0, min(50.0, conv_out))
+            dsn_alpha = 1.0 / (1.0 + math.exp(-conv_out))
+            self.dsn_alpha = dsn_alpha
+            total_input = g_NA * total_synaptic + external_input + osc_component - self.adaptation + spontaneous
+            self.membrane_potential = dsn_alpha * self.membrane_potential + (1.0 - dsn_alpha) * total_input
+        else:
+            ds = (dt / tau_eff) * (-self.membrane_potential + drive - self.adaptation)
+            self.membrane_potential += ds
         
         # v2.37b: BIOINSPIRED - Asymmetric adaptation
         # Adaptation after excitatory firing is STRONGER than after inhibitory
@@ -358,45 +377,27 @@ class Neuraxon:
         # energy_factor=1.0 -> no change; energy_factor=0.3 -> threshold raised by ~3.3x coupling factor
         threshold_energy_mod = (1.0 - energy_factor) * self.params.energy_threshold_coupling * self.firing_threshold_excitatory
         
-        # Apply all threshold modulations
-        # Note: threshold_energy_mod ADDS to threshold (making firing harder when energy is low)
-        # 
-        # Use individualized firing thresholds with CORRECTED autoreceptor feedback
-        # 
-        # FIX v2.32: Autoreceptor provides NEGATIVE feedback (D2-like mechanism)
-        # BEFORE: -0.1 * autoreceptor → high activity LOWERED threshold (positive feedback - WRONG)
-        # AFTER:  +0.15 * autoreceptor → high activity RAISES threshold (negative feedback - CORRECT)
-        #
-        # Bioinspired: D2 autoreceptors detect released dopamine and INHIBIT further release
-        # Similarly, our autoreceptor senses activity and should DAMPEN further firing
-        # v2.36: Increased autoreceptor effect for stronger negative feedback
-        autoreceptor_effect = 0.22 * self.autoreceptor
-        theta_exc = self.firing_threshold_excitatory - threshold_mod + autoreceptor_effect + threshold_energy_mod
-        # v3.34 RC1-FIX: Symmetric autoreceptor negative feedback on inhibitory threshold
-        # BIOINSPIRED: D2-type autoreceptors sense released neurotransmitter from ANY
-        # firing and dampen further activity equally regardless of sign. The prior 0.5×
-        # factor let inhibitory firing escape negative feedback, sustaining -1 lock-in.
-        theta_inh = self.firing_threshold_inhibitory - threshold_mod - autoreceptor_effect - threshold_energy_mod * 0.5
+        # 106: Saturated threshold modulation (MOD-1, MOD-2 via readout)
+        m1_act = receptor_activations.get('M1', 0.0)
+        m2_act = receptor_activations.get('M2', 0.0)
+        raw_mod = 0.3 * m1_act - 0.2 * m2_act + (sum(modulatory_inputs) if modulatory_inputs else 0)
+        delta_theta_meta = 0.1 * math.tanh(raw_mod)
+        target_rate = getattr(self.params, 'target_firing_rate', 0.2)
+        fr_avg = getattr(self, 'firing_rate_avg', target_rate)
+        delta_theta_homeo = 0.01 * (fr_avg - target_rate)
+        theta1_eff = self.firing_threshold_excitatory + threshold_energy_mod - delta_theta_meta + delta_theta_homeo - 0.1 * self.autoreceptor
+        theta2_eff = self.firing_threshold_inhibitory - threshold_energy_mod - delta_theta_meta + delta_theta_homeo + 0.1 * self.autoreceptor
         
-        # v2.92: Symmetric hysteresis for balanced state transitions
-        # Paper claim: neutral state provides "responsiveness without immediate action"
-        hysteresis_exc = 0.025 if self.trinary_state == 0 else 0.0
-        hysteresis_inh = 0.025 if self.trinary_state == 0 else 0.0
-        
-        if self.membrane_potential > (theta_exc + hysteresis_exc): 
+        # Trinary readout — use state_tilde when ctsn_enabled else membrane_potential
+        readout = self.state_tilde if getattr(self.params, 'ctsn_enabled', False) else self.membrane_potential
+        if readout > theta1_eff:
             self.trinary_state = TrinaryState.EXCITATORY.value
-        elif self.membrane_potential < (theta_inh - hysteresis_inh): 
+        elif readout < theta2_eff:
             self.trinary_state = TrinaryState.INHIBITORY.value
-        else: 
+        else:
             self.trinary_state = TrinaryState.NEUTRAL.value
         
         self.state_history.append(self.trinary_state)
-
-        # === NEURAXON v2.0 PIPELINE INTEGRATION ===
-        if getattr(self.params, 'dsn_enabled', False) and self.type != NeuronType.INPUT:
-            raw_input = total_synaptic + external_input + spontaneous
-            alpha_t = self._compute_dsn_alpha(raw_input)
-            self.membrane_potential = alpha_t * self.membrane_potential + (1.0 - alpha_t) * raw_input
 
         msth_signals = self.msth.update(abs(self.trinary_state), dt)
         if msth_signals['ultrafast_suppress']:
@@ -450,19 +451,19 @@ class Neuraxon:
         if logger.log_level >= 2:
             # If we're in neutral state but close to threshold
             if self.trinary_state == 0:
-                distance_to_exc = theta_exc - self.membrane_potential
-                distance_to_inh = self.membrane_potential - theta_inh
+                distance_to_exc = theta1_eff - self.membrane_potential
+                distance_to_inh = self.membrane_potential - theta2_eff
                 
                 # Log if within 30% of either threshold
-                if distance_to_exc < abs(theta_exc) * 0.3:
+                if distance_to_exc < abs(theta1_eff) * 0.3:
                     logger.log_subthreshold_event(
                         0, self.id, self.membrane_potential, 
-                        theta_exc, distance_to_exc
+                        theta1_eff, distance_to_exc
                     )
-                elif distance_to_inh < abs(theta_inh) * 0.3:
+                elif distance_to_inh < abs(theta2_eff) * 0.3:
                     logger.log_subthreshold_event(
                         0, self.id, self.membrane_potential,
-                        theta_inh, distance_to_inh
+                        theta2_eff, distance_to_inh
                     )
         
         # NEW: Log significant autoreceptor effects Updated Save states in v 2.1
@@ -480,7 +481,7 @@ class Neuraxon:
                 autoreceptor_contrib = -0.1 * self.autoreceptor
                 logger.log_threshold_modulation_event(
                     0, self.id, self.firing_threshold_excitatory,
-                    theta_exc, ach_contrib, autoreceptor_contrib
+                    theta1_eff, ach_contrib, autoreceptor_contrib
                 )
         
         # NEW: Log Dendritic Spikes Updated Save states in v 2.1

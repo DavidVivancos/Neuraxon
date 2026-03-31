@@ -1,11 +1,11 @@
-# Neuraxon Game of Life 3.5 logger (Neuraxon 2.0 Compliant) Internal version 104
+# Neuraxon Game of Life 3.5 logger (Neuraxon 2.0 Compliant) Internal version 125
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
 # https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint  (Neuraxon V2.0 )
 # https://www.researchgate.net/publication/397331336_Neuraxon (V1) 
 # Play the Lite Version of the Game of Life 3 at https://huggingface.co/spaces/DavidVivancos/NeuraxonLife
-import time
+
 import json
 import math
 import cmath
@@ -62,6 +62,7 @@ class DataLogger:
     def reset(self):
         """Reset all logged data."""
         self.start_time = time.time()
+        self.current_step_data = {}  # Add this line to fix the AttributeError
         self.game_metadata = {
             'start_timestamp': datetime.now().isoformat(),
             'log_level': self.log_level,
@@ -184,6 +185,8 @@ class DataLogger:
             'temperature_variance': [],
             'resting_fraction': [],  # Fraction of NxErs in rest mode
             'proprioceptron_forced_turns': [],
+            'proprioceptron_brain_warnings': [],
+            'proprioceptron_brain_turns': [],
             # NEW v3.1: Additional time series for new inputs/outputs
             'daynight_input_distribution': [],  # Distribution of day/night input signals
             'temperature_input_distribution': [],  # Distribution of temp input signals
@@ -345,6 +348,7 @@ class DataLogger:
     def _ensure_nxer_series(self, nxer_id: int, nxer_name: str):
         """Initialize time series structure for a specific NxEr if not exists."""
         if nxer_id not in self.per_nxer_time_series:
+            # v111 FIX (M16): Added 9 receptor_* keys — was causing all-NaN in parquet
             self.per_nxer_time_series[nxer_id] = {
                 'name': nxer_name,
                 'ticks': [],
@@ -380,8 +384,22 @@ class DataLogger:
                 'is_resting': [],
                 'proprioceptron_rock_hits': [],
                 'proprioceptron_forced_turns': [],
+                'proprioceptron_brain_warnings': [],
+                'proprioceptron_brain_turns': [],
                 'brain_movement_weight': [],
+
+                # v111 FIX (M16): Receptor activation logging.
+                # ROOT CAUSE: NeuromodulatorSystem.compute_receptor_activations()
+                # computed all 9 receptors correctly, but _log_nxer_individual()
+                # never read them from the NxEr's network. v109 wrote to
+                # logger.current_step_data (network-level), not per-NxEr series.
+                # Paper §1 Neuromodulation, §8 receptor subtypes.
+                'receptor_D1': [], 'receptor_D2': [],
+                'receptor_5HT1A': [], 'receptor_5HT2A': [], 'receptor_5HT4': [],
+                'receptor_M1': [], 'receptor_M2': [],
+                'receptor_beta1': [], 'receptor_alpha2': [],
             }
+
     def _log_nxer_individual(self, tick: int, a: 'NxEr'):
         """Log individual NxEr's data independently."""
         if not a.alive:
@@ -405,10 +423,12 @@ class DataLogger:
                         'dopamine', 'serotonin', 'acetylcholine', 'norepinephrine',
                         'membrane_potential_mean', 'membrane_potential_std',
                         'excitatory_fraction', 'inhibitory_fraction', 'neutral_fraction',
-                        'mean_w_fast', 'mean_w_slow', 'mean_w_meta', 'phase_coherence']:
+                        'mean_w_fast', 'mean_w_slow', 'mean_w_meta', 'phase_coherence',
+                        'receptor_D1', 'receptor_D2', 'receptor_5HT1A', 'receptor_5HT2A',
+                        'receptor_5HT4', 'receptor_M1', 'receptor_M2', 'receptor_beta1', 'receptor_alpha2']:
                 series[key].append(0.0)
             return
-        
+
         net = a.net
         active_neurons = [n for n in net.all_neurons if n.is_active]
         active_synapses = [s for s in net.synapses if s.integrity > 0]
@@ -418,10 +438,12 @@ class DataLogger:
                         'dopamine', 'serotonin', 'acetylcholine', 'norepinephrine',
                         'membrane_potential_mean', 'membrane_potential_std',
                         'excitatory_fraction', 'inhibitory_fraction', 'neutral_fraction',
-                        'mean_w_fast', 'mean_w_slow', 'mean_w_meta', 'phase_coherence']:
+                        'mean_w_fast', 'mean_w_slow', 'mean_w_meta', 'phase_coherence',
+                        'receptor_D1', 'receptor_D2', 'receptor_5HT1A', 'receptor_5HT2A',
+                        'receptor_5HT4', 'receptor_M1', 'receptor_M2', 'receptor_beta1', 'receptor_alpha2']:
                 series[key].append(0.0)
             return
-        
+
         # Network activity
         activity = sum(abs(n.trinary_state) for n in active_neurons) / len(active_neurons)
         series['network_activity'].append(activity)
@@ -466,9 +488,27 @@ class DataLogger:
         prop = getattr(a, 'proprioceptron', None)
         series['proprioceptron_rock_hits'].append(prop.total_rock_hits if prop else 0)
         series['proprioceptron_forced_turns'].append(prop.forced_turn_count if prop else 0)
+        series['proprioceptron_brain_warnings'].append(prop.brain_warning_count if prop else 0)
+        series['proprioceptron_brain_turns'].append(prop.brain_avoidance_turn_count if prop else 0)
         series['brain_movement_weight'].append(getattr(a, 'brain_movement_weight', 0.5))
         
         # Phase coherence
+
+        # v111 FIX (M16): Log actual receptor activations from the NxEr's network.
+        # These are computed each tick by NeuromodulatorSystem.compute_receptor_activations()
+        # and stored on the network object. Previously only written to current_step_data
+        # (global), never to per-NxEr time series.
+        ra = getattr(a.net, 'receptor_activations', {})
+        series['receptor_D1'].append(ra.get('D1', 0.0))
+        series['receptor_D2'].append(ra.get('D2', 0.0))
+        series['receptor_5HT1A'].append(ra.get('5HT1A', 0.0))
+        series['receptor_5HT2A'].append(ra.get('5HT2A', 0.0))
+        series['receptor_5HT4'].append(ra.get('5HT4', 0.0))
+        series['receptor_M1'].append(ra.get('M1', 0.0))
+        series['receptor_M2'].append(ra.get('M2', 0.0))
+        series['receptor_beta1'].append(ra.get('beta1', 0.0))
+        series['receptor_alpha2'].append(ra.get('alpha2', 0.0))
+
         phases = [n.phase for n in active_neurons]
         if len(phases) >= 2:
             import cmath
@@ -486,15 +526,18 @@ class DataLogger:
             if new_level >= 2 and not hasattr(self, 'time_series'):
                 self._init_level2_data()
     
-    def log_tick(self, tick: int, nxers: dict = None):
+    def log_tick(self, tick: int, nxers: dict = None, full_analytics: bool = True):
+        """v4.1: Added full_analytics flag — when False, skip expensive Level 2 time-series."""
         self.summary['total_ticks'] = tick
         
         all_nxers = list((nxers or {}).values()) if nxers else []
         alive_nxers = [a for a in all_nxers if a.alive]
         
         if alive_nxers:
+            # v4.1: Sample neurons when population is large
+            _sample_nxers = alive_nxers if len(alive_nxers) <= 200 else alive_nxers[::max(1, len(alive_nxers) // 200)]
             all_active_neurons = []
-            for a in alive_nxers:
+            for a in _sample_nxers:
                 all_active_neurons.extend([n for n in a.net.all_neurons if n.is_active])
             
             if all_active_neurons:
@@ -515,11 +558,12 @@ class DataLogger:
                 avg_level = sum(levels) / len(levels) if levels else 0.0
                 self.summary['neuromodulator_peaks'][mod] = max(self.summary['neuromodulator_peaks'][mod], avg_level)
         
-        if self.log_level >= 2:
+        if self.log_level >= 2 and full_analytics:
+            # v4.1: Only run expensive Level 2 analytics on full_analytics ticks
             self._log_tick_level2(tick, alive_nxers)
-            # Only log individual NxEr time series at level 3
             if self.log_level >= 3:
-                for a in alive_nxers:
+                log_nxers = alive_nxers if len(alive_nxers) <= 100 else alive_nxers[::max(1, len(alive_nxers) // 100)]
+                for a in log_nxers:
                     self._log_nxer_individual(tick, a)
     
     def _log_tick_level2(self, tick: int, alive_nxers: list):
@@ -545,12 +589,18 @@ class DataLogger:
                     self.time_series[key].append(0.0)
             return
         
-        # Collect all active neurons and synapses across ALL alive NxErs
+        # v4.1: Sample NxErs for analytics when population is large (>200)
+        if len(alive_nxers) > 200:
+            _step = max(1, len(alive_nxers) // 200)
+            sample_nxers = alive_nxers[::_step]
+        else:
+            sample_nxers = alive_nxers
+        
         all_active_neurons = []
         all_active_synapses = []
         all_networks = []
         
-        for a in alive_nxers:
+        for a in sample_nxers:
             net = a.net
             all_networks.append(net)
             all_active_neurons.extend([n for n in net.all_neurons if n.is_active])
@@ -670,8 +720,12 @@ class DataLogger:
             # Proprioceptron metrics
             from simulation.entities import Proprioceptron
             total_forced = sum(getattr(a, 'proprioceptron', Proprioceptron()).forced_turn_count for a in alive_nxers)
+            total_warnings = sum(getattr(a, 'proprioceptron', Proprioceptron()).brain_warning_count for a in alive_nxers)
+            total_brain_turns = sum(getattr(a, 'proprioceptron', Proprioceptron()).brain_avoidance_turn_count for a in alive_nxers)
             total_hits = sum(getattr(a, 'proprioceptron', Proprioceptron()).total_rock_hits for a in alive_nxers)
             self.time_series['proprioceptron_forced_turns'].append(total_forced)
+            self.time_series['proprioceptron_brain_warnings'].append(total_warnings)
+            self.time_series['proprioceptron_brain_turns'].append(total_brain_turns)
             self.time_series['rock_collision_rate'].append(total_hits / max(1, len(alive_nxers)))
             
             # NEW v3.1: Track new input/output distributions
@@ -705,7 +759,8 @@ class DataLogger:
         else:
             for key in ['circadian_phase', 'day_night_state', 'mean_body_temperature',
                        'temperature_variance', 'resting_fraction', 
-                       'proprioceptron_forced_turns', 'rock_collision_rate',
+                       'proprioceptron_forced_turns', 'proprioceptron_brain_warnings',
+                       'proprioceptron_brain_turns', 'rock_collision_rate',
                        'daynight_input_distribution', 'temperature_input_distribution',
                        'proprioception_input_distribution', 'resting_output_distribution']:
                 if key.endswith('_distribution'):
@@ -1278,7 +1333,7 @@ class DataLogger:
                 'old_threshold': old_value,
                 'new_threshold': new_value,
                 'activity_level': activity,
-                'direction': 'increased' if new_value > old_value else 'decreased'
+                'direction': 'up' if new_value > old_value else 'down'
             })
 
     def log_dendritic_spike_event(self, tick: int, neuron_id: int, branch_id: int,
@@ -1340,17 +1395,21 @@ class DataLogger:
     def log_weight_evolution_event(self, tick: int, synapse_pre_id: int, synapse_post_id: int,
                                     w_fast_old: float, w_fast_new: float,
                                     w_slow_old: float, w_slow_new: float,
-                                    w_meta_old: float, w_meta_new: float):
+                                    w_meta_old: float, w_meta_new: float,
+                                    details: dict = None):
         """Log significant weight changes across all three timescales."""
         if self.log_level >= 2:
-            self.weight_evolution_events.append({
+            evt = {
                 'tick': tick,
                 'pre_id': synapse_pre_id,
                 'post_id': synapse_post_id,
                 'w_fast_delta': w_fast_new - w_fast_old,
                 'w_slow_delta': w_slow_new - w_slow_old,
                 'w_meta_delta': w_meta_new - w_meta_old
-            })
+            }
+            if details:
+                evt.update(details)
+            self.weight_evolution_events.append(evt)
     
     def log_threshold_modulation_event(self, tick: int, neuron_id: int,
                                         base_threshold: float, effective_threshold: float,

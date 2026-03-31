@@ -1,10 +1,11 @@
-# Neuraxon Game of Life 3.5 Simulation Entities (Neuraxon 2.0 Compliant) Internal version 104
+# Neuraxon Game of Life 3.5 Simulation Entities (Neuraxon 2.0 Compliant) Internal version 125
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
 # https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint  (Neuraxon V2.0 )
 # https://www.researchgate.net/publication/397331336_Neuraxon (V1) 
 # Play the Lite Version of the Game of Life 3 at https://huggingface.co/spaces/DavidVivancos/NeuraxonLife
+
 import time
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, List, Dict
@@ -40,6 +41,9 @@ class Proprioceptron:
     last_successful_heading: int = 0  # Last heading that resulted in movement
     total_rock_hits: int = 0  # Lifetime rock collision count
     forced_turn_count: int = 0  # How many times we forced a direction change
+    brain_warning_count: int = 0  # How many times the brain received a pre-motor warning
+    brain_avoidance_turn_count: int = 0  # Brain changed heading before reflex override
+    last_warning_tick: int = -1  # De-duplicate warning counting within the same tick
     successful_move_streak: int = 0  # Consecutive successful moves (NEW v3.1)
     last_move_result: int = 0  # -1=blocked, 0=neutral, 1=success (NEW v3.1)
     
@@ -72,6 +76,31 @@ class Proprioceptron:
         recent_hits_at_heading = sum(1 for h in self.rock_hit_history if h == current_heading)
         return recent_hits_at_heading >= threshold
     
+    def should_warn_brain(self, current_heading: int, threshold: int = 3) -> bool:
+        """
+        v107 FIX: Determine if brain should receive an early warning BEFORE forced turn.
+        Returns True one tick before should_force_turn would trigger.
+        BIOINSPIRED: Nociceptive/proprioceptive signals reach the brain faster
+        than motor correction — the brain gets a "warning" before reflexive override.
+        """
+        # Warning fires when we're ONE collision away from forced turn threshold
+        if self.consecutive_blocked >= max(1, threshold - 1):
+            return True
+        recent_hits = sum(1 for h in self.rock_hit_history if h == current_heading)
+        return recent_hits >= max(1, threshold - 1)
+    
+    def register_brain_warning(self, tick: int) -> bool:
+        """Count at most one warning per tick; returns True if a new warning was counted."""
+        if self.last_warning_tick == tick:
+            return False
+        self.last_warning_tick = tick
+        self.brain_warning_count += 1
+        return True
+
+    def register_brain_avoidance_turn(self):
+        """Record a brain-initiated heading change that happened before reflex override."""
+        self.brain_avoidance_turn_count += 1
+
     def get_proprioception_signal(self, clear_threshold: int = 5) -> int:
         """
         Get trinary proprioception signal for brain input (NEW v3.1).
@@ -160,6 +189,7 @@ class NxEr:
     _last_O4: int = 0
     mating_intent_until_tick: int = 0
     parents: Tuple[Optional[str], Optional[str]] = (None, None)  # Parent names
+    parent_ids: Tuple[Optional[int], Optional[int]] = (None, None)  # Stable parent IDs for lineage metrics
     ancestors: List[str] = field(default_factory=list)  # Full lineage (ancestor names)
     rounds_survived: int = 0  # How many rounds this NxEr has survived
     clan_id: Optional[int] = None  # Clan Heritage ID

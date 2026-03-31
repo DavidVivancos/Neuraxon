@@ -1,10 +1,11 @@
-# Neuraxon Game of Life 3.5 utils (Neuraxon 2.0 Compliant) Internal version 104
+# Neuraxon Game of Life 3.5 utils (Neuraxon 2.0 Compliant) Internal version 125
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
 # https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint  (Neuraxon V2.0 )
 # https://www.researchgate.net/publication/397331336_Neuraxon (V1) 
 # Play the Lite Version of the Game of Life 3 at https://huggingface.co/spaces/DavidVivancos/NeuraxonLife
+
 import os
 import math
 import random
@@ -39,15 +40,31 @@ def _strip_leading_digits(name: str) -> str:
     while i < len(name) and name[i].isdigit(): i += 1
     return name[i:] if i < len(name) else ""
 
-def _rand_color(exclude: List[Tuple[int, int, int]]) -> Tuple[int, int, int]:
-    """Generates a random color that is visually distinct from a list of excluded colors."""
-    while True:
-        c = (random.randint(30, 235), random.randint(30, 235), random.randint(30, 235))
-        # Check against dynamic excluded list (other agents)
-        if any(sum((c[i] - e[i]) ** 2 for i in range(3)) < 1200 for e in exclude): continue
-        # Check against reserved UI/Terrain colors
-        if c in RESERVED_COLORS: continue
-        return c
+### HOTFIX4: O(1) deterministic color generator using golden-angle HSV spacing.
+### The old version was while-True with O(N) distance check — froze at 200+ colors.
+_hf4_color_idx = [0]
+def _rand_color(exclude=None) -> Tuple[int, int, int]:
+    """Generates a unique color via golden-angle HSV. O(1), never loops."""
+    _hf4_color_idx[0] += 1
+    n = _hf4_color_idx[0]
+    # Golden angle ≈ 137.508° gives maximum hue separation
+    hue = (n * 137.508) % 360.0
+    # Vary saturation and value to avoid similar colors at same hue
+    sat = 0.55 + (((n * 23) % 40) / 100.0)   # 0.55–0.95
+    val = 0.50 + (((n * 17) % 45) / 100.0)   # 0.50–0.95
+    # HSV to RGB (inline, no import needed)
+    h_i = int(hue / 60.0) % 6
+    f = (hue / 60.0) - int(hue / 60.0)
+    p = val * (1.0 - sat)
+    q = val * (1.0 - f * sat)
+    t = val * (1.0 - (1.0 - f) * sat)
+    if h_i == 0:   r, g, b = val, t, p
+    elif h_i == 1: r, g, b = q, val, p
+    elif h_i == 2: r, g, b = p, val, t
+    elif h_i == 3: r, g, b = p, q, val
+    elif h_i == 4: r, g, b = t, p, val
+    else:          r, g, b = val, p, q
+    return (int(r * 255), int(g * 255), int(b * 255))
 
 def _rot(x, y, a):
     """Rotates a 2D point (x, y) around the origin by angle 'a'."""
