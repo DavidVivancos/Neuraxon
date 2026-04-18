@@ -1,2 +1,7 @@
-# No external dependencies required
-# Neuraxon uses only Python standard library
+# Core Neuraxon (neuraxon.py, neuraxon2.py, MultiNeuraxon2.py) uses only
+# the Python standard library — no dependencies required.
+
+# The Image Evolution Engine (image_evolution/ + app.py) adds:
+pillow>=10.0
+numpy>=1.24
+gradio>=4.0
