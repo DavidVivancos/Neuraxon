@@ -37,6 +37,8 @@
 
 **Neuraxon Game of Life 4.0 Research Version Mulit Nxon 2.0 (Based on Neuraxon 2.0) code:** (https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/4)
 
+**Neuraxon Game of Life 4.5 Research Version Mulit Nxon 2.0 (Based on Neuraxon 2.0)  + First Proto-Language/Audition code:** (https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/4.5)
+
 **Neuraxon Game of Life 4.5 Lite Demo (Based on Multi Neuraxon 2.0) + First Proto-Language/Audition :** [Neuraxon Game of Life Hugging Face Space](https://huggingface.co/spaces/DavidVivancos/NeuraxonLife)
 <div align="center">
   <img src="images/NeuraxonGameOfLife4.0-DemoSreenshot.png" alt="Neuraxon Game of Life Visualization" width="90%"/>  
