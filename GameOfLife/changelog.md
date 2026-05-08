@@ -1,5 +1,9 @@
 # Neuraxon Game of Life Researh Version<br>
 CHANGE LOG:<br>
+
+May 8th 2026:<br>
+Neuraxon Game of Life v.4.51 udpate speed optimizations
+
 April 23rd 2026:<br>
 Neuraxon Game of Life v.4.5  Multi-Nxon 2.0 (Research Version): For Neuraxon 2.0 Big update <br>
 Adds a bio-inspired tonal-voice subsystem on top of the existing Multi-Neuraxon
