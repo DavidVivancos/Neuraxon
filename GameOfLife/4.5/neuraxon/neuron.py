@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.5 neuron (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 142
+# Neuraxon Game of Life v.4.51 neuron (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 143 
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -86,8 +86,11 @@ class Neuraxon:
         self.state_tilde = 0.0
 
         # --- Neuraxon v2.0: DSN Dynamic Decay (Algorithm 1 Step 2) ---
+        # v4.51 PERF: use deque(maxlen=k) so the ring buffer is O(1) per push
+        # instead of re-allocating a new list (list[1:] + [x]) every tick.
         k = max(int(getattr(params, 'dsn_kernel_size', 4)), 1)
-        self.dsn_input_buffer = [0.0] * k
+        self._dsn_k = k
+        self.dsn_input_buffer = deque([0.0] * k, maxlen=k)
         self.dsn_alpha = 0.5
         base_kernel = getattr(params, 'dsn_kernel_weights', None) or []
         if len(base_kernel) != k:
@@ -114,12 +117,43 @@ class Neuraxon:
         
         # NEW: Track for subthreshold logging
         self._prev_membrane_potential = 0.0
+
+        # v4.51 PERF: cache hot-path params — called per neuron per sub-step.
+        self._phase_coupling_strength = params.phase_coupling_strength
+        self._phase_coupling_local = params.phase_coupling_local_strength
+        self._phase_coupling_momentum = params.phase_coupling_momentum
+        self._dsn_enabled = getattr(params, 'dsn_enabled', True)
+        self._ctsn_enabled = getattr(params, 'ctsn_enabled', False)
+        self._ctsn_rho = float(getattr(params, 'ctsn_rho', 0.9))
+        self._agmp_enabled_n = getattr(params, 'agmp_enabled', False)
+        self._agmp_lambda_a_n = getattr(params, 'agmp_lambda_a', 0.999)
+        self._spont_as_current = params.spontaneous_as_current
+        self._spont_current_mag = params.spontaneous_current_magnitude
+        self._sensory_gating_enabled = params.sensory_gating_enabled
+        self._sensory_gating_threshold = params.sensory_gating_threshold
+        self._sensory_gating_suppression = params.sensory_gating_suppression
+        self._max_intrinsic_timescale = params.max_intrinsic_timescale
+        self._membrane_neg_bias = getattr(params, 'membrane_negative_bias', 0.0)
+        self._resting_potential_decay = getattr(params, 'resting_potential_decay', None)
+        self._energy_threshold_floor = params.energy_threshold_floor
+        self._energy_threshold_coupling = params.energy_threshold_coupling
+        self._critical_energy_level = params.critical_energy_level
+        self._energy_recovery_boost = params.energy_recovery_boost
+        self._neuron_death_threshold = params.neuron_death_threshold
+        self._target_firing_rate_n = getattr(params, 'target_firing_rate', 0.2)
+        self._firing_rate_alpha = getattr(params, 'firing_rate_alpha', 0.01)
+        self._spike_class_enabled = params.spike_classification_enabled
+        self._driven_input_threshold = params.driven_input_threshold
+        # v4.51 PERF: precompute branch count (called every integration call)
+        self._n_branches = len(self.dendritic_branches)
     
     def _nonlinear_dendritic_integration(self, synaptic_inputs: List[float], modulatory_inputs: List[float], dt: float) -> Tuple[float, List[float]]:
+        # v4.51 PERF: use cached _n_branches (was len(self.dendritic_branches) called 3× per invocation)
+        nb = self._n_branches
         branch_outputs = []
         total_synaptic = 0.0
         for i, branch in enumerate(self.dendritic_branches):
-            branch_syn_inputs = synaptic_inputs[i::len(self.dendritic_branches)]
+            branch_syn_inputs = synaptic_inputs[i::nb]
             branch_out = branch.integrate_inputs(branch_syn_inputs, dt)
             branch_outputs.append(branch_out)
             total_synaptic += branch_out
@@ -131,7 +165,8 @@ class Neuraxon:
         d_phase = 2 * math.pi * self.natural_frequency * dt
         
         # Global coupling (WEAK - just sets rhythm)
-        global_coupling = self.params.phase_coupling_strength * math.sin(global_osc - self.phase) * dt
+        # v4.51 PERF: use cached _phase_coupling_strength
+        global_coupling = self._phase_coupling_strength * math.sin(global_osc - self.phase) * dt
         
         # Local Kuramoto coupling (STRONG - drives synchronization)
         local_coupling = 0.0
@@ -143,13 +178,15 @@ class Neuraxon:
                 weighted_sin_sum += weight * math.sin(phase_diff)
                 total_weight += weight
             if total_weight > 0.01:
-                local_coupling = (self.params.phase_coupling_local_strength * 
+                # v4.51 PERF: cached _phase_coupling_local
+                local_coupling = (self._phase_coupling_local *
                                 weighted_sin_sum / total_weight * dt)
         
-        # Update with momentum
+        # Update with momentum — v4.51 PERF: cached _phase_coupling_momentum
+        mom = self._phase_coupling_momentum
         total_change = d_phase + global_coupling + local_coupling
-        smoothed_change = (self.params.phase_coupling_momentum * self._prev_phase_change + 
-                        (1 - self.params.phase_coupling_momentum) * total_change)
+        smoothed_change = (mom * self._prev_phase_change +
+                        (1 - mom) * total_change)
         self._prev_phase_change = smoothed_change
         self.phase = (self.phase + smoothed_change) % (2 * math.pi)
     
@@ -218,9 +255,10 @@ class Neuraxon:
     
     def _compute_dsn_alpha(self, current_input: float) -> float:
         """Neuraxon v2.0: alpha_t = Sigmoid(CausalConv1D(X_{t-k+1:t})) (Algorithm 1 Steps 5-6)."""
-        if not getattr(self.params, 'dsn_enabled', False):
+        # v4.51 PERF: use cached flag; deque.append auto-evicts oldest (maxlen=k),
+        # so pop-then-append collapses to a single append with identical semantics.
+        if not self._dsn_enabled:
             return 0.5
-        self.dsn_input_buffer.pop(0)
         self.dsn_input_buffer.append(float(current_input))
         kernel = getattr(self, 'dsn_kernel_weights', []) or []
         if len(kernel) != len(self.dsn_input_buffer):
@@ -236,10 +274,11 @@ class Neuraxon:
 
     def _update_complement(self, x_t: float):
         """Neuraxon v2.0: h_t, s_tilde(t) = s(t) + h(t) (Algorithm 1 Steps 7-8)."""
-        if not getattr(self.params, 'ctsn_enabled', False):
+        # v4.51 PERF: use cached flags.
+        if not self._ctsn_enabled:
             self.complement_h = 0.0
             return
-        rho = float(getattr(self.params, 'ctsn_rho', 0.9))
+        rho = self._ctsn_rho
         phi = math.tanh(float(self.ctsn_phi_gain) * float(x_t) + float(self.ctsn_phi_bias))
         self._ctsn_last_x = float(x_t)
         self._ctsn_last_phi = float(phi)
@@ -250,13 +289,13 @@ class Neuraxon:
         if not self.is_active or self.energy_level <= 0: return
         receptor_activations = receptor_activations or {}
 
-        phase_coupling_strength = self.params.phase_coupling_strength
+        phase_coupling_strength = self._phase_coupling_strength  # v4.51 PERF
         
         self._update_intrinsic_timescale(dt)
         
         # CRITICAL FIX: Cap intrinsic timescale AFTER update, not before
         # This ensures the cap is always enforced regardless of ACW calculation
-        self.intrinsic_timescale = min(self.intrinsic_timescale, self.params.max_intrinsic_timescale)
+        self.intrinsic_timescale = min(self.intrinsic_timescale, self._max_intrinsic_timescale)  # v4.51 PERF
         
         # v2.39: Use Kuramoto coupling method
         self._update_phase_oscillator(dt, global_osc, neighbor_phases)
@@ -277,22 +316,23 @@ class Neuraxon:
         
         # Calculate total input strength for classification and gating
         total_input_strength = abs(total_synaptic) + abs(external_input)
-        has_strong_input = total_input_strength > self.params.sensory_gating_threshold
+        has_strong_input = total_input_strength > self._sensory_gating_threshold  # v4.51 PERF
         
         # Spontaneous probability with sensory gating
         effective_spont_rate = self.spontaneous_firing_rate + 0.3 * alpha2_act
         base_spont_prob = effective_spont_rate * dt * (1.0 + math.cos(self.phase) * 0.3) * noise_suppression
-        if self.params.sensory_gating_enabled and has_strong_input:
-            spont_prob = base_spont_prob * self.params.sensory_gating_suppression
+        if self._sensory_gating_enabled and has_strong_input:  # v4.51 PERF
+            spont_prob = base_spont_prob * self._sensory_gating_suppression
         else:
             spont_prob = base_spont_prob
         
         is_spontaneous_firing = False
         spontaneous = 0.0
 
+        # NB: random.random() sequence preserved exactly — do NOT reorder.
         if random.random() < spont_prob:
             is_spontaneous_firing = True
-            if self.params.spontaneous_as_current:
+            if self._spont_as_current:  # v4.51 PERF
                 # v3.34 RC1-FIX: Balanced spontaneous current — 50% inhibitory, 50% excitatory
                 # BIOINSPIRED: Cortical spontaneous activity explores the FULL trinary
                 # state space symmetrically. In vivo, balanced E/I networks produce
@@ -300,7 +340,7 @@ class Neuraxon:
                 # postsynaptic events (Haider et al. 2006, J Neurosci). The prior 60/40
                 # inhibitory bias compounded with membrane_negative_bias to lock outputs
                 # into -1 from initialization (RC1 diagnostic: 97.5% SW quadrant).
-                spontaneous = random.choice([-1.0, 1.0]) * self.params.spontaneous_current_magnitude
+                spontaneous = random.choice([-1.0, 1.0]) * self._spont_current_mag  # v4.51 PERF
             else:
                 # Legacy: force threshold
                 if random.random() < 0.5:
@@ -312,7 +352,7 @@ class Neuraxon:
         gain = 1.0 + (norepi - 0.5) * 0.4
         
         # v3.34 RC1-FIX: Bias now 0.0 from config; kept in formula for backward compat
-        negative_bias = getattr(self.params, 'membrane_negative_bias', -0.06)
+        negative_bias = self._membrane_neg_bias  # v4.51 PERF
         
         drive = (g_NA * total_synaptic + external_input + spontaneous + negative_bias * 2.0) * gain
         
@@ -326,8 +366,9 @@ class Neuraxon:
         # The prior asymmetry (positive 1.1×, negative 0.85×) created a ratchet effect
         # that trapped membrane potential in the negative range, contributing to RC1.
         # Paper claim: neutral state enables "swift transitions based on subsequent inputs"
-        if hasattr(self.params, 'resting_potential_decay'):
-            resting_decay = self.params.resting_potential_decay * dt
+        # v4.51 PERF: use cached _resting_potential_decay (None if not in params).
+        if self._resting_potential_decay is not None:
+            resting_decay = self._resting_potential_decay * dt
             # v3.34: Symmetric decay for both positive and negative potentials
             self.membrane_potential *= (1.0 - resting_decay)
         
@@ -335,10 +376,13 @@ class Neuraxon:
         prev_potential = self.membrane_potential
         
         osc_component = 0.2 * math.cos(global_osc)  # 106: optional oscillator drive into DSN total_input
-        if getattr(self.params, 'dsn_enabled', True):
-            k = len(self.dsn_input_buffer)
-            self.dsn_input_buffer = self.dsn_input_buffer[1:] + [float(external_input + total_synaptic)]
-            conv_out = sum(self.dsn_input_buffer[i] * self.dsn_kernel_weights[i] for i in range(k))
+        # v4.51 PERF: cached _dsn_enabled; deque.append auto-evicts (maxlen=k);
+        # conv uses zip, one allocation-free pass. Mathematically identical.
+        if self._dsn_enabled:
+            self.dsn_input_buffer.append(float(external_input + total_synaptic))
+            conv_out = 0.0
+            for b, w in zip(self.dsn_input_buffer, self.dsn_kernel_weights):
+                conv_out += b * w
             conv_out = max(-50.0, min(50.0, conv_out))
             dsn_alpha = 1.0 / (1.0 + math.exp(-conv_out))
             self.dsn_alpha = dsn_alpha
@@ -405,11 +449,13 @@ class Neuraxon:
         self._update_complement(self.membrane_potential)
         self.state_tilde = self.membrane_potential + self.complement_h
 
-        fr_alpha = getattr(self.params, 'firing_rate_alpha', 0.01)
+        # v4.51 PERF: use cached firing_rate_alpha
+        fr_alpha = self._firing_rate_alpha
         self.firing_rate_avg += fr_alpha * (abs(self.trinary_state) - self.firing_rate_avg) * dt
 
-        if getattr(self.params, 'agmp_enabled', False):
-            lam_a = getattr(self.params, 'agmp_lambda_a', 0.999)
+        # v4.51 PERF: use cached agmp flag + lambda.
+        if self._agmp_enabled_n:
+            lam_a = self._agmp_lambda_a_n
             self.astrocyte_state = lam_a * self.astrocyte_state + (1.0 - lam_a) * abs(self.state_tilde)
 
 
@@ -421,8 +467,10 @@ class Neuraxon:
         # BIOINSPIRED: Biological neurons show ~70-90% driven, ~10-30% spontaneous activity
         # Paper Section 6: Spontaneous activity provides substrate for plasticity but 
         # most spikes during active behavior are stimulus-driven
+        # v4.51 PERF: resolve logger+level ONCE for the remainder of update().
         logger = get_data_logger()
-        if abs(self.trinary_state) > 0 and self.params.spike_classification_enabled:
+        _ll = logger.log_level
+        if abs(self.trinary_state) > 0 and self._spike_class_enabled:  # v4.51 PERF
             # Calculate relative contributions
             input_contribution = abs(total_synaptic) + abs(external_input)
             spont_contribution = abs(spontaneous)
@@ -432,11 +480,11 @@ class Neuraxon:
             # 1. Input contribution is above noise floor (driven_input_threshold), OR
             # 2. No spontaneous event triggered this spike
             # A spike is "spontaneous" only if spontaneous event occurred AND dominates
-            is_driven = (input_contribution > self.params.driven_input_threshold or 
+            is_driven = (input_contribution > self._driven_input_threshold or  # v4.51 PERF
                         (not is_spontaneous_firing and input_contribution > 0.01))
             is_truly_spontaneous = is_spontaneous_firing and spont_contribution > input_contribution
             
-            if logger.log_level >= 2:
+            if _ll >= 2:
                 if is_truly_spontaneous:
                     # Log as spontaneous - this was triggered by spontaneous current
                     logger.log_spontaneous_event(0, self.id, self.membrane_potential)
@@ -446,8 +494,7 @@ class Neuraxon:
                     logger.log_driven_firing(0)
         
         # NEW: Log subthreshold integration events Updated Save states in v 2.1
-        logger = get_data_logger()
-        if logger.log_level >= 2:
+        if _ll >= 2:
             # If we're in neutral state but close to threshold
             if self.trinary_state == 0:
                 distance_to_exc = theta1_eff - self.membrane_potential
@@ -466,27 +513,22 @@ class Neuraxon:
                     )
         
         # NEW: Log significant autoreceptor effects Updated Save states in v 2.1
-        if abs(self.autoreceptor) > 0.1:
-            logger = get_data_logger()
-            if logger.log_level >= 2:
-                threshold_effect = -0.1 * self.autoreceptor
-                logger.log_autoreceptor_event(0, self.id, self.autoreceptor, threshold_effect)
+        if abs(self.autoreceptor) > 0.1 and _ll >= 2:
+            threshold_effect = -0.1 * self.autoreceptor
+            logger.log_autoreceptor_event(0, self.id, self.autoreceptor, threshold_effect)
         
         # NEW: Log threshold modulation events (when crossing state boundaries) Updated Save states in v 2.1
-        if prev_state != self.trinary_state:
-            logger = get_data_logger()
-            if logger.log_level >= 2:
-                ach_contrib = (neuromodulators.get('acetylcholine', 0.5) - 0.5) * 0.5
-                autoreceptor_contrib = -0.1 * self.autoreceptor
-                logger.log_threshold_modulation_event(
-                    0, self.id, self.firing_threshold_excitatory,
-                    theta1_eff, ach_contrib, autoreceptor_contrib
-                )
+        if prev_state != self.trinary_state and _ll >= 2:
+            ach_contrib = (neuromodulators.get('acetylcholine', 0.5) - 0.5) * 0.5
+            autoreceptor_contrib = -0.1 * self.autoreceptor
+            logger.log_threshold_modulation_event(
+                0, self.id, self.firing_threshold_excitatory,
+                theta1_eff, ach_contrib, autoreceptor_contrib
+            )
         
         # NEW: Log Dendritic Spikes Updated Save states in v 2.1
         # Check recent activity in branches to log events
-        logger = get_data_logger()
-        if logger.log_level >= 2:
+        if _ll >= 2:
             for branch in self.dendritic_branches:
                 # If the most recent history indicates a spike (1.0)
                 if branch.local_spike_history and branch.local_spike_history[-1] > 0.9:

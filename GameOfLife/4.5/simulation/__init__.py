@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.5 simulation (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 142
+# Neuraxon Game of Life v.4.51 simulation (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 143 
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/

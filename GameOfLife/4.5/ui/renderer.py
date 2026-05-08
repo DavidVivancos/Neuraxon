@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.5 ui renderer (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 142
+# Neuraxon Game of Life v.4.51 ui renderer (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 143 
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -24,7 +24,7 @@ class Renderer:
     """Handles all Pygame-based rendering and user input for the main simulation window."""
     def __init__(self, world: 'World', textures: Dict[str, Optional[str]], textures_alpha: float):
         pygame.init()
-        pygame.display.set_caption("Neuraxon Game of Life v 4.5 (Research Version) - By David Vivancos & Dr Jose Sanchez for Qubic Science")
+        pygame.display.set_caption("Neuraxon Game of Life v 4.51 (Research Version) - By David Vivancos & Dr Jose Sanchez for Qubic Science")
         self.screen = pygame.display.set_mode((1920, 1080), pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
         self.world = world
@@ -300,7 +300,57 @@ class Renderer:
             # Display key parameters of the agent's neural network.
             self.screen.blit(self.small.render("Network params:", True, (200, 200, 200)), (px, py)); py += 18
             P = a.net.params
-            main_params = [f"inputs={P.num_input_neurons} hidden={P.num_hidden_neurons} outputs={P.num_output_neurons}", f"conn_prob={P.connection_probability:.2f} steps={P.simulation_steps}", f"tau_fast={P.tau_fast:.2f} slow={P.tau_slow:.2f} meta={P.tau_meta:.2f}", f"thr_exc={P.firing_threshold_excitatory:.3f} thr_inh={P.firing_threshold_inhibitory:.3f}", f"learn={P.learning_rate:.3f} stdp_win={P.stdp_window:.3f}", f"dopamine={P.dopamine_baseline:.3f} serotonin={P.serotonin_baseline:.3f}", f"energy_cost={P.firing_energy_cost:.1f} meta_rate={P.metabolic_rate:.2f}", f"circles={len(a.net.itu_circles)} evolve_int={P.evolution_interval}"]
+            # v4.51 FIX (unrelated to perf): When a multi-sphere brain is active,
+            # `a.net` points at the MOTOR sphere's sub-network (see make_nxer in
+            # game_loop.py: "The motor sphere's network becomes the primary net
+            # for backward compat"). The motor sphere's num_input_neurons counts
+            # its relay ports from the association sphere, NOT the 10 sensory
+            # channels. For the stats panel we want the sensory sphere's input
+            # count (= world-facing channels), and aggregate hidden/outputs and
+            # ITU circles across all spheres.
+            brain = getattr(a, 'brain', None)
+            if brain is not None and getattr(brain, 'spheres', None):
+                spheres = brain.spheres
+                sensory = spheres.get('sensory')
+                # Inputs: prefer sensory sphere (has the 10 world channels).
+                n_inputs = sensory.network.params.num_input_neurons if sensory else P.num_input_neurons
+                # Outputs: prefer motor sphere (has the 7 behavior channels) —
+                # which happens to be what a.net already points at, but be explicit.
+                motor = spheres.get('motor')
+                n_outputs = motor.network.params.num_output_neurons if motor else P.num_output_neurons
+                # Hidden + circles: sum across all spheres for a faithful brain picture.
+                n_hidden = sum(s.network.params.num_hidden_neurons for s in spheres.values())
+                n_circles = sum(len(s.network.itu_circles) for s in spheres.values())
+                # Sphere summary line — e.g. "Brain: 3 spheres [sensory:6 association:10 motor:6]"
+                sphere_parts = []
+                for sid in ('sensory', 'association', 'motor'):
+                    if sid in spheres:
+                        sphere_parts.append(f"{sid}:{spheres[sid].network.params.num_hidden_neurons}")
+                # Also include any other user-defined spheres not in the default trio.
+                for sid, s in spheres.items():
+                    if sid not in ('sensory', 'association', 'motor'):
+                        sphere_parts.append(f"{sid}:{s.network.params.num_hidden_neurons}")
+                brain_line = f"Brain: {len(spheres)} spheres [{' '.join(sphere_parts)}]"
+            else:
+                n_inputs = P.num_input_neurons
+                n_outputs = P.num_output_neurons
+                n_hidden = P.num_hidden_neurons
+                n_circles = len(a.net.itu_circles)
+                brain_line = None
+
+            main_params = []
+            if brain_line is not None:
+                main_params.append(brain_line)
+            main_params += [
+                f"inputs={n_inputs} hidden={n_hidden} outputs={n_outputs}",
+                f"conn_prob={P.connection_probability:.2f} steps={P.simulation_steps}",
+                f"tau_fast={P.tau_fast:.2f} slow={P.tau_slow:.2f} meta={P.tau_meta:.2f}",
+                f"thr_exc={P.firing_threshold_excitatory:.3f} thr_inh={P.firing_threshold_inhibitory:.3f}",
+                f"learn={P.learning_rate:.3f} stdp_win={P.stdp_window:.3f}",
+                f"dopamine={P.dopamine_baseline:.3f} serotonin={P.serotonin_baseline:.3f}",
+                f"energy_cost={P.firing_energy_cost:.1f} meta_rate={P.metabolic_rate:.2f}",
+                f"circles={n_circles} evolve_int={P.evolution_interval}",
+            ]
             for line in main_params:
                 self.screen.blit(self.small.render(line, True, (210, 210, 210)), (px, py)); py += 16
             py += 10

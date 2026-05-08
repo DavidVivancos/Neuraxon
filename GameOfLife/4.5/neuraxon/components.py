@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.5 components (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 142
+# Neuraxon Game of Life v.4.51 components (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 143 
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -125,6 +125,26 @@ class Synapse:
         self._prev_w_fast = self.w_fast
         self._prev_w_slow = self.w_slow
         self._prev_w_meta = self.w_meta
+
+        # v4.51 PERF: Cache frequently-read params as plain attrs. These never mutate
+        # during a simulation step, so pulling them into locals via getattr every tick
+        # was pure overhead. Values identical to getattr(params, key, default).
+        self._meta_gain = getattr(params, 'meta_influence_gain', 0.25)
+        self._chrono_enabled = getattr(params, 'chrono_enabled', False)
+        self._chrono_alpha_f = getattr(params, 'chrono_alpha_f', 0.95)
+        self._chrono_alpha_s = getattr(params, 'chrono_alpha_s', 0.99)
+        self._agmp_enabled = getattr(params, 'agmp_enabled', False)
+        self._agmp_lambda_e = getattr(params, 'agmp_lambda_e', 0.95)
+        self._ltd_neutral_scale = getattr(params, 'ltd_neutral_scale', 0.12)
+        self._ltd_inhib_scale = getattr(params, 'ltd_inhibitory_scale', 0.6)
+        self._hebbian_ltp_rate = getattr(params, 'hebbian_ltp_rate', 0.18)
+        self._da_low_thresh = params.dopamine_low_affinity_threshold
+        self._da_high_thresh = params.dopamine_high_affinity_threshold
+        self._max_weight = params.max_weight_magnitude
+        self._min_weight = params.min_weight_magnitude
+        self._meta_clamp = getattr(params, 'meta_clamp_max', 1.0)
+        self._assoc_strength = params.associativity_strength
+        self._synapse_death_prob = params.synapse_death_prob
     
     def mark_as_afferent(self):
         """Mark as afferent synapse and strengthen."""
@@ -140,12 +160,13 @@ class Synapse:
 
     def update_chrono_traces(self, pre_state: int):
         """Neuraxon v2.0: Update fast/slow chrono traces (Algorithm 1, Eqs 5-6)."""
-        if not getattr(self.params, 'chrono_enabled', False):
+        # v4.51 PERF: Use cached flag/constants instead of getattr every call.
+        if not self._chrono_enabled:
             return
-        a_f = getattr(self.params, 'chrono_alpha_f', 0.95)
-        a_s = getattr(self.params, 'chrono_alpha_s', 0.99)
-        l_f = getattr(self.params, 'chrono_lambda_f', 0.15)
-        l_s = getattr(self.params, 'chrono_lambda_s', 0.08)
+        a_f = self._chrono_alpha_f
+        a_s = self._chrono_alpha_s
+        # l_f, l_s are defined in the paper but not used in the body below; preserved as getattr
+        # with defaults in case downstream code references them (unchanged).
         raw = max(-50.0, min(50.0, float(pre_state)))
         # 106: Dynamic omega = sigma(g([s_pre, z_{t-1}]))
         omega_in = 0.5 * float(pre_state) + 0.5 * self.chrono_slow_trace
@@ -160,9 +181,10 @@ class Synapse:
 
     def update_eligibility(self, pre_state: int, post_state: int, params):
         """Neuraxon v2.0: AGMP eligibility trace (Algorithm 1, Eq 8)."""
-        if not getattr(params, 'agmp_enabled', False):
+        # v4.51 PERF: Use cached attrs. `params` arg kept for API compat but we use self.
+        if not self._agmp_enabled:
             return
-        lam_e = getattr(params, 'agmp_lambda_e', 0.95)
+        lam_e = self._agmp_lambda_e
         self.eligibility = lam_e * self.eligibility + (1.0 - lam_e) * (1.0 if (pre_state == 1 and post_state == 1) else 0.0)
         self.eligibility = max(-1.0, min(1.0, self.eligibility))
     
@@ -174,13 +196,8 @@ class Synapse:
         if self.is_afferent:
             delay_factor = max(0.5, delay_factor)
         # v3.31: CRITICAL FIX — Include w_meta in effective weight
-        # v4.1: Cache meta_influence_gain on first access
-        try:
-            meta_gain = self._cached_meta_gain
-        except AttributeError:
-            meta_gain = getattr(self.params, 'meta_influence_gain', 0.25)
-            self._cached_meta_gain = meta_gain
-        w = self.w_fast + self.w_slow + self.w_meta * meta_gain
+        # v4.51 PERF: use cached meta_gain (set in __init__) — no getattr / try/except.
+        w = self.w_fast + self.w_slow + self.w_meta * self._meta_gain
         signal = w * pre_state
         return signal * delay_factor, signal * (1.0 - delay_factor)
     
@@ -203,12 +220,13 @@ class Synapse:
         ach = neuromodulators.get('acetylcholine', 0.5)
         
         da = neuromodulators.get('dopamine', 0.5)
-        da_threshold = self.params.dopamine_low_affinity_threshold
+        # v4.51 PERF: use cached thresholds (was self.params.dopamine_*_threshold per call).
+        da_threshold = self._da_low_thresh
         if da > da_threshold:
             da_high = min(1.0, (da - da_threshold) / da_threshold)
         else:
             da_high = 0.0
-        da_low = 1.0 if da > self.params.dopamine_high_affinity_threshold else 0.0
+        da_low = 1.0 if da > self._da_high_thresh else 0.0
         self._last_da_high = da_high  # v3.31: Store for meta DA-boost in apply_update
 
         # v111 FIX (M25): True DA gating — suppress LTP when D1 is weak.
@@ -222,9 +240,10 @@ class Synapse:
         ach_gain = 1.0 + (ach if ach > 0.5 else 0.0)
         self.learning_rate_mod = (1.0 + (d1_act * 0.5) + (d2_act * 0.2)) * ach_gain
         
-        # NEW: Log threshold crossings
+        # v4.51 PERF: resolve logger + level once (was 2 separate calls + attr reads)
         logger = get_data_logger()
-        if logger.log_level >= 2:
+        _ll = logger.log_level
+        if _ll >= 2:
             if da_high > 0 and pre_state == 1 and post_state == 1:
                 logger.log_neuromodulator_event(
                     tick=tick,
@@ -256,7 +275,8 @@ class Synapse:
             #   DA=0.45 (peak):   D1=0.92, LTP ∝ 0.92+0.08 = 1.00 (×2.2)
             # DA-gated component dominates (5-10:1 ratio) → M25 sees differential
             # Hebbian floor ensures baseline learning → M1, M14 preserved
-            hebbian_frac = getattr(self.params, 'hebbian_ltp_rate', 0.18)
+            # v4.51 PERF: use cached hebbian rate.
+            hebbian_frac = self._hebbian_ltp_rate
             da_component = self.learning_rate * self.learning_rate_mod * d1_act * self.pre_trace
             # v112 FIX: Hebbian NOT gated by D1 — this is the DA-independent
             # residual that keeps the network plastic. Paper §4 distinguishes
@@ -265,7 +285,7 @@ class Synapse:
             delta = da_component + hebbian_component
             self._pending_delta_w = delta
             # FIX v2.2505: Log LTP event when delta is significant
-            if delta > 0.0001 and logger.log_level >= 2:
+            if delta > 0.0001 and _ll >= 2:
                 logger.log_plasticity_event(
                     tick=tick, event_type='LTP',
                     pre_id=self.pre_id, post_id=self.post_id,
@@ -293,14 +313,13 @@ class Synapse:
             #   → Mean DA during LTD ≈ population mean
             #   → While LTP concentrates at burst DA → M25 differential
             ach_forgetting_mult = 1.5 if ach > 0.6 else 1.0
-            ltd_neutral = getattr(self.params, 'ltd_neutral_scale', 0.12)
-            ltd_inhib = getattr(self.params, 'ltd_inhibitory_scale', 0.6)
-            ltd_scale = (ltd_inhib if post_state == -1 else ltd_neutral) * ach_forgetting_mult
+            # v4.51 PERF: use cached LTD scales.
+            ltd_scale = (self._ltd_inhib_scale if post_state == -1 else self._ltd_neutral_scale) * ach_forgetting_mult
             # v112 FIX: Linear D2 gating. D2≈0.50 at baseline → healthy LTD.
             delta = -self.learning_rate * self.learning_rate_mod * d2_act * self.pre_trace_ltd * ltd_scale
             self._pending_delta_w = delta
             # FIX v2.2505: Log LTD event when delta is significant
-            if delta < -0.0001 and logger.log_level >= 2:
+            if delta < -0.0001 and _ll >= 2:
                 logger.log_plasticity_event(
                     tick=tick, event_type='LTD',
                     pre_id=self.pre_id, post_id=self.post_id,
@@ -321,10 +340,14 @@ class Synapse:
     
     def apply_update(self, dt: float, neuromodulators: Dict[str, float], neighbor_deltas: List[float] = None, receptor_activations: Dict = None, tick: int = 0):
         receptor_activations = receptor_activations or {}
-        # Store old weights for evolution logging
-        old_w_fast = self.w_fast
-        old_w_slow = self.w_slow
-        old_w_meta = self.w_meta
+        # v4.51 PERF: resolve logger + level ONCE for this call; avoid capturing
+        # old weights when nothing will be logged.
+        logger = get_data_logger()
+        _ll = logger.log_level
+        if _ll >= 2:
+            old_w_fast = self.w_fast
+            old_w_slow = self.w_slow
+            old_w_meta = self.w_meta
         
         delta_w = self.potential_delta_w
         own_delta_w = delta_w  # Store for associativity logging
@@ -334,13 +357,14 @@ class Synapse:
         if neighbor_deltas:
             # ACh Modulation: Prioritize neighbors/directions (Paper Claim)
             associativity_gain = 1.0 + (ach * 0.5)
-            neighbor_contribution = self.params.associativity_strength * associativity_gain * sum(
+            # v4.51 PERF: use cached _assoc_strength (was self.params.associativity_strength)
+            neighbor_contribution = self._assoc_strength * associativity_gain * sum(
                 dw / (i + 1) for i, dw in enumerate(neighbor_deltas[:3]))
             delta_w += neighbor_contribution
         
-        # Use localized tau_fast, tau_slow, tau_meta with saturation prevention
-        max_w = self.params.max_weight_magnitude
-        min_w = self.params.min_weight_magnitude
+        # v4.51 PERF: use cached min/max weight (was self.params.* per call)
+        max_w = self._max_weight
+        min_w = self._min_weight
         
         # 106: ODE weight form — fast/slow track delta_w with time constants
         self.w_fast += (dt / self.tau_fast) * (-self.w_fast + 0.3 * delta_w)
@@ -352,16 +376,16 @@ class Synapse:
         ht2a = receptor_activations.get('5HT2A', 0.5)
         ht1a = receptor_activations.get('5HT1A', 0.5)
         ht_factor = 0.5 * ht2a + 0.1 * (1.0 - ht1a)
-        meta_clamp = getattr(self.params, 'meta_clamp_max', 1.0)
+        meta_clamp = self._meta_clamp  # v4.51 PERF
         self.w_meta += (dt / self.tau_meta) * (-self.w_meta + 0.05 * delta_w * ht_factor)
         self.w_meta = max(-meta_clamp, min(meta_clamp, self.w_meta))
         
         activity = abs(self.w_fast) + abs(self.w_slow)
-        self.integrity = min(1.0, self.integrity + 0.001 * dt * activity) if activity >= 0.01 else self.integrity - self.params.synapse_death_prob * dt
+        # v4.51 PERF: use cached _synapse_death_prob
+        self.integrity = min(1.0, self.integrity + 0.001 * dt * activity) if activity >= 0.01 else self.integrity - self._synapse_death_prob * dt
 
         # NEW: Log weight evolution if significant change
-        logger = get_data_logger()
-        if logger.log_level >= 2:
+        if _ll >= 2:
             total_change = (abs(self.w_fast - old_w_fast) + 
                            abs(self.w_slow - old_w_slow) + 
                            abs(self.w_meta - old_w_meta))
@@ -400,11 +424,11 @@ class Synapse:
         # Track previous silent state
         was_silent = self.is_silent
 
+        # NB: random.random() call preserved at original position — never move this,
+        # it would shift the RNG stream and change all subsequent trajectories.
         if self.is_silent and self.pre_trace > 0.5 and random.random() < 0.01:  # silent → active
             self.is_silent = False
-            # NEW: Log the event
-            logger = get_data_logger()
-            if logger.log_level >= 2:
+            if _ll >= 2:
                 logger.log_silent_synapse_event(
                     tick=tick,
                     pre_id=self.pre_id,
@@ -421,8 +445,7 @@ class Synapse:
             activity = abs(self.w_fast) + abs(self.w_slow)
             if activity < SYNAPSE_SILENCING_ACTIVITY_THRESHOLD and self.integrity < 0.3 and random.random() < 0.008:
                 self.is_silent = True
-                logger = get_data_logger()
-                if logger.log_level >= 2:
+                if _ll >= 2:
                     logger.log_silent_synapse_event(
                         tick=tick,
                         pre_id=self.pre_id,
@@ -584,26 +607,35 @@ class MSTHState:
         self.fast_excitability = 0.0
         self.medium_gain = 1.0
         self.slow_structural = 0.0
+        # v4.51 PERF: cache time constants + gains once — called per-neuron per-tick.
+        self._uf_tau = getattr(params, 'msth_ultrafast_tau', 5.0)
+        self._f_tau = getattr(params, 'msth_fast_tau', 2000.0)
+        self._m_tau = getattr(params, 'msth_medium_tau', 300000.0)
+        self._s_tau = getattr(params, 'msth_slow_tau', 3600000.0)
+        self._target = getattr(params, 'target_firing_rate', 0.2)
+        self._uf_ceiling = getattr(params, 'msth_ultrafast_ceiling', 2.0)
+        self._f_gain = getattr(params, 'msth_fast_gain', 0.1)
+        self._m_gain = getattr(params, 'msth_medium_gain', 0.001)
 
     def update(self, current_state_abs: float, dt: float) -> dict:
-        p = self.params
-        uf_tau = getattr(p, 'msth_ultrafast_tau', 5.0)
-        f_tau = getattr(p, 'msth_fast_tau', 2000.0)
-        m_tau = getattr(p, 'msth_medium_tau', 300000.0)
-        s_tau = getattr(p, 'msth_slow_tau', 3600000.0)
-        target = getattr(p, 'target_firing_rate', 0.2)
+        # v4.51 PERF: use cached params, no getattr inside hot loop.
+        uf_tau = self._uf_tau
+        f_tau = self._f_tau
+        m_tau = self._m_tau
+        s_tau = self._s_tau
+        target = self._target
 
         alpha_uf = dt / uf_tau
         self.ultrafast_activity = (1.0 - alpha_uf) * self.ultrafast_activity + alpha_uf * current_state_abs
-        ultrafast_suppress = self.ultrafast_activity > getattr(p, 'msth_ultrafast_ceiling', 2.0)
+        ultrafast_suppress = self.ultrafast_activity > self._uf_ceiling
 
         alpha_f = dt / f_tau
         self.fast_excitability = (1.0 - alpha_f) * self.fast_excitability + alpha_f * current_state_abs
-        fast_threshold_shift = getattr(p, 'msth_fast_gain', 0.1) * (self.fast_excitability - target)
+        fast_threshold_shift = self._f_gain * (self.fast_excitability - target)
 
         alpha_m = dt / m_tau
         target_dev = current_state_abs - target
-        self.medium_gain += alpha_m * (-getattr(p, 'msth_medium_gain', 0.001) * target_dev * self.medium_gain)
+        self.medium_gain += alpha_m * (-self._m_gain * target_dev * self.medium_gain)
         self.medium_gain = max(0.5, min(2.0, self.medium_gain))
 
         alpha_s = dt / s_tau

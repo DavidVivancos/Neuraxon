@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.5 game loop (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 142
+# Neuraxon Game of Life v.4.51 game loop (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 143 
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -11,6 +11,7 @@ import time
 import json
 import math
 import random
+import heapq  # v4.51 PERF: for nlargest top-N champion selection
 from collections import deque
 from dataclasses import asdict
 from typing import Dict, List, Tuple, Optional, Set
@@ -64,6 +65,35 @@ from ui.audio import AudioEngine
 from config import CIRCADIAN_CYCLE_TICKS, TEMP_BASELINE, TEMP_MIN, TEMP_MAX, TEMP_NIGHT_DROP, TEMP_ACTIVITY_GAIN, TEMP_SOCIAL_GAIN, TEMP_FOOD_GAIN, TEMP_DECAY_RATE, TEMP_BASELINE_VARIANCE, RESTING_METABOLISM_MULTIPLIER, RESTING_METABOLISM_MULT, TEMP_CIRCADIAN_CORR_WINDOW, SYNAPSE_SILENCING_ACTIVITY_THRESHOLD
 
 # ============================================================================
+# v4.51 PERF: Shared neighborhood offset constants
+# ============================================================================
+# Cardinal + diagonal 8-neighborhood, excluding (0,0). Used for food-sharing (O5)
+# and any other 1-ring neighbor scans. Pre-built once at import; never mutated.
+NEIGHBOR_OFFSETS: Tuple[Tuple[int, int], ...] = (
+    (-1, -1), (0, -1), (1, -1),
+    (-1,  0),          (1,  0),
+    (-1,  1), (0,  1), (1,  1),
+)
+
+# Cache of (dx, dy) offset tuples for smell/vision square-radius scans.
+# Keyed by radius; each scan for a given radius returns the SAME precomputed
+# tuple, avoiding re-iterating (2r+1)² inner ranges per agent per tick.
+_SMELL_OFFSETS_CACHE: Dict[int, Tuple[Tuple[int, int], ...]] = {}
+
+def _smell_offsets(radius: int) -> Tuple[Tuple[int, int], ...]:
+    """Return cached (dx, dy) offsets within square radius (excluding (0,0))."""
+    t = _SMELL_OFFSETS_CACHE.get(radius)
+    if t is None:
+        t = tuple(
+            (dx, dy)
+            for dy in range(-radius, radius + 1)
+            for dx in range(-radius, radius + 1)
+            if not (dx == 0 and dy == 0)
+        )
+        _SMELL_OFFSETS_CACHE[radius] = t
+    return t
+
+# ============================================================================
 # v4.1: SPATIAL HASH GRID — O(1) neighbor lookups (was O(r²) per agent)
 # ============================================================================
 
@@ -85,10 +115,10 @@ class SpatialGrid:
         self._pos_to_id.clear()
     
     def insert(self, eid, pos):
-        c = self._cell(pos)
-        if c not in self.grid:
-            self.grid[c] = set()
-        self.grid[c].add(eid)
+        # v4.51 PERF: setdefault() collapses "if c not in grid: grid[c]=set()" to one lookup.
+        cs = self.cell_size
+        c = (pos[0] // cs, pos[1] // cs)
+        self.grid.setdefault(c, set()).add(eid)
         self._pos_to_id[pos] = eid
     
     def remove(self, eid, pos):
@@ -108,8 +138,10 @@ class SpatialGrid:
         return self._pos_to_id.get(pos)
     
     def count_nearby(self, pos, radius=2):
-        """Count entities within radius. O(cells_in_radius) amortized."""
+        """Count entities within radius. O(cells_in_radius) amortized.
+        v4.51 PERF: hoist cs + grid_get to locals — called per-agent per-tick."""
         cs = self.cell_size
+        grid_get = self.grid.get
         cx0 = (pos[0] - radius) // cs
         cx1 = (pos[0] + radius) // cs
         cy0 = (pos[1] - radius) // cs
@@ -117,7 +149,7 @@ class SpatialGrid:
         count = 0
         for cx in range(cx0, cx1 + 1):
             for cy in range(cy0, cy1 + 1):
-                bucket = self.grid.get((cx, cy))
+                bucket = grid_get((cx, cy))
                 if bucket:
                     count += len(bucket)
         if self._pos_to_id.get(pos) is not None:
@@ -1395,13 +1427,15 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                 normalized_mates * 0.20  
             )
 
+        # v4.51 PERF: heapq.nlargest is O(N log 3) ≈ O(N), vs sorted(...) which is O(N log N).
+        # Identical output since ties are broken by Python's stable order in both.
         categories = {
-            'food_found': sorted(current_agents, key=lambda a: a.stats.food_found, reverse=True)[:3],
-            'food_taken': sorted(current_agents, key=lambda a: a.stats.food_taken, reverse=True)[:3],
-            'explored': sorted(current_agents, key=lambda a: a.stats.explored, reverse=True)[:3],
-            'time_lived_s': sorted(current_agents, key=lambda a: a.stats.time_lived_s, reverse=True)[:3],
-            'mates_performed': sorted(current_agents, key=lambda a: a.stats.mates_performed, reverse=True)[:3],
-            'fitness_score': sorted(current_agents, key=lambda a: a.stats.fitness_score, reverse=True)[:3]
+            'food_found': heapq.nlargest(3, current_agents, key=lambda a: a.stats.food_found),
+            'food_taken': heapq.nlargest(3, current_agents, key=lambda a: a.stats.food_taken),
+            'explored': heapq.nlargest(3, current_agents, key=lambda a: a.stats.explored),
+            'time_lived_s': heapq.nlargest(3, current_agents, key=lambda a: a.stats.time_lived_s),
+            'mates_performed': heapq.nlargest(3, current_agents, key=lambda a: a.stats.mates_performed),
+            'fitness_score': heapq.nlargest(3, current_agents, key=lambda a: a.stats.fitness_score),
         }
 
         for stat_name, top_champs in categories.items():
@@ -1445,16 +1479,30 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
         return {"Food found": [format_entry(a, a.stats.food_found) for a in food_found], "Food taken": [format_entry(a, a.stats.food_taken) for a in food_taken], "World explored": [format_entry(a, a.stats.explored) for a in explored], "Time lived (s)": [format_entry(a, a.stats.time_lived_s) for a in lived], "Mates": [format_entry(a, a.stats.mates_performed) for a in mated], "Fitness": [format_entry(a, a.stats.fitness_score) for a in fitness]}
     
     def _is_parent_child(A: NxEr, B: NxEr) -> bool:
-        """Check if A and B share any ancestry (prevents inbreeding)."""
+        """Check if A and B share any ancestry (prevents inbreeding).
+        v4.51 PERF: cache each agent's ancestor set as a frozenset once; ancestry
+        only mutates at mating, so repeated can_mate() calls hit the cache."""
         # Direct parent check (using names)
         if A.name in (B.parents or (None, None)) or B.name in (A.parents or (None, None)):
             return True
         # Full ancestry check - no mating with ANY ancestor (using names)
-        if A.name in B.ancestors or B.name in A.ancestors:
+        a_anc = A.ancestors
+        b_anc = B.ancestors
+        if A.name in b_anc or B.name in a_anc:
             return True
         # Check if they share common ancestors (siblings/cousins)
-        if A.ancestors and B.ancestors:
-            if set(A.ancestors) & set(B.ancestors):
+        if a_anc and b_anc:
+            a_set = getattr(A, '_ancestor_set', None)
+            if a_set is None or getattr(A, '_ancestor_set_len', -1) != len(a_anc):
+                a_set = frozenset(a_anc)
+                A._ancestor_set = a_set
+                A._ancestor_set_len = len(a_anc)
+            b_set = getattr(B, '_ancestor_set', None)
+            if b_set is None or getattr(B, '_ancestor_set_len', -1) != len(b_anc):
+                b_set = frozenset(b_anc)
+                B._ancestor_set = b_set
+                B._ancestor_set_len = len(b_anc)
+            if a_set & b_set:
                 return True
         return False
 
@@ -1465,10 +1513,11 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
     def champions_from_last_game() -> List[NxEr]:
         all_agents = list(nxers.values())
         if not all_agents: return []
-        by_food = sorted(all_agents, key=lambda a: a.stats.food_found, reverse=True)[:3]
-        by_expl = sorted(all_agents, key=lambda a: a.stats.explored, reverse=True)[:3]
-        by_lived = sorted(all_agents, key=lambda a: a.stats.time_lived_s, reverse=True)[:3]
-        by_fitness = sorted(all_agents, key=lambda a: a.stats.fitness_score, reverse=True)[:3]
+        # v4.51 PERF: nlargest instead of full sort (we only need top 3 per category).
+        by_food = heapq.nlargest(3, all_agents, key=lambda a: a.stats.food_found)
+        by_expl = heapq.nlargest(3, all_agents, key=lambda a: a.stats.explored)
+        by_lived = heapq.nlargest(3, all_agents, key=lambda a: a.stats.time_lived_s)
+        by_fitness = heapq.nlargest(3, all_agents, key=lambda a: a.stats.fitness_score)
         potential_champs = []
         for category_champs in all_time_best.values(): potential_champs.extend(category_champs)
         potential_champs.extend(by_food); potential_champs.extend(by_expl); potential_champs.extend(by_lived); potential_champs.extend(by_fitness)
@@ -1881,7 +1930,8 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                 # --- B. Gather and Execute Network Updates (Sequential Optimization) ---
                 # v4.1: Use spatial grid for occupant lookups (already rebuilt above)
                 occupant_at = _agent_grid._pos_to_id
-                food_at = {f.pos: 1 for f in foods.values() if f.alive}
+                # v4.51 PERF: use a set — the code only checks membership.
+                food_at = {f.pos for f in foods.values() if f.alive}
                 
                 # Track which NxErs ate food this tick for temperature
                 ate_food_this_tick = set()
@@ -2000,23 +2050,29 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                                 hunger_val = 0    # normal — default
                             
                             # 5. Sight (Line of sight in heading)
+                            # v4.51 PERF: cache ax,ay,world_n locals; use occupant_at.get()
+                            # once instead of "in" + "[...]" (two dict lookups per step).
                             sight_val = 0
                             seen_neighbors_count = 0
                             seen_different_clan = False
                             vx, vy = DIR_OFFSETS[a.heading]
                             found_obj = False
+                            ax, ay = a.pos
+                            _wn = world.N
+                            _terrain = world.terrain
                             for dist in range(1, a.vision_range + 1):
-                                tx, ty = wrap_pos((a.pos[0] + (vx * dist), a.pos[1] + (vy * dist)))
-                                t_type = world.terrain((tx, ty))
+                                tx = (ax + vx * dist) % _wn
+                                ty = (ay + vy * dist) % _wn
+                                t_type = _terrain((tx, ty))
                                 if t_type == T_ROCK: break
                                 if (tx, ty) in food_at:
-                                    sight_val = 1; found_obj = True; 
+                                    sight_val = 1; found_obj = True;
                                     # [DOPAMINE UPDATE] Anticipation (Visual Food Cue)
                                     # Paper Claim: "Dopamine – triggered by... visual food cues"
                                     _neuromod_boost(a.net.neuromodulators, 'dopamine', 0.02, a.net.params)
                                     break
-                                if (tx, ty) in occupant_at:
-                                    other_id = occupant_at[(tx, ty)]
+                                other_id = occupant_at.get((tx, ty))
+                                if other_id is not None:
                                     other_a = nxers[other_id]
                                     seen_neighbors_count += 1
                                     if a.clan_id is not None and other_a.clan_id is not None and a.clan_id != other_a.clan_id:
@@ -2037,14 +2093,21 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                                 _neuromod_boost(a.net.neuromodulators, 'norepinephrine', ne_boost, a.net.params)
                             
                             # 6. Smell (Square Radius)
+                            # v4.51 PERF: use cached offset tuple (no per-tick inner-range rebuild);
+                            # cache ax,ay locals; short-circuit once both flags set (food + nxer).
                             smell_val = 0
                             found_food_smell = False; found_nxer_smell = False
-                            for dy in range(-a.smell_radius, a.smell_radius + 1):
-                                for dx in range(-a.smell_radius, a.smell_radius + 1):
-                                    if dx == 0 and dy == 0: continue
-                                    sx, sy = wrap_pos((a.pos[0] + dx, a.pos[1] + dy))
-                                    if (sx, sy) in food_at: found_food_smell = True
-                                    if (sx, sy) in occupant_at: found_nxer_smell = True
+                            ax, ay = a.pos
+                            _wn = world.N
+                            for dx, dy in _smell_offsets(a.smell_radius):
+                                sx = (ax + dx) % _wn
+                                sy = (ay + dy) % _wn
+                                if not found_food_smell and (sx, sy) in food_at:
+                                    found_food_smell = True
+                                if not found_nxer_smell and (sx, sy) in occupant_at:
+                                    found_nxer_smell = True
+                                if found_food_smell and found_nxer_smell:
+                                    break
                             if found_food_smell: 
                                 smell_val = 1
                                 # [DOPAMINE UPDATE] Anticipation (Olfactory Food Cue)
@@ -2291,25 +2354,34 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                                     a.brain.simulate_step(external_by_sphere)
                             else:
                                 # Fallback: sensory sphere missing, use single-net
+                                # v4.51 PERF: convert tuple→list ONCE (was per-substep allocation).
+                                _li = list(a.last_inputs)
                                 for _ in range(steps_to_sim):
                                     a.net.current_game_tick = step_tick
-                                    a.net.set_input_states(list(a.last_inputs))
+                                    a.net.set_input_states(_li)
                                     a.net.simulate_step()
                         else:
                             # Single-net mode (backward compat)
+                            # v4.51 PERF: convert tuple→list ONCE (was per-substep allocation).
+                            _li = list(a.last_inputs)
                             for _ in range(steps_to_sim):
                                 a.net.current_game_tick = step_tick
-                                a.net.set_input_states(list(a.last_inputs))
+                                a.net.set_input_states(_li)
                                 a.net.simulate_step()
 
                         # === NEURAXON v2.0: Snapshot receptor activations for behavior modulation ===
                         if hasattr(a.net, 'receptor_activations'):
                             a.receptor_activations = dict(a.net.receptor_activations)
                         if hasattr(a.net, 'neuromod_system'):
-                            a.astrocyte_activity = sum(
-                                getattr(n, 'astrocyte_state', 0.0) 
-                                for n in a.net.all_neurons if n.is_active
-                            ) / max(1, len([n for n in a.net.all_neurons if n.is_active]))
+                            # v4.51 PERF: single-pass accumulator instead of two full scans
+                            # (original: sum-gen once, then len(list-comp) once).
+                            _astro_sum = 0.0
+                            _astro_n = 0
+                            for _n in a.net.all_neurons:
+                                if _n.is_active:
+                                    _astro_sum += getattr(_n, 'astrocyte_state', 0.0)
+                                    _astro_n += 1
+                            a.astrocyte_activity = _astro_sum / max(1, _astro_n)
                         
                         # Capture results directly
                         outs = a.net.get_output_states()
