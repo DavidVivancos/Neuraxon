@@ -1,6 +1,9 @@
 # Neuraxon Game of Life Researh Version<br>
 CHANGE LOG:<br>
 
+May 10th 2026:<br>
+Neuraxon Game of Life v.4.52 udpate UX optimizations
+
 May 8th 2026:<br>
 Neuraxon Game of Life v.4.51 udpate speed optimizations
 
