@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.51 (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 143 
+# Neuraxon Game of Life v.4.52 (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 144 
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -22,3 +22,5 @@ if __name__ == "__main__":
         print("Game cancelled by user.")
         pygame.quit()
         sys.exit(0)
+
+

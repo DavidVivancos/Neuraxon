@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.51 multisphere (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 143 
+# Neuraxon Game of Life v.4.52 multisphere (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 144 
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -216,17 +216,18 @@ class NeuraxonSphere:
                 pass
 
     def relay_outputs(self) -> Dict[int, int]:
-        neuron_map = {n.id: n for n in self.network.all_neurons}
+        # v4.52 PERF (#15a): reuse the network's pre-built _neuron_map.
+        neuron_map = getattr(self.network, '_neuron_map', None) or {n.id: n for n in self.network.all_neurons}
         return {nid: neuron_map[nid].trinary_state 
                 for nid in self.interface.relay_output_ids if nid in neuron_map}
 
     def readout_outputs(self) -> Dict[int, int]:
-        neuron_map = {n.id: n for n in self.network.all_neurons}
+        neuron_map = getattr(self.network, '_neuron_map', None) or {n.id: n for n in self.network.all_neurons}
         return {nid: neuron_map[nid].trinary_state 
                 for nid in self.interface.readout_output_ids if nid in neuron_map}
 
     def relay_inputs(self) -> Dict[int, int]:
-        neuron_map = {n.id: n for n in self.network.all_neurons}
+        neuron_map = getattr(self.network, '_neuron_map', None) or {n.id: n for n in self.network.all_neurons}
         return {nid: neuron_map[nid].trinary_state 
                 for nid in self.interface.relay_input_ids if nid in neuron_map}
 
@@ -348,17 +349,28 @@ class SphereLink:
         return (1.0 - c) + c * phase_gate
 
     def project(self, source_sphere: 'NeuraxonSphere', target_sphere: 'NeuraxonSphere') -> Dict[int, float]:
-        """Compute the projection signal from source to target (Paper §7 Eq. 11)."""
-        neuron_map = {n.id: n for n in source_sphere.network.all_neurons}
+        """Compute the projection signal from source to target (Paper §7 Eq. 11).
+
+        v4.52 PERF (#15a): reuses the source network's pre-built `_neuron_map`
+        instead of rebuilding `{n.id: n for n in all_neurons}` on every call.
+        With 2-3 links and 3 spheres per NxEr, this was being rebuilt 6+ times
+        per agent per step. Science-neutral: same dict, same semantics.
+        """
+        src_net = source_sphere.network
+        neuron_map = getattr(src_net, '_neuron_map', None)
+        if neuron_map is None:
+            neuron_map = {n.id: n for n in src_net.all_neurons}
         source_states = [
             neuron_map[nid].trinary_state if nid in neuron_map else 0
             for nid in self.source_output_ids
         ]
-        gate = self._communication_gate(source_sphere.network, target_sphere.network)
+        gate = self._communication_gate(src_net, target_sphere.network)
+        gain_gate = float(self.params.gain) * gate
+        bias = self.params.bias
         payload = []
         for row in self.weight_matrix:
-            total = self.params.bias + sum(w * s for w, s in zip(row, source_states))
-            payload.append(float(self.params.gain) * gate * total)
+            total = bias + sum(w * s for w, s in zip(row, source_states))
+            payload.append(gain_gate * total)
 
         if self.params.delay_steps <= 0:
             delayed = payload
@@ -370,24 +382,38 @@ class SphereLink:
 
     def update_plasticity(self, source_sphere: 'NeuraxonSphere', target_sphere: 'NeuraxonSphere',
                           global_da: float = 0.15):
-        """Paper §7 Eq. 13: Three-factor projection plasticity (STDP + DA gating)."""
+        """Paper §7 Eq. 13: Three-factor projection plasticity (STDP + DA gating).
+
+        v4.52 PERF (#15a): reuse network._neuron_map for both source and target
+        spheres. Also hoist cached params (plasticity_rate, weight_decay, weight_clip)
+        to locals — previously each attribute was re-read per matrix cell.
+        """
         if self.params.plasticity_rate <= 0.0:
             return
-        src_map = {n.id: n for n in source_sphere.network.all_neurons}
-        tgt_map = {n.id: n for n in target_sphere.network.all_neurons}
+        src_net = source_sphere.network
+        tgt_net = target_sphere.network
+        src_map = getattr(src_net, '_neuron_map', None) or {n.id: n for n in src_net.all_neurons}
+        tgt_map = getattr(tgt_net, '_neuron_map', None) or {n.id: n for n in tgt_net.all_neurons}
         src = [src_map[nid].trinary_state if nid in src_map else 0 for nid in self.source_output_ids]
         tgt = [tgt_map[nid].trinary_state if nid in tgt_map else 0 for nid in self.target_input_ids]
 
         da_gate = 0.5 + global_da  # Paper Eq. 13: (0.5 + [DA]^global)
-        for ti in range(len(self.weight_matrix)):
-            for si in range(len(self.weight_matrix[ti])):
-                hebb = float(src[si]) * float(tgt[ti])
-                self.weight_matrix[ti][si] += self.params.plasticity_rate * hebb * da_gate
-                if self.params.weight_decay > 0.0:
-                    self.weight_matrix[ti][si] *= (1.0 - self.params.weight_decay)
-                clip = self.params.weight_clip
-                self.weight_matrix[ti][si] = max(-clip, min(clip, self.weight_matrix[ti][si]))
-        self.weight_matrix = self._normalise_rows(self.weight_matrix)
+        plast = self.params.plasticity_rate
+        decay = self.params.weight_decay
+        clip = self.params.weight_clip
+        wm = self.weight_matrix
+        for ti in range(len(wm)):
+            row = wm[ti]
+            t_state = float(tgt[ti])
+            for si in range(len(row)):
+                hebb = float(src[si]) * t_state
+                v = row[si] + plast * hebb * da_gate
+                if decay > 0.0:
+                    v *= (1.0 - decay)
+                if v > clip: v = clip
+                elif v < -clip: v = -clip
+                row[si] = v
+        self.weight_matrix = self._normalise_rows(wm)
 
     def update_structural_plasticity(self):
         """Structural plasticity: decay integrity, mark for pruning."""
@@ -1017,3 +1043,5 @@ def load_sphere_from_dict(data: dict, rebuild_net_fn=None) -> NeuraxonSphere:
         modality_tags=data.get('modality_tags', []),
         description=data.get('description', ''),
     )
+
+

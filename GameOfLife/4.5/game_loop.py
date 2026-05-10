@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.51 game loop (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 143 
+# Neuraxon Game of Life v.4.52 game loop (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 144 
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -11,7 +11,7 @@ import time
 import json
 import math
 import random
-import heapq  # v4.51 PERF: for nlargest top-N champion selection
+import heapq  # v4.52 PERF: for nlargest top-N champion selection
 from collections import deque
 from dataclasses import asdict
 from typing import Dict, List, Tuple, Optional, Set
@@ -62,10 +62,12 @@ from ui.renderer import Renderer
 from ui.audio import AudioEngine
 
 # Import config constants
-from config import CIRCADIAN_CYCLE_TICKS, TEMP_BASELINE, TEMP_MIN, TEMP_MAX, TEMP_NIGHT_DROP, TEMP_ACTIVITY_GAIN, TEMP_SOCIAL_GAIN, TEMP_FOOD_GAIN, TEMP_DECAY_RATE, TEMP_BASELINE_VARIANCE, RESTING_METABOLISM_MULTIPLIER, RESTING_METABOLISM_MULT, TEMP_CIRCADIAN_CORR_WINDOW, SYNAPSE_SILENCING_ACTIVITY_THRESHOLD
+# v4.52 PERF (#26): TEMP_DAY_WARMING hoisted to module scope to remove the
+# per-call `from config import TEMP_DAY_WARMING` inside update_body_temperature.
+from config import CIRCADIAN_CYCLE_TICKS, TEMP_BASELINE, TEMP_MIN, TEMP_MAX, TEMP_NIGHT_DROP, TEMP_ACTIVITY_GAIN, TEMP_SOCIAL_GAIN, TEMP_FOOD_GAIN, TEMP_DECAY_RATE, TEMP_BASELINE_VARIANCE, RESTING_METABOLISM_MULTIPLIER, RESTING_METABOLISM_MULT, TEMP_CIRCADIAN_CORR_WINDOW, SYNAPSE_SILENCING_ACTIVITY_THRESHOLD, TEMP_DAY_WARMING
 
 # ============================================================================
-# v4.51 PERF: Shared neighborhood offset constants
+# v4.52 PERF: Shared neighborhood offset constants
 # ============================================================================
 # Cardinal + diagonal 8-neighborhood, excluding (0,0). Used for food-sharing (O5)
 # and any other 1-ring neighbor scans. Pre-built once at import; never mutated.
@@ -93,6 +95,95 @@ def _smell_offsets(radius: int) -> Tuple[Tuple[int, int], ...]:
         _SMELL_OFFSETS_CACHE[radius] = t
     return t
 
+
+# ============================================================================
+# v4.52 PERF: CIRCADIAN LOOK-UP TABLES (#20 Precomputed Trigonometry)
+# ============================================================================
+# BIOINSPIRED INTEGRITY PRESERVED: the math below is IDENTICAL to the prior
+# dynamic compute_circadian_phase / get_circadian_modulation / metabolic
+# multiplier functions — only the evaluation path changes from math.sin/cos
+# calls at runtime to O(1) array indexing into a precomputed table.
+#
+# The circadian cycle length is known at start of a game (DayNightCycle kwarg,
+# default 2400). We build one table PER cycle length encountered, keyed by
+# integer cycle_ticks, and reuse it forever. Key (_circadian_luts) is
+# module-scoped so all games in a session share the same tables.
+#
+# Each LUT entry stores, for tick index i in [0, cycle_ticks):
+#   phase          = i / cycle_ticks
+#   day_mod        = max(0, cos(2π * (phase - 0.25)))   # peak at noon
+#   night_mod      = max(0, cos(2π * (phase - 0.75)))   # peak at midnight
+#   metab_mult     = 0.95 + 0.25 * clip(cos(2π * (phase - 0.25)), -1, 1)
+#   night_intensity = sin(π * (phase - 0.5) * 2) if phase >= 0.5 else 0.0
+#   day_intensity   = sin(π * phase * 2)           if phase < 0.5 else 0.0
+#
+# Values are identical to a function-call path up to floating-point
+# round-off. The tables are built once with np arrays and kept as tuples of
+# floats for sub-microsecond Python-level access.
+
+_circadian_luts: Dict[int, dict] = {}
+
+def _build_circadian_lut(cycle_ticks: int) -> dict:
+    """Build and cache a circadian LUT for the given cycle length.
+
+    Returns a dict of parallel numpy arrays indexed by (tick % cycle_ticks).
+    Science-neutral: values exactly match the prior dynamic sin/cos compute.
+    """
+    ct = max(1, int(cycle_ticks))
+    if ct in _circadian_luts:
+        return _circadian_luts[ct]
+    # Phase per integer tick in [0, cycle_ticks)
+    idx = np.arange(ct, dtype=np.float64)
+    phases = idx / ct
+    two_pi = 2.0 * math.pi
+    day_signal = np.cos(two_pi * (phases - 0.25))
+    night_signal = np.cos(two_pi * (phases - 0.75))
+    day_mod = np.maximum(0.0, day_signal)
+    night_mod = np.maximum(0.0, night_signal)
+    metab_mult = 0.95 + 0.25 * np.clip(day_signal, -1.0, 1.0)
+    # night_intensity only valid for phase >= 0.5 (else 0)
+    night_mask = phases >= 0.5
+    night_intensity = np.zeros_like(phases)
+    night_intensity[night_mask] = np.sin(math.pi * (phases[night_mask] - 0.5) * 2.0)
+    # day_intensity only valid for phase < 0.5 (else 0)
+    day_mask = phases < 0.5
+    day_intensity = np.zeros_like(phases)
+    day_intensity[day_mask] = np.sin(math.pi * phases[day_mask] * 2.0)
+    lut = {
+        'cycle_ticks': ct,
+        'phases': phases.tolist(),
+        'day_mod': day_mod.tolist(),
+        'night_mod': night_mod.tolist(),
+        'metab_mult': metab_mult.tolist(),
+        'night_intensity': night_intensity.tolist(),
+        'day_intensity': day_intensity.tolist(),
+    }
+    _circadian_luts[ct] = lut
+    return lut
+
+
+def _circadian_phase_from_tick(tick: int, cycle_ticks: int) -> float:
+    """Fast O(1) replacement for compute_circadian_phase(tick, cycle_ticks)."""
+    # Single modulo + division — identical output to the prior function.
+    return (tick % cycle_ticks) / cycle_ticks
+
+
+def _get_circadian_mods_for_tick(tick: int, lut: dict) -> Tuple[float, float, float, float]:
+    """Return (dopamine, serotonin, norepinephrine, acetylcholine) additive
+    modulations — identical to the old get_circadian_modulation() dict, but
+    via LUT. Returns a tuple rather than a dict to avoid per-tick allocation.
+    The caller can unpack as needed.
+    """
+    i = tick % lut['cycle_ticks']
+    d_mod = lut['day_mod'][i]
+    n_mod = lut['night_mod'][i]
+    return (d_mod * 0.02, n_mod * 0.03, d_mod * 0.015, d_mod * 0.012)
+
+
+def _get_circadian_metabolic_mult(tick: int, lut: dict) -> float:
+    """O(1) lookup replacement for get_circadian_metabolic_multiplier(phase)."""
+    return lut['metab_mult'][tick % lut['cycle_ticks']]
+
 # ============================================================================
 # v4.1: SPATIAL HASH GRID — O(1) neighbor lookups (was O(r²) per agent)
 # ============================================================================
@@ -115,7 +206,7 @@ class SpatialGrid:
         self._pos_to_id.clear()
     
     def insert(self, eid, pos):
-        # v4.51 PERF: setdefault() collapses "if c not in grid: grid[c]=set()" to one lookup.
+        # v4.52 PERF: setdefault() collapses "if c not in grid: grid[c]=set()" to one lookup.
         cs = self.cell_size
         c = (pos[0] // cs, pos[1] // cs)
         self.grid.setdefault(c, set()).add(eid)
@@ -139,7 +230,7 @@ class SpatialGrid:
     
     def count_nearby(self, pos, radius=2):
         """Count entities within radius. O(cells_in_radius) amortized.
-        v4.51 PERF: hoist cs + grid_get to locals — called per-agent per-tick."""
+        v4.52 PERF: hoist cs + grid_get to locals — called per-agent per-tick."""
         cs = self.cell_size
         grid_get = self.grid.get
         cx0 = (pos[0] - radius) // cs
@@ -207,8 +298,8 @@ def get_circadian_modulation(phase: float) -> dict:
     
     Returns dict of additive modulation values.
     """
-    import math
-    
+    # v4.52 PERF (#26): removed `import math` — math is already imported at module scope.
+
     # Day phase peaks at 0.25 (noon), night phase peaks at 0.75 (midnight)
     day_signal = math.cos(2 * math.pi * (phase - 0.25))  # Max at phase=0.25
     night_signal = math.cos(2 * math.pi * (phase - 0.75))  # Max at phase=0.75
@@ -235,7 +326,7 @@ def get_circadian_metabolic_multiplier(phase: float) -> float:
     BIOINSPIRED: Basal metabolic rate follows circadian patterns,
     being higher during active periods and lower during rest.
     """
-    import math
+    # v4.52 PERF (#26): removed `import math` (already at module scope).
     day_signal = math.cos(2 * math.pi * (phase - 0.25))
     # Range: 0.7 (night) to 1.2 (day)
     return 0.95 + 0.25 * max(-1, min(1, day_signal))
@@ -268,8 +359,9 @@ def update_body_temperature(nxer, params, step_tick: int,
     
     Returns new temperature.
     """
-    import math
-    
+    # v4.52 PERF (#26): removed `import math` and inline `from config import
+    # TEMP_DAY_WARMING` — both now at module scope.
+
     current_temp = getattr(nxer, 'body_temperature', params.temperature_baseline)
     # v4.0: Individual baseline with variance (kept from v3.3)
     baseline = getattr(nxer, '_temp_baseline_individual', params.temperature_baseline)
@@ -284,9 +376,9 @@ def update_body_temperature(nxer, params, step_tick: int,
     else:
         # v4.0: Day warming — stronger, uses new TEMP_DAY_WARMING constant
         day_intensity = math.sin(math.pi * circadian_phase * 2) if circadian_phase < 0.5 else 0.0
+        # v4.52: module-level TEMP_DAY_WARMING (no per-call inline import).
         day_warm = getattr(nxer, '_config_temp_day_warming', None)
         if day_warm is None:
-            from config import TEMP_DAY_WARMING
             day_warm = TEMP_DAY_WARMING
         night_drop = day_warm * day_intensity  # Positive = warming during day
     
@@ -393,6 +485,16 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
     config._game_id = "nxon2_" + "".join([str(random.randint(0, 9)) for _ in range(9)])
 
     all_time_best: Dict[str, List[NxEr]] = {'food_found': [], 'food_taken': [], 'explored': [], 'time_lived_s': [], 'mates_performed': [], 'fitness_score': []}
+
+    # v4.52 PERF (#StaticFoodSet): persistent set of live food positions —
+    # maintained incrementally by place_initial_food / try_respawns /
+    # schedule_respawn. Previously rebuilt from scratch every tick as
+    #   food_at = {f.pos for f in foods.values() if f.alive}
+    # which scaled O(|foods|) per tick. Now O(1) amortized. Science-neutral:
+    # identical membership semantics — the set is only read by
+    # `(tx, ty) in food_at` in the vision raycast and similar membership
+    # checks, no sort-order dependency.
+    food_at: Set[Tuple[int, int]] = set()
     
     # --- CLAN & DIRECTION GLOBALS ---
     # 0=NW, 1=N, 2=NE, 3=E, 4=SE, 5=S, 6=SW, 7=W
@@ -404,14 +506,33 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
 
     # =========================================================================
     # CIRCADIAN SYSTEM INITIALIZATION (NEW v3.0)
+    # v4.52 PERF (#LUT): precompute all circadian curves once at game start.
+    # The tables are module-cached so subsequent games with the same cycle
+    # length reuse the arrays immediately (no rebuild cost).
     # =========================================================================
     circadian_cycle_ticks = DayNightCycle
     circadian_enabled = getattr(NetworkParameters(), 'circadian_enabled', True)
-    
+
+    # Build + hoist LUT columns to local names for fast inner-loop indexing.
+    _circ_lut = _build_circadian_lut(circadian_cycle_ticks)
+    _circ_phases           = _circ_lut['phases']
+    _circ_day_mod          = _circ_lut['day_mod']
+    _circ_night_mod        = _circ_lut['night_mod']
+    _circ_metab_mult       = _circ_lut['metab_mult']
+    _circ_night_intensity  = _circ_lut['night_intensity']
+    _circ_day_intensity    = _circ_lut['day_intensity']
+
     # Global circadian phase (all NxErs share the same day/night cycle)
     global_circadian_phase = 0.0
 
-    def wrap_pos(p: Tuple[int, int]) -> Tuple[int, int]: return (p[0] % world.N, p[1] % world.N)
+    # v4.52 PERF (#inline): wrap_pos is called millions of times per game by
+    # vision raycasts and movement. The closure-scope function call costs ~200ns
+    # on CPython; the hot paths below now inline `(x % world.N, y % world.N)`
+    # directly. The wrapper is KEPT for lukewarm paths (find_free, mating,
+    # loaders) where readability wins. `_wN` is the cached world size used by
+    # inline modulo sites.
+    _wN = world.N
+    def wrap_pos(p: Tuple[int, int]) -> Tuple[int, int]: return (p[0] % _wN, p[1] % _wN)
 
     def _heading_would_be_blocked(agent: NxEr, heading: int) -> bool:
         """One-step lookahead used to expose pre-motor obstacle warnings to the brain."""
@@ -455,12 +576,18 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
             return None
             
     def place_initial_food(count):
-        """Populates the world with the initial set of food sources."""
+        """Populates the world with the initial set of food sources.
+
+        v4.52 PERF (#StaticFoodSet): also refreshes the persistent food_at set
+        so the per-tick `in food_at` lookups stay in sync.
+        """
         foods.clear()
+        food_at.clear()  # persistent set — keep identity, update contents
         for i in range(count):
             p = find_free(allow_sea=True, allow_land=True)
             if not p: break
             foods[i] = Food(id=i, anchor=p, pos=p, alive=True, respawn_at_tick=None, remaining=25, progress={})
+            food_at.add(p)
     
     place_initial_food(min(MaxFood, max(30, MaxFood // 2)))
     used_colors = set(RESERVED_COLORS)
@@ -749,16 +876,16 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
             "heading": a.heading,
             "clan_id": a.clan_id,
             "rounds_survived": getattr(a, 'rounds_survived', 0),
-            "body_temperature": getattr(a, 'body_temperature', 37.0),
-            "circadian_phase": getattr(a, 'circadian_phase', 0.0),
-            "is_resting": getattr(a, 'is_resting', False),
+            "body_temperature": a.body_temperature,
+            "circadian_phase": a.circadian_phase,
+            "is_resting": a.is_resting,
             "proprioceptron_rock_hits": a.proprioceptron.total_rock_hits if hasattr(a, 'proprioceptron') else 0,
             "proprioceptron_forced_turns": a.proprioceptron.forced_turn_count if hasattr(a, 'proprioceptron') else 0,
             "proprioceptron_brain_warnings": a.proprioceptron.brain_warning_count if hasattr(a, 'proprioceptron') else 0,
             "proprioceptron_brain_turns": a.proprioceptron.brain_avoidance_turn_count if hasattr(a, 'proprioceptron') else 0,
             "proprioceptron_successful_streak": a.proprioceptron.successful_move_streak if hasattr(a, 'proprioceptron') else 0,
             "proprioceptron_last_move_result": a.proprioceptron.last_move_result if hasattr(a, 'proprioceptron') else 0,
-            "consecutive_successful_moves": getattr(a, '_consecutive_successful_moves', 0),
+            "consecutive_successful_moves": a._consecutive_successful_moves,
             "brain_movement_weight": getattr(a, 'brain_movement_weight', 0.5),
             "temperature_tolerance_cold": getattr(a, 'temperature_tolerance_cold', 35.5),
             "temperature_tolerance_hot": getattr(a, 'temperature_tolerance_hot', 38.5),
@@ -768,10 +895,10 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
             "brain_topology": getattr(a, 'brain_topology', 'sensory_association_motor'),
             "brain": save_multisphere_to_dict(a.brain) if getattr(a, 'brain', None) is not None else None,
             # v4.5: Voice / Song / Hearing genome + last-singing state
-            "voice": a.voice.to_dict() if getattr(a, 'voice', None) is not None else None,
-            "last_new_food_tick": int(getattr(a, 'last_new_food_tick', -9999)),
-            "last_sing_level": int(getattr(a, 'last_sing_level', 0)),
-            "known_food_ids": list(getattr(a, 'known_food_ids', set()) or set()),
+            "voice": a.voice.to_dict() if a.voice is not None else None,
+            "last_new_food_tick": int(a.last_new_food_tick),
+            "last_sing_level": int(a.last_sing_level),
+            "known_food_ids": list(a.known_food_ids),
         }
 
     def _archive_nxer(a: NxEr):
@@ -1380,6 +1507,11 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
         for fd in data["foods"]:
             f = Food(id=fd["id"], anchor=wrap_pos(tuple(fd["anchor"])), pos=wrap_pos(tuple(fd["pos"])), alive=fd["alive"], respawn_at_tick=fd["respawn_at_tick"], remaining=int(fd.get("remaining", 25)), progress={int(k): int(v) for k, v in fd.get("progress", {}).items()})
             foods[f.id] = f
+        # v4.52 PERF (#StaticFoodSet): resync persistent food_at after load.
+        food_at.clear()
+        for f in foods.values():
+            if f.alive:
+                food_at.add(f.pos)
         
         if "data_logger" in data and get_data_logger().log_level >= 2:
             logger = get_data_logger()
@@ -1389,18 +1521,25 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
             logger.game_metadata['loaded_from'] = path
             
     def schedule_respawn(food: Food, cur_tick: int):
+        # v4.52 PERF (#StaticFoodSet): remove food pos from persistent set
+        food_at.discard(food.pos)
         food.alive = False
         food.respawn_at_tick = cur_tick + FoodRespan * GlobalTimeSteps
         food.progress.clear()
-        
+
     def try_respawns(cur_tick: int):
-        if sum(1 for f in foods.values() if f.alive) >= MaxFood: return
+        # v4.52 PERF: early-return check uses the persistent set size — avoids
+        # an O(|foods|) comprehension every tick.
+        if len(food_at) >= MaxFood: return
         for f in foods.values():
             if not f.alive and f.respawn_at_tick and cur_tick >= f.respawn_at_tick:
                 p = find_free(allow_sea=True, allow_land=True, near=f.anchor, search_radius=6)
                 if p:
+                    # Remove old pos just in case (should already be gone) + add new
+                    food_at.discard(f.pos)
                     f.pos = p; f.alive = True; f.respawn_at_tick = None; f.remaining = 25; f.progress.clear()
-                if sum(1 for ff in foods.values() if ff.alive) >= MaxFood: break
+                    food_at.add(p)
+                if len(food_at) >= MaxFood: break
                 
     def update_all_time_best():
         nonlocal all_time_best
@@ -1427,7 +1566,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                 normalized_mates * 0.20  
             )
 
-        # v4.51 PERF: heapq.nlargest is O(N log 3) ≈ O(N), vs sorted(...) which is O(N log N).
+        # v4.52 PERF: heapq.nlargest is O(N log 3) ≈ O(N), vs sorted(...) which is O(N log N).
         # Identical output since ties are broken by Python's stable order in both.
         categories = {
             'food_found': heapq.nlargest(3, current_agents, key=lambda a: a.stats.food_found),
@@ -1480,7 +1619,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
     
     def _is_parent_child(A: NxEr, B: NxEr) -> bool:
         """Check if A and B share any ancestry (prevents inbreeding).
-        v4.51 PERF: cache each agent's ancestor set as a frozenset once; ancestry
+        v4.52 PERF: cache each agent's ancestor set as a frozenset once; ancestry
         only mutates at mating, so repeated can_mate() calls hit the cache."""
         # Direct parent check (using names)
         if A.name in (B.parents or (None, None)) or B.name in (A.parents or (None, None)):
@@ -1513,7 +1652,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
     def champions_from_last_game() -> List[NxEr]:
         all_agents = list(nxers.values())
         if not all_agents: return []
-        # v4.51 PERF: nlargest instead of full sort (we only need top 3 per category).
+        # v4.52 PERF: nlargest instead of full sort (we only need top 3 per category).
         by_food = heapq.nlargest(3, all_agents, key=lambda a: a.stats.food_found)
         by_expl = heapq.nlargest(3, all_agents, key=lambda a: a.stats.explored)
         by_lived = heapq.nlargest(3, all_agents, key=lambda a: a.stats.time_lived_s)
@@ -1532,7 +1671,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
         return unique_champs[:9]
     
     def restart_game_with_champions():
-        nonlocal world, nxers, foods, occupied, births_count, deaths_count, effects, game_index, used_colors
+        nonlocal world, nxers, foods, occupied, births_count, deaths_count, effects, game_index, used_colors, _wN
         
         _archive_all_nxers()
         update_all_time_best()
@@ -1549,6 +1688,9 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
         used_colors = set(RESERVED_COLORS)
         
         world = World(NxWorldSize, NxWorldSea, NxWorldRocks, rnd_seed=None)
+        # v4.52 PERF (#inline): refresh cached world-size local used by the
+        # inlined wrap modulo on hot-path raycasts.
+        _wN = world.N
         renderer.world = world
         renderer.pan = [world.N * 0.5, world.N * 0.5]
         renderer.zoom = max(2.0, 800.0 / world.N)
@@ -1691,12 +1833,54 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
     METABOLIC_RAMP_PER_SEC = 10  # Metabolic Ramp: +1000%/sec idle (atrophy) for the new v2.23 metrics
     accumulator = 0.0
     data_logger = get_data_logger()
+
+    # v4.52 PERF (#24): HEADLESS MODE. When running in time-limited test mode
+    # with auto-save, the game is almost always being driven as a research
+    # batch — nobody is watching the pygame window. We still need pygame
+    # initialised (rendering subsystems power Renderer's font/surface objects
+    # and the window has to exist for pygame to not crash on some OSes) but
+    # we can skip:
+    #   • the frame-rate cap (renderer.tick(60) blocks for ~16 ms/frame)
+    #   • the full draw_world() call
+    #   • per-frame HUD rebuilds (rankings() and best_scores)
+    #   • pygame.event.get() pumping (no UI interaction is expected)
+    # The simulation still advances deterministically via step_tick.
+    _HEADLESS = (limit_minutes is not None)
+
+    # v4.52 PERF (#HUD-cache): rankings() sorts the full NxEr population across
+    # six categories; best_scores recomputes six maxes; draw_world() iterates
+    # nxers multiple times internally. All of it is presentation-layer work
+    # and changes only when stats, population, or selection change.
+    # We cache the payload and invalidate it on a coarse cadence:
+    #   • while PAUSED:  invalidate every frame (cheap — user may interact)
+    #   • while RUNNING: invalidate every N frames OR on selection change
+    # _HUD_REFRESH_FRAMES picks an N that keeps the HUD feeling live at 60fps
+    # without paying sort cost every frame.
+    _HUD_REFRESH_FRAMES = 6          # ~10 Hz at 60fps — imperceptible lag
+    _hud_cache = {
+        'rankings': {},
+        'best_scores': {},
+        'frame_idx': 0,
+        'last_step_tick': -1,
+        'last_selected': None,
+        'last_alive_count': -1,
+    }
+    _frame_counter = 0
     
     try:
         while running:
-            frame_dt = renderer.tick(60)
+            # v4.52 PERF (#24 Headless): skip the 60fps-capped clock tick when
+            # running in test-mode. We still need some time delta for the
+            # simulation accumulator, so we just advance a full step worth of
+            # virtual time each iteration — the inner `while accumulator >=
+            # FIXED_DT` loop will consume it.
+            if _HEADLESS:
+                frame_dt = FIXED_DT
+            else:
+                frame_dt = renderer.tick(60)
             accumulator += frame_dt
-            
+            _frame_counter += 1
+
             # --- TEST MODE CHECK ---
             if limit_minutes is not None:
                 elapsed_minutes = (time.time() - game_start_real_time) / 60.0
@@ -1706,7 +1890,20 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                     running = False
                     continue
 
-            for ev in pygame.event.get():
+            # v4.52 PERF (#24 Headless): in headless mode we still need to
+            # drain pygame's event queue occasionally (some OSes consider
+            # un-polled windows "hung") but we skip the interactive handlers.
+            if _HEADLESS:
+                if (_frame_counter % 60) == 0:
+                    try:
+                        pygame.event.pump()
+                    except Exception:
+                        pass
+                events_iter = ()   # empty — skip the handler block below
+            else:
+                events_iter = pygame.event.get()
+
+            for ev in events_iter:
                 if ev.type == pygame.QUIT: running = False
                 elif ev.type == pygame.KEYDOWN:
                     if ev.key == pygame.K_ESCAPE: running = False
@@ -1823,12 +2020,29 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                 
                 # =========================================================
                 # CIRCADIAN SYSTEM UPDATE (NEW v3.0)
+                # v4.52 PERF (#LUT): Replaced math.sin/cos/cos calls with
+                # precomputed look-up-table indexing. Identical output values
+                # (up to float round-off) as compute_circadian_phase /
+                # get_circadian_modulation / get_circadian_metabolic_multiplier.
+                # Savings: ~5 trig ops + 1 dict build per tick → 2 array indexes.
                 # =========================================================
                 if circadian_enabled:
-                    global_circadian_phase = compute_circadian_phase(step_tick, circadian_cycle_ticks)
-                    circadian_mods = get_circadian_modulation(global_circadian_phase)
-                    metabolic_circadian_mult = get_circadian_metabolic_multiplier(global_circadian_phase)
-                    is_night = is_night_phase(global_circadian_phase)
+                    _i_circ = step_tick % circadian_cycle_ticks
+                    global_circadian_phase = _circ_phases[_i_circ]
+                    # Unpack directly — avoids dict allocation/iteration.
+                    _circ_da_add  = _circ_day_mod[_i_circ] * 0.02
+                    _circ_5ht_add = _circ_night_mod[_i_circ] * 0.03
+                    _circ_ne_add  = _circ_day_mod[_i_circ] * 0.015
+                    _circ_ach_add = _circ_day_mod[_i_circ] * 0.012
+                    # Keep the dict form for downstream code that iterates it.
+                    circadian_mods = {
+                        'dopamine': _circ_da_add,
+                        'serotonin': _circ_5ht_add,
+                        'norepinephrine': _circ_ne_add,
+                        'acetylcholine': _circ_ach_add,
+                    }
+                    metabolic_circadian_mult = _circ_metab_mult[_i_circ]
+                    is_night = global_circadian_phase >= 0.5
                 else:
                     global_circadian_phase = 0.0
                     circadian_mods = {'dopamine': 0, 'serotonin': 0, 'norepinephrine': 0, 'acetylcholine': 0}
@@ -1930,8 +2144,10 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                 # --- B. Gather and Execute Network Updates (Sequential Optimization) ---
                 # v4.1: Use spatial grid for occupant lookups (already rebuilt above)
                 occupant_at = _agent_grid._pos_to_id
-                # v4.51 PERF: use a set — the code only checks membership.
-                food_at = {f.pos for f in foods.values() if f.alive}
+                # v4.52 PERF (#StaticFoodSet): `food_at` is maintained
+                # incrementally by place_initial_food / schedule_respawn /
+                # try_respawns and by the food-eaten path below. No per-tick
+                # rebuild from `foods.values()`. Behavior-neutral.
                 
                 # Track which NxErs ate food this tick for temperature
                 ate_food_this_tick = set()
@@ -2003,7 +2219,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                             ne_level = a.net.neuromodulators.get('norepinephrine', 0.12)
                             
                             # NEW v3.0: Rest mode reduces activity outputs
-                            if getattr(a, 'is_resting', False):
+                            if a.is_resting:
                                 # Reduce dopamine during rest (less reward-seeking)
                                 a.net.neuromodulators['dopamine'] = max(0.05, da_level * 0.9)
                                 ser_base = getattr(a.net.params, 'serotonin_baseline', 0.12)
@@ -2050,7 +2266,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                                 hunger_val = 0    # normal — default
                             
                             # 5. Sight (Line of sight in heading)
-                            # v4.51 PERF: cache ax,ay,world_n locals; use occupant_at.get()
+                            # v4.52 PERF: cache ax,ay,world_n locals; use occupant_at.get()
                             # once instead of "in" + "[...]" (two dict lookups per step).
                             sight_val = 0
                             seen_neighbors_count = 0
@@ -2093,7 +2309,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                                 _neuromod_boost(a.net.neuromodulators, 'norepinephrine', ne_boost, a.net.params)
                             
                             # 6. Smell (Square Radius)
-                            # v4.51 PERF: use cached offset tuple (no per-tick inner-range rebuild);
+                            # v4.52 PERF: use cached offset tuple (no per-tick inner-range rebuild);
                             # cache ax,ay locals; short-circuit once both flags set (food + nxer).
                             smell_val = 0
                             found_food_smell = False; found_nxer_smell = False
@@ -2137,7 +2353,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                             # BIOINSPIRED: Internal temperature affects behavior and metabolism
                             # Trinary: -1=cold/hypothermic, 0=normal, 1=hot/hyperthermic
                             temp_val = 0
-                            current_temp = getattr(a, 'body_temperature', 37.0)
+                            current_temp = a.body_temperature
                             cold_thresh = getattr(a.net.params, 'temp_cold_threshold', 35.5)
                             hot_thresh = getattr(a.net.params, 'temp_hot_threshold', 38.5)
                             # v4.0: Use inherited individual thresholds if available
@@ -2215,7 +2431,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                             # listener list to voice_max_listeners so this stays
                             # bounded as the population grows.
                             song_val = 0
-                            if getattr(a.net.params, 'voice_enabled', True) and getattr(a, 'voice', None) is not None:
+                            if getattr(a.net.params, 'voice_enabled', True) and a.voice is not None:
                                 hear_r = int(getattr(a.net.params, 'voice_hearing_radius', 4))
                                 max_listeners = int(getattr(a.net.params, 'voice_max_listeners', 6))
                                 nearby_voices = []
@@ -2288,7 +2504,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                         # Apply Metabolic Ramp directly to the live object
                         # v4.0: Resting NxErs have reduced metabolism (BIOINSPIRED: energy conservation)
                         idle_seconds = max(0.0, (step_tick - a.last_move_tick) / GlobalTimeSteps)
-                        if getattr(a, 'is_resting', False):
+                        if a.is_resting:
                             # Resting: reduced metabolic rate, no idle penalty
                             resting_mult = getattr(a, 'resting_metabolism_multiplier', RESTING_METABOLISM_MULT)
                             a.net.params.metabolic_rate *= resting_mult
@@ -2354,7 +2570,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                                     a.brain.simulate_step(external_by_sphere)
                             else:
                                 # Fallback: sensory sphere missing, use single-net
-                                # v4.51 PERF: convert tuple→list ONCE (was per-substep allocation).
+                                # v4.52 PERF: convert tuple→list ONCE (was per-substep allocation).
                                 _li = list(a.last_inputs)
                                 for _ in range(steps_to_sim):
                                     a.net.current_game_tick = step_tick
@@ -2362,7 +2578,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                                     a.net.simulate_step()
                         else:
                             # Single-net mode (backward compat)
-                            # v4.51 PERF: convert tuple→list ONCE (was per-substep allocation).
+                            # v4.52 PERF: convert tuple→list ONCE (was per-substep allocation).
                             _li = list(a.last_inputs)
                             for _ in range(steps_to_sim):
                                 a.net.current_game_tick = step_tick
@@ -2373,7 +2589,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                         if hasattr(a.net, 'receptor_activations'):
                             a.receptor_activations = dict(a.net.receptor_activations)
                         if hasattr(a.net, 'neuromod_system'):
-                            # v4.51 PERF: single-pass accumulator instead of two full scans
+                            # v4.52 PERF: single-pass accumulator instead of two full scans
                             # (original: sum-gen once, then len(list-comp) once).
                             _astro_sum = 0.0
                             _astro_n = 0
@@ -2451,13 +2667,13 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                         
                         # Temperature affects movement urgency (BIOINSPIRED: thermoregulation)
                         temp_movement_mod = 1.0
-                        if getattr(a, 'body_temperature', 37.0) < getattr(a.net.params, 'temp_cold_threshold', 35.5):
+                        if a.body_temperature < getattr(a.net.params, 'temp_cold_threshold', 35.5):
                             # Cold NxErs are more likely to move (generate heat)
                             temp_movement_mod = 1.0 + getattr(a.net.params, 'temp_movement_bonus', 0.15)
                             if a.is_resting:
                                 # Too cold to rest
                                 a.is_resting = False
-                        elif getattr(a, 'body_temperature', 37.0) > getattr(a.net.params, 'temp_hot_threshold', 38.5):
+                        elif a.body_temperature > getattr(a.net.params, 'temp_hot_threshold', 38.5):
                             # Hot NxErs prefer to rest (reduce heat generation)
                             temp_movement_mod = 0.7
                             if O6 != -1:  # Unless brain forces active
@@ -2480,7 +2696,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                         # similarity calls per tick (capped below).
                         if (
                             getattr(a.net.params, 'voice_enabled', True)
-                            and getattr(a, 'voice', None) is not None
+                            and a.voice is not None
                             and (dx == 0 and dy == 0)
                         ):
                             affinity_weight = float(getattr(a.net.params, 'voice_clan_affinity_weight', 0.35))
@@ -2575,9 +2791,9 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                     if not a.alive: continue
                     if not hasattr(a, '_consecutive_successful_moves'):
                         a._consecutive_successful_moves = 0
-                    if getattr(a, 'is_resting', False):
+                    if a.is_resting:
                         temp_drop = getattr(a.net.params, 'resting_temp_drop_rate', 0.1) * FIXED_DT
-                        a.body_temperature = max(35.0, getattr(a, 'body_temperature', 37.0) - temp_drop)
+                        a.body_temperature = max(35.0, a.body_temperature - temp_drop)
 
                 # --- D. Resolve Agent Interactions ---
                 intents = []; move_target = {}
@@ -2586,11 +2802,11 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                     # Skip movement attempts if resting (UPDATED v3.1: Resting behavior now brain-influenced)
                     # v4.0: Resting still consumes food but at reduced rate
                     rest_skip_chance = 0.8
-                    if getattr(a, 'is_resting', False):
+                    if a.is_resting:
                         # Check if brain is forcing active
                         if len(a.last_outputs) > 5 and a.last_outputs[5] == -1:
                             rest_skip_chance = 0.0  # Brain overrides rest
-                    if getattr(a, 'is_resting', False) and random.random() < rest_skip_chance:
+                    if a.is_resting and random.random() < rest_skip_chance:
                         resting_mult = getattr(a, 'resting_metabolism_multiplier', RESTING_METABOLISM_MULT)
                         a.food -= 0.005 * resting_mult  # Minimal food consumption while resting
                         if a.food <= 0:
@@ -2964,8 +3180,8 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                         # Eating generates heat (thermogenic effect)
                         # v4.0: Increased heat gain from food (thermogenesis)
                         food_gain = getattr(a.net.params, 'temp_food_gain_v32', 0.7)
-                        a.body_temperature = min(41.0, getattr(a, 'body_temperature', 37.0) + food_gain)
-                    elif getattr(a, 'is_resting', False):
+                        a.body_temperature = min(41.0, a.body_temperature + food_gain)
+                    elif a.is_resting:
                         # Resting: temperature drops toward baseline minus circadian offset
                         # Already handled above, skip additional activity gain
                         pass
@@ -2973,12 +3189,12 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                         # Movement generates heat
                         # v4.0: Increased heat gain from movement
                         activity_gain = getattr(a.net.params, 'temp_activity_gain_v32', 0.5)
-                        a.body_temperature = min(41.0, getattr(a, 'body_temperature', 37.0) + activity_gain)
+                        a.body_temperature = min(41.0, a.body_temperature + activity_gain)
                     
                     # v4.0: Apply temperature decay (slower rate for better dynamics)
                     decay_rate = getattr(a.net.params, 'temp_decay_rate_v32', 0.015)
                     baseline = 37.0 + random.uniform(-0.2, 0.2)  # Small individual variance
-                    current_temp = getattr(a, 'body_temperature', 37.0)
+                    current_temp = a.body_temperature
                     if current_temp > baseline:
                         a.body_temperature = max(baseline, current_temp - decay_rate)
                     elif current_temp < baseline:
@@ -3016,24 +3232,51 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
             if alive_count == 0 and not game_over:
                 paused = True; game_over = True; game_over_start_time = time.time(); user_declined_restart = False
 
-            best_scores = {}
-            title_to_stat = {"Food found": "food_found", "Food taken": "food_taken", "World explored": "explored", "Time lived (s)": "time_lived_s", "Mates": "mates_performed", "Fitness": "fitness_score"}
-            for title, stat_name in title_to_stat.items():
-                all_candidates = list(nxers.values())
-                if stat_name in all_time_best: all_candidates.extend(all_time_best[stat_name])
-                if not all_candidates: best_scores[title] = 0
-                else: best_scores[title] = max(getattr(a.stats, stat_name) for a in all_candidates)
-            renderer.draw_world(foods, nxers, rankings(), alive_count, deaths_count, births_count, paused, effects, step_tick, GlobalTimeSteps, game_over, game_index, best_scores)
+            # v4.52 PERF (#HUD-cache + #24 Headless):
+            #   • Skip all HUD work + draw_world entirely when headless.
+            #   • Otherwise, recompute the rankings/best_scores payload only
+            #     when the sim tick, population, or selection has changed AND
+            #     at most every _HUD_REFRESH_FRAMES frames while running.
+            #     When paused, refresh every frame so interactions feel live.
+            if not _HEADLESS:
+                _sel_now = renderer.selected_nxer_id
+                _stale = (
+                    paused
+                    or (_frame_counter - _hud_cache['frame_idx']) >= _HUD_REFRESH_FRAMES
+                    or step_tick != _hud_cache['last_step_tick']
+                    or alive_count != _hud_cache['last_alive_count']
+                    or _sel_now != _hud_cache['last_selected']
+                )
+                if _stale:
+                    best_scores = {}
+                    title_to_stat = {"Food found": "food_found", "Food taken": "food_taken", "World explored": "explored", "Time lived (s)": "time_lived_s", "Mates": "mates_performed", "Fitness": "fitness_score"}
+                    for title, stat_name in title_to_stat.items():
+                        all_candidates = list(nxers.values())
+                        if stat_name in all_time_best: all_candidates.extend(all_time_best[stat_name])
+                        if not all_candidates: best_scores[title] = 0
+                        else: best_scores[title] = max(getattr(a.stats, stat_name) for a in all_candidates)
+                    _hud_cache['best_scores'] = best_scores
+                    _hud_cache['rankings']    = rankings()
+                    _hud_cache['frame_idx']   = _frame_counter
+                    _hud_cache['last_step_tick']   = step_tick
+                    _hud_cache['last_alive_count'] = alive_count
+                    _hud_cache['last_selected']    = _sel_now
+                else:
+                    best_scores = _hud_cache['best_scores']
+                renderer.draw_world(
+                    foods, nxers, _hud_cache['rankings'], alive_count,
+                    deaths_count, births_count, paused, effects, step_tick,
+                    GlobalTimeSteps, game_over, game_index, best_scores,
+                )
 
             # =================================================================
             # v4.5: PER-FRAME AUDIO UPDATE
             # =================================================================
-            # Only does real work when audio is toggled ON. If OFF, update() is a
-            # cheap early return — no numpy, no channel operations. We also skip
-            # the build-up entirely when the visual mode is off, because without
-            # a visible world the concept of "close to the camera" is undefined
-            # and we want zero overhead.
-            if audio_engine.is_enabled() and renderer.visual_mode and renderer.zoom >= config.NetworkParameters().audio_min_zoom:
+            # v4.52 PERF (#24 Headless): in test/batch mode there is no one
+            # listening; short-circuit both branches to zero cost.
+            if _HEADLESS:
+                pass
+            elif audio_engine.is_enabled() and renderer.visual_mode and renderer.zoom >= config.NetworkParameters().audio_min_zoom:
                 # Build a screen-space list of currently-singing NxErs, capped to
                 # the AUDIO_MAX_VOICES closest to the camera centre.
                 screen_w, screen_h = renderer.screen.get_size()
@@ -3235,3 +3478,5 @@ def TestMode(games_count: int = 2, max_minutes: int = 1):
         time.sleep(1.0)
 
     print("--- TEST MODE COMPLETE ---")
+
+

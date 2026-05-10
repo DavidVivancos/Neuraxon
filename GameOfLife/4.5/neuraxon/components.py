@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.51 components (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 143 
+# Neuraxon Game of Life v.4.52 components (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 144 
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -126,7 +126,7 @@ class Synapse:
         self._prev_w_slow = self.w_slow
         self._prev_w_meta = self.w_meta
 
-        # v4.51 PERF: Cache frequently-read params as plain attrs. These never mutate
+        # v4.52 PERF: Cache frequently-read params as plain attrs. These never mutate
         # during a simulation step, so pulling them into locals via getattr every tick
         # was pure overhead. Values identical to getattr(params, key, default).
         self._meta_gain = getattr(params, 'meta_influence_gain', 0.25)
@@ -160,7 +160,7 @@ class Synapse:
 
     def update_chrono_traces(self, pre_state: int):
         """Neuraxon v2.0: Update fast/slow chrono traces (Algorithm 1, Eqs 5-6)."""
-        # v4.51 PERF: Use cached flag/constants instead of getattr every call.
+        # v4.52 PERF: Use cached flag/constants instead of getattr every call.
         if not self._chrono_enabled:
             return
         a_f = self._chrono_alpha_f
@@ -181,7 +181,7 @@ class Synapse:
 
     def update_eligibility(self, pre_state: int, post_state: int, params):
         """Neuraxon v2.0: AGMP eligibility trace (Algorithm 1, Eq 8)."""
-        # v4.51 PERF: Use cached attrs. `params` arg kept for API compat but we use self.
+        # v4.52 PERF: Use cached attrs. `params` arg kept for API compat but we use self.
         if not self._agmp_enabled:
             return
         lam_e = self._agmp_lambda_e
@@ -196,12 +196,17 @@ class Synapse:
         if self.is_afferent:
             delay_factor = max(0.5, delay_factor)
         # v3.31: CRITICAL FIX — Include w_meta in effective weight
-        # v4.51 PERF: use cached meta_gain (set in __init__) — no getattr / try/except.
+        # v4.52 PERF: use cached meta_gain (set in __init__) — no getattr / try/except.
         w = self.w_fast + self.w_slow + self.w_meta * self._meta_gain
         signal = w * pre_state
         return signal * delay_factor, signal * (1.0 - delay_factor)
     
-    def calculate_delta_w(self, pre_state: int, post_state: int, neuromodulators: Dict[str, float], dt: float, receptor_activations: Dict = None, tick: int = 0) -> float:
+    def calculate_delta_w(self, pre_state: int, post_state: int, neuromodulators: Dict[str, float], dt: float, receptor_activations: Dict = None, tick: int = 0, _ra_cache=None) -> float:
+        # v4.52 PERF (#2 pre-unpack receptors): when the caller passes a
+        # `_ra_cache` tuple (d1_act, d2_act, 5HT2A_act, 5HT1A_act) we use it
+        # directly and skip 2 dict lookups per synapse per tick. All synapses
+        # in one network pass share the same values, so this extracts them
+        # once at the pass level. Mathematically identical.
         receptor_activations = receptor_activations or {}
 
         # v4.1: Fast path — when both pre and post are neutral, only decay traces
@@ -215,12 +220,16 @@ class Synapse:
         self.pre_trace += (-self.pre_trace / self.tau_ltp + (1 if pre_state == 1 else 0)) * dt
         self.pre_trace_ltd += (-self.pre_trace_ltd / self.tau_ltd + (1 if pre_state == 1 else 0)) * dt
 
-        d1_act = receptor_activations.get('D1', 0.5)
-        d2_act = receptor_activations.get('D2', 0.5)
+        if _ra_cache is not None:
+            d1_act = _ra_cache[0]
+            d2_act = _ra_cache[1]
+        else:
+            d1_act = receptor_activations.get('D1', 0.5)
+            d2_act = receptor_activations.get('D2', 0.5)
         ach = neuromodulators.get('acetylcholine', 0.5)
         
         da = neuromodulators.get('dopamine', 0.5)
-        # v4.51 PERF: use cached thresholds (was self.params.dopamine_*_threshold per call).
+        # v4.52 PERF: use cached thresholds (was self.params.dopamine_*_threshold per call).
         da_threshold = self._da_low_thresh
         if da > da_threshold:
             da_high = min(1.0, (da - da_threshold) / da_threshold)
@@ -240,7 +249,7 @@ class Synapse:
         ach_gain = 1.0 + (ach if ach > 0.5 else 0.0)
         self.learning_rate_mod = (1.0 + (d1_act * 0.5) + (d2_act * 0.2)) * ach_gain
         
-        # v4.51 PERF: resolve logger + level once (was 2 separate calls + attr reads)
+        # v4.52 PERF: resolve logger + level once (was 2 separate calls + attr reads)
         logger = get_data_logger()
         _ll = logger.log_level
         if _ll >= 2:
@@ -275,7 +284,7 @@ class Synapse:
             #   DA=0.45 (peak):   D1=0.92, LTP ∝ 0.92+0.08 = 1.00 (×2.2)
             # DA-gated component dominates (5-10:1 ratio) → M25 sees differential
             # Hebbian floor ensures baseline learning → M1, M14 preserved
-            # v4.51 PERF: use cached hebbian rate.
+            # v4.52 PERF: use cached hebbian rate.
             hebbian_frac = self._hebbian_ltp_rate
             da_component = self.learning_rate * self.learning_rate_mod * d1_act * self.pre_trace
             # v112 FIX: Hebbian NOT gated by D1 — this is the DA-independent
@@ -313,7 +322,7 @@ class Synapse:
             #   → Mean DA during LTD ≈ population mean
             #   → While LTP concentrates at burst DA → M25 differential
             ach_forgetting_mult = 1.5 if ach > 0.6 else 1.0
-            # v4.51 PERF: use cached LTD scales.
+            # v4.52 PERF: use cached LTD scales.
             ltd_scale = (self._ltd_inhib_scale if post_state == -1 else self._ltd_neutral_scale) * ach_forgetting_mult
             # v112 FIX: Linear D2 gating. D2≈0.50 at baseline → healthy LTD.
             delta = -self.learning_rate * self.learning_rate_mod * d2_act * self.pre_trace_ltd * ltd_scale
@@ -338,9 +347,12 @@ class Synapse:
         self._pending_delta_w = 0.0
         return 0.0
     
-    def apply_update(self, dt: float, neuromodulators: Dict[str, float], neighbor_deltas: List[float] = None, receptor_activations: Dict = None, tick: int = 0):
+    def apply_update(self, dt: float, neuromodulators: Dict[str, float], neighbor_deltas: List[float] = None, receptor_activations: Dict = None, tick: int = 0, _ra_cache=None):
+        # v4.52 PERF (#2 pre-unpack): `_ra_cache` is the same (d1, d2, 5HT2A,
+        # 5HT1A) tuple prebuilt in network.simulate_step. When present we
+        # skip the `.get('5HT2A', ...)` / `.get('5HT1A', ...)` dict lookups.
         receptor_activations = receptor_activations or {}
-        # v4.51 PERF: resolve logger + level ONCE for this call; avoid capturing
+        # v4.52 PERF: resolve logger + level ONCE for this call; avoid capturing
         # old weights when nothing will be logged.
         logger = get_data_logger()
         _ll = logger.log_level
@@ -357,12 +369,12 @@ class Synapse:
         if neighbor_deltas:
             # ACh Modulation: Prioritize neighbors/directions (Paper Claim)
             associativity_gain = 1.0 + (ach * 0.5)
-            # v4.51 PERF: use cached _assoc_strength (was self.params.associativity_strength)
+            # v4.52 PERF: use cached _assoc_strength (was self.params.associativity_strength)
             neighbor_contribution = self._assoc_strength * associativity_gain * sum(
                 dw / (i + 1) for i, dw in enumerate(neighbor_deltas[:3]))
             delta_w += neighbor_contribution
         
-        # v4.51 PERF: use cached min/max weight (was self.params.* per call)
+        # v4.52 PERF: use cached min/max weight (was self.params.* per call)
         max_w = self._max_weight
         min_w = self._min_weight
         
@@ -373,15 +385,19 @@ class Synapse:
         self.w_slow = max(min_w, min(max_w, self.w_slow))
         
         # 106: w_meta — 5-HT receptor gating
-        ht2a = receptor_activations.get('5HT2A', 0.5)
-        ht1a = receptor_activations.get('5HT1A', 0.5)
+        if _ra_cache is not None:
+            ht2a = _ra_cache[2]
+            ht1a = _ra_cache[3]
+        else:
+            ht2a = receptor_activations.get('5HT2A', 0.5)
+            ht1a = receptor_activations.get('5HT1A', 0.5)
         ht_factor = 0.5 * ht2a + 0.1 * (1.0 - ht1a)
-        meta_clamp = self._meta_clamp  # v4.51 PERF
+        meta_clamp = self._meta_clamp  # v4.52 PERF
         self.w_meta += (dt / self.tau_meta) * (-self.w_meta + 0.05 * delta_w * ht_factor)
         self.w_meta = max(-meta_clamp, min(meta_clamp, self.w_meta))
         
         activity = abs(self.w_fast) + abs(self.w_slow)
-        # v4.51 PERF: use cached _synapse_death_prob
+        # v4.52 PERF: use cached _synapse_death_prob
         self.integrity = min(1.0, self.integrity + 0.001 * dt * activity) if activity >= 0.01 else self.integrity - self._synapse_death_prob * dt
 
         # NEW: Log weight evolution if significant change
@@ -607,7 +623,7 @@ class MSTHState:
         self.fast_excitability = 0.0
         self.medium_gain = 1.0
         self.slow_structural = 0.0
-        # v4.51 PERF: cache time constants + gains once — called per-neuron per-tick.
+        # v4.52 PERF: cache time constants + gains once — called per-neuron per-tick.
         self._uf_tau = getattr(params, 'msth_ultrafast_tau', 5.0)
         self._f_tau = getattr(params, 'msth_fast_tau', 2000.0)
         self._m_tau = getattr(params, 'msth_medium_tau', 300000.0)
@@ -618,7 +634,7 @@ class MSTHState:
         self._m_gain = getattr(params, 'msth_medium_gain', 0.001)
 
     def update(self, current_state_abs: float, dt: float) -> dict:
-        # v4.51 PERF: use cached params, no getattr inside hot loop.
+        # v4.52 PERF: use cached params, no getattr inside hot loop.
         uf_tau = self._uf_tau
         f_tau = self._f_tau
         m_tau = self._m_tau
@@ -849,3 +865,5 @@ class NeuromodulatorSystem:
 
     def to_dict(self) -> dict:
         return {'levels': self.levels, 'receptors': {k: v.to_dict() for k, v in self.receptors.items()}}
+
+

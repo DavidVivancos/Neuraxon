@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.51 ui renderer (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 143 
+# Neuraxon Game of Life v.4.52 ui renderer (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 144 
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -24,7 +24,7 @@ class Renderer:
     """Handles all Pygame-based rendering and user input for the main simulation window."""
     def __init__(self, world: 'World', textures: Dict[str, Optional[str]], textures_alpha: float):
         pygame.init()
-        pygame.display.set_caption("Neuraxon Game of Life v 4.51 (Research Version) - By David Vivancos & Dr Jose Sanchez for Qubic Science")
+        pygame.display.set_caption("Neuraxon Game of Life v 4.52 (Research Version) - By David Vivancos & Dr Jose Sanchez for Qubic Science")
         self.screen = pygame.display.set_mode((1920, 1080), pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
         self.world = world
@@ -50,6 +50,15 @@ class Renderer:
         # v4.5: Audio engine reference (set by game_loop). Renderer uses it
         # only to read is_enabled() for the status hint — no synthesis here.
         self.audio_engine = None
+
+        # v4.52 PERF (#HUD-cache): cached name→color map + its signature so we
+        # only rebuild the dict when the NxEr population actually changes.
+        # The dict comprehension `{a.name: a.color for a in nxers.values()}`
+        # was running every single frame (60 Hz) regardless of whether any
+        # agent was born/died. For large populations that's the HUD's single
+        # biggest cost.
+        self._name2color_cache: Dict[str, Tuple[int, int, int]] = {}
+        self._name2color_signature: int = -1
         
     def _load_textures(self, tex):
         """Loads optional image files to be used as textures for world elements."""
@@ -212,7 +221,18 @@ class Renderer:
         self.screen.blit(round_text, (x, y)); y += 28
         
         # Draw Rankings.
-        name2color = {a.name: a.color for a in nxers.values()}
+        # v4.52 PERF (#HUD-cache): `nxers` dict population changes only on
+        # birth/death, which is rare relative to 60-fps frame rate. A cheap
+        # length signature catches the common case; renaming/color changes
+        # (never) would need a deeper invariant. Colors can't change for an
+        # existing NxEr id in this codebase, so length is sufficient.
+        _sig = len(nxers)
+        if _sig != self._name2color_signature:
+            self._name2color_cache = {a.name: a.color for a in nxers.values()}
+            self._name2color_signature = _sig
+        name2color = self._name2color_cache
+        # Ranking click areas must still be rebuilt per frame because the
+        # y-coordinates depend on the laid-out HUD.
         self.ranking_click_areas = []
         for title, rows in hud.items():
             display_title = title
@@ -228,9 +248,13 @@ class Renderer:
                 val_text = self.small.render(f"{val}", True, (220, 220, 220))
                 name_rect = name_text.get_rect(topleft=(x + 20, y))
                 val_rect = val_text.get_rect(topleft=(x + 180, y))
-                clicked_nxer_name = None
-                for nxer_obj in nxers.values():
-                    if nxer_obj.name == base_name: clicked_nxer_name = nxer_obj.name; break
+                # v4.52 PERF (#HUD-cache): replaced per-row O(N) scan
+                # `for nxer_obj in nxers.values(): if nxer_obj.name == base_name`
+                # with O(1) membership check against the cached name→color
+                # dict. Identical: both resolve "does an NxEr named base_name
+                # currently exist?". Used only to gate whether this row is
+                # clickable — no field of nxer_obj is read beyond name.
+                clicked_nxer_name = base_name if base_name in name2color else None
                 if clicked_nxer_name: # Store the clickable area for this ranking entry.
                     combined_rect = name_rect.union(val_rect)
                     self.ranking_click_areas.append((combined_rect, clicked_nxer_name))
@@ -300,7 +324,7 @@ class Renderer:
             # Display key parameters of the agent's neural network.
             self.screen.blit(self.small.render("Network params:", True, (200, 200, 200)), (px, py)); py += 18
             P = a.net.params
-            # v4.51 FIX (unrelated to perf): When a multi-sphere brain is active,
+            # v4.52 FIX (unrelated to perf): When a multi-sphere brain is active,
             # `a.net` points at the MOTOR sphere's sub-network (see make_nxer in
             # game_loop.py: "The motor sphere's network becomes the primary net
             # for backward compat"). The motor sphere's num_input_neurons counts
@@ -447,3 +471,5 @@ class Renderer:
         """Advances the Pygame clock, enforces an FPS cap, and returns the frame's delta time."""
         self.dt = self.clock.tick(fps_cap) / 1000.0
         return self.dt
+
+

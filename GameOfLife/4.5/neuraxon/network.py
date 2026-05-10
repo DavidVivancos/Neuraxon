@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.51 network (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 143 
+# Neuraxon Game of Life v.4.52 network (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 144 
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -579,7 +579,7 @@ class NeuraxonNetwork:
         mean_w_slow = sum(all_w_slow) / len(all_w_slow)
         
         # === STAGE 2: PER-NEURON SYNAPTIC SCALING ===
-        # v4.51 PERF: use pre-indexed _syn_by_pre instead of rebuilding from scratch;
+        # v4.52 PERF: use pre-indexed _syn_by_pre instead of rebuilding from scratch;
         # filter integrity>0 on iteration (same output as the old defaultdict build).
         scaling_events = 0
 
@@ -659,15 +659,24 @@ class NeuraxonNetwork:
                 activity=scaling_events / max(1, len(self._syn_by_pre))
             )
 
-    def _get_neighbor_phases(self, neuron_id: int) -> dict:
-        """v2.40: Get phases of synaptically connected neighbors for Kuramoto coupling.
+    def _get_neighbor_phases(self, neuron_id: int):
+        """v2.40: Phases of synaptically connected neighbors for Kuramoto.
         v4.1: Uses pre-indexed synapse maps — O(degree) instead of O(S).
-        v4.51 PERF: drop the redundant post_id==neuron_id check (guaranteed by the
-        _syn_by_post key) and hoist the neuron_map local for faster attribute reads."""
-        neighbor_phases = {}
-        neuron_map = self._neuron_map
-        nm_get = neuron_map.get
-        # Check incoming synapses — syn.post_id == neuron_id by construction of _syn_by_post.
+
+        v4.52 PERF (#3 phase-neighbor): returns a list of (phase, weight)
+        tuples instead of a dict keyed by neighbor_id. The downstream consumer
+        (_update_phase_oscillator) does not read the id, so the list form is
+        equivalent — and avoids per-call dict allocation + hash work.
+        Per-neighbor weights are still accumulated when multiple synapses
+        connect the same pair (one list entry per pair, weights summed via
+        an intermediate dict only if duplicates are detected)."""
+        nm_get = self._neuron_map.get
+        out = []
+        # Small optimisation: dedup+accumulate only when the same neighbor-id
+        # appears twice (rare in this topology). We start list-only and
+        # escalate to dict-backed merge only on conflict.
+        seen_ids = None
+        # Incoming synapses — syn.post_id == neuron_id by construction
         for syn in self._syn_by_post.get(neuron_id, ()):
             if syn.is_silent or syn.integrity < 0.1:
                 continue
@@ -676,13 +685,18 @@ class NeuraxonNetwork:
                 continue
             pre_n = nm_get(syn.pre_id)
             if pre_n is not None and pre_n.is_active:
-                entry = neighbor_phases.get(syn.pre_id)
-                if entry is None:
-                    neighbor_phases[syn.pre_id] = (pre_n.phase, weight)
+                if seen_ids is None:
+                    seen_ids = {syn.pre_id: len(out)}
+                    out.append((pre_n.phase, weight))
                 else:
-                    # Accumulate weight if multiple synapses from same pre
-                    neighbor_phases[syn.pre_id] = (pre_n.phase, entry[1] + weight)
-        # Check outgoing synapses — syn.pre_id == neuron_id by construction of _syn_by_pre.
+                    idx = seen_ids.get(syn.pre_id)
+                    if idx is None:
+                        seen_ids[syn.pre_id] = len(out)
+                        out.append((pre_n.phase, weight))
+                    else:
+                        ph, w = out[idx]
+                        out[idx] = (ph, w + weight)
+        # Outgoing synapses — syn.pre_id == neuron_id by construction
         for syn in self._syn_by_pre.get(neuron_id, ()):
             if syn.is_silent or syn.integrity < 0.1:
                 continue
@@ -691,12 +705,18 @@ class NeuraxonNetwork:
                 continue
             post_n = nm_get(syn.post_id)
             if post_n is not None and post_n.is_active:
-                entry = neighbor_phases.get(syn.post_id)
-                if entry is None:
-                    neighbor_phases[syn.post_id] = (post_n.phase, weight)
+                if seen_ids is None:
+                    seen_ids = {syn.post_id: len(out)}
+                    out.append((post_n.phase, weight))
                 else:
-                    neighbor_phases[syn.post_id] = (post_n.phase, entry[1] + weight)
-        return neighbor_phases
+                    idx = seen_ids.get(syn.post_id)
+                    if idx is None:
+                        seen_ids[syn.post_id] = len(out)
+                        out.append((post_n.phase, weight))
+                    else:
+                        ph, w = out[idx]
+                        out[idx] = (ph, w + weight)
+        return out
     
     def _compute_phase_coherence(self) -> float:
         """v2.39: Compute Kuramoto order parameter R for phase coherence."""
@@ -786,12 +806,12 @@ class NeuraxonNetwork:
         # those changes are overwritten by get_flat_levels() below.
         self._sync_neuromod_to_system()
 
-        # v4.51 PERF: hoist active_neurons ONCE per simulate_step — was recomputed
+        # v4.52 PERF: hoist active_neurons ONCE per simulate_step — was recomputed
         # several times (v2_activity loop, main update loop, energy accounting).
         active_neurons = [n for n in self.all_neurons if n.is_active]
 
         # === NEURAXON v2.0: Neuromodulator System Update ===
-        # v4.51 PERF: single-pass aggregation — was 3 separate passes over `states`.
+        # v4.52 PERF: single-pass aggregation — was 3 separate passes over `states`.
         v2_activity = {
             'mean_activity': 0.0, 'excitatory_fraction': 0.0, 'state_change_rate': 0.0
         }
@@ -818,7 +838,7 @@ class NeuraxonNetwork:
         # The NeuromodulatorSystem computes all 9 receptor activations correctly,
         # but they were never persisted to the per_nxer_time_series parquet.
         # This caused M16 to report all NaN values.
-        # v4.51 PERF: resolve logger + level once.
+        # v4.52 PERF: resolve logger + level once.
         logger = get_data_logger()
         _ll = logger.log_level
         if _ll >= 2:
@@ -829,82 +849,127 @@ class NeuraxonNetwork:
         # === NEURAXON v2.0: Oscillator Bank Update ===
         self.oscillator_bank.update(dt)
 
-        
-        # v4.1: Use _neuron_map for O(1) lookup; simplified delay handling
-        # v4.51 PERF: sparse defaultdict avoids allocating an empty list for every
-        # neuron every tick — many neurons receive 0 synaptic inputs on any given tick.
+        # ------------------------------------------------------------------
+        # v4.52 PERF (#1 fuse-passes + skip-neutral, #2 pre-unpack receptors)
+        # ------------------------------------------------------------------
+        # Before: self.synapses was scanned up to FOUR times per simulate_step:
+        #   (1) compute_input → syn_inputs / mod_inputs
+        #   (2) calculate_delta_w
+        #   (3) apply_update
+        #   (4) homeostatic scaling
+        # Each pass re-resolved pre/post via self.all_neurons[id] and re-ran
+        # the `if s.integrity <= 0 or not pre.is_active or not post.is_active`
+        # filter. We now build the filtered tuple list ONCE per step, and
+        # reuse it across passes. `active_syns` entries are (synapse, pre, post).
+        #
+        # Skip-neutral fast path (#1c): when pre.trinary_state == 0, compute_input
+        # already returns (0, 0) (components.py). We now short-circuit at the
+        # LOOP level too so we skip the function call entirely — this is where
+        # the cost is in CPython (method dispatch + arg packing).
+        #
+        # Receptor pre-unpack (#2): D1/D2/5HT2A/5HT1A values are the SAME for
+        # every synapse in a single pass. We precompute them once here and pass
+        # them as a tuple `_ra_cache`; Synapse.calculate_delta_w / apply_update
+        # use the tuple when supplied instead of re-doing 4 dict lookups per
+        # synapse per tick. Mathematically identical.
+        # ------------------------------------------------------------------
+        _nm = self._neuron_map
+        _syns = self.synapses
+        _all_n = self.all_neurons
+        _ra = self.receptor_activations
+        # Pre-unpack receptor values used by Synapse hot path.
+        _ra_d1   = _ra.get('D1',    0.5)
+        _ra_d2   = _ra.get('D2',    0.5)
+        _ra_5ht2a = _ra.get('5HT2A', 0.5)
+        _ra_5ht1a = _ra.get('5HT1A', 0.5)
+        _ra_cache = (_ra_d1, _ra_d2, _ra_5ht2a, _ra_5ht1a)
+        _nm_cache = (
+            self.neuromodulators.get('dopamine',      0.5),
+            self.neuromodulators.get('serotonin',     0.5),
+            self.neuromodulators.get('acetylcholine', 0.5),
+            self.neuromodulators.get('norepinephrine',0.5),
+        )
+
+        # PASS 0: build active-synapse list once, also accumulate synaptic
+        # inputs per neuron inline (Pass-1-fused). Skip-neutral is applied
+        # here so quiescent presynaptic neurons incur zero cost.
         syn_inputs = defaultdict(list)
         mod_inputs = defaultdict(list)
-        _nm = self._neuron_map
         _cur_time = self.time
-        for s in self.synapses:
+        active_syns: List[Tuple] = []
+        for s in _syns:
             if s.integrity <= 0: continue
             pre = _nm.get(s.pre_id)
             if pre is None or not pre.is_active: continue
-            immediate, delayed = s.compute_input(pre.trinary_state, _cur_time)
+            post = _nm.get(s.post_id)
+            if post is None or not post.is_active:
+                # Post-inactive: still include in active_syns? Historically
+                # calculate_delta_w / apply_update skip when post inactive, so
+                # it's safe to drop the synapse for later passes too. compute_input
+                # would normally still run but its output would go to an inactive
+                # post-neuron which does nothing with it. Drop.
+                continue
+            active_syns.append((s, pre, post))
+            pre_state = pre.trinary_state
+            if pre_state == 0:
+                # Skip-neutral fast path — compute_input returns (0,0) here;
+                # avoid the call & the axonal_delay branch entirely.
+                # get_modulatory_effect only depends on w_meta * is_modulatory,
+                # which is NON-ZERO even at neutral pre. Preserve that branch.
+                me = s.get_modulatory_effect()
+                if me != 0: mod_inputs[s.post_id].append(me)
+                continue
+            immediate, delayed = s.compute_input(pre_state, _cur_time)
             syn_inputs[s.post_id].append(immediate)
-            if delayed > 0:
-                if s.axonal_delay < dt:
-                    syn_inputs[s.post_id].append(delayed)
+            if delayed > 0 and s.axonal_delay < dt:
+                syn_inputs[s.post_id].append(delayed)
             me = s.get_modulatory_effect()
             if me != 0: mod_inputs[s.post_id].append(me)
 
         step_activity_sum = 0.0
         active_neuron_count = 0
 
-        # v4.51 PERF: iterate the pre-built active_neurons list instead of
-        # re-filtering all_neurons.
+        # PASS: per-neuron update (unchanged math; receptor_activations still
+        # passed as dict because Neuraxon.update consumes several keys and
+        # the per-call cost is already small relative to the neuron update).
         for n in active_neurons:
             ext = external_inputs.get(n.id, 0.0) + osc_drive
             neighbor_phases = self._get_neighbor_phases(n.id)
-            # Use .get(..., ()) so unfed neurons skip a list allocation.
             n.update(syn_inputs.get(n.id, ()), mod_inputs.get(n.id, ()), ext, self.neuromodulators, dt, osc_drive, neighbor_phases,
                      receptor_activations=self.receptor_activations)
-            
-            # Aggregate activity for this specific tick
             step_activity_sum += abs(n.trinary_state)
             active_neuron_count += 1
-        
-        # Calculate average network activity for this tick (0.0 to 1.0)
-        # Using average is better than sum because it handles population changes (deaths) gracefully
+
         current_step_activity = step_activity_sum / max(1, active_neuron_count)
         self.activation_history.append(current_step_activity)
 
-        for s in self.synapses:
-            if s.integrity <= 0: continue
-            pre = self.all_neurons[s.pre_id]
-            post = self.all_neurons[s.post_id]
-            if pre.is_active and post.is_active:
-                delta_w = s.calculate_delta_w(
-                    pre.trinary_state, post.trinary_state, self.neuromodulators, dt,
-                    receptor_activations=self.receptor_activations, tick=event_tick)
-                
-                # v107 FIX (M02): Boost STDP for proprioceptive→motor pathways
-                # BIOINSPIRED: Proprioceptive afferents have enhanced plasticity
-                # for motor learning (cerebellar-like error-driven learning)
-                is_proprio_to_motor = (
-                    pre.type == NeuronType.INPUT
-                    and pre.id == 8
-                    and post.type == NeuronType.OUTPUT
-                    and post.id in (
-                        self.params.num_input_neurons + self.params.num_hidden_neurons,      # output 0
-                        self.params.num_input_neurons + self.params.num_hidden_neurons + 1   # output 1
-                    )
-                )
-                if is_proprio_to_motor:
-                    boost = getattr(self.params, 'proprioceptive_stdp_boost', 2.5)
-                    delta_w *= boost
-                
-                s.potential_delta_w = delta_w
-                
-        for s in self.synapses:
-            if s.integrity <= 0: continue
-            pre = self.all_neurons[s.pre_id]
-            post = self.all_neurons[s.post_id]
-            if pre.is_active and post.is_active:
-                neighbor_deltas = [ns.potential_delta_w for ns in s.neighbor_synapses]
-                s.apply_update(dt, self.neuromodulators, neighbor_deltas,
-                               receptor_activations=self.receptor_activations, tick=event_tick)
+        # PASS 2: calculate_delta_w over the prebuilt active_syns tuple list.
+        # Pre-compute the proprio-motor output-id set once (previously done
+        # inside the loop per synapse).
+        _proprio_motor_ids = (
+            self.params.num_input_neurons + self.params.num_hidden_neurons,
+            self.params.num_input_neurons + self.params.num_hidden_neurons + 1,
+        )
+        _proprio_boost = getattr(self.params, 'proprioceptive_stdp_boost', 2.5)
+        for s, pre, post in active_syns:
+            delta_w = s.calculate_delta_w(
+                pre.trinary_state, post.trinary_state, self.neuromodulators, dt,
+                receptor_activations=self.receptor_activations, tick=event_tick,
+                _ra_cache=_ra_cache)
+            # v107 FIX (M02): Boost STDP for proprioceptive→motor pathways.
+            if (pre.type == NeuronType.INPUT
+                and pre.id == 8
+                and post.type == NeuronType.OUTPUT
+                and post.id in _proprio_motor_ids):
+                delta_w *= _proprio_boost
+            s.potential_delta_w = delta_w
+
+        # PASS 3: apply_update — reuses active_syns list.
+        for s, pre, post in active_syns:
+            neighbor_deltas = [ns.potential_delta_w for ns in s.neighbor_synapses]
+            s.apply_update(dt, self.neuromodulators, neighbor_deltas,
+                           receptor_activations=self.receptor_activations, tick=event_tick,
+                           _ra_cache=_ra_cache)
 
         # === NEURAXON v2.0: AGMP Astrocyte-Gated Plasticity (Algorithm 1 Step 5) ===
         if getattr(self.params, 'agmp_enabled', False):
@@ -929,7 +994,7 @@ class NeuraxonNetwork:
 
         # === NEURAXON v2.0: Homeostatic Synaptic Scaling ===
         # v4.1: O(S) via pre-indexed _syn_by_post instead of O(N*S) nested scan
-        # v4.51 PERF: iterate active_neurons (already filtered) instead of re-scanning all.
+        # v4.52 PERF: iterate active_neurons (already filtered) instead of re-scanning all.
         h_rate = getattr(self.params, 'homeostatic_rate', 0.0005)
         target_fr = getattr(self.params, 'target_firing_rate', 0.2)
         for neuron in active_neurons:
@@ -943,7 +1008,7 @@ class NeuraxonNetwork:
                     syn.w_fast = max(-1.0, min(1.0, syn.w_fast * scale))
                     syn.w_slow = max(-1.0, min(1.0, syn.w_slow * scale))
 
-        # v4.51 PERF: reuse active_neurons list for energy accumulation.
+        # v4.52 PERF: reuse active_neurons list for energy accumulation.
         for n in active_neurons:
             activity = abs(n.trinary_state)
             self.total_energy_consumed += n.firing_energy_cost * activity * dt
@@ -1077,8 +1142,8 @@ class NeuraxonNetwork:
     
     def get_energy_status(self) -> Dict[str, float]:
         """Returns a summary of the network's current energy state."""
-        import cmath
-        
+        # v4.52 PERF (#26): cmath already imported at module scope.
+
         active_neurons = [n for n in self.all_neurons if n.is_active]
         total_energy = sum(n.energy_level for n in active_neurons)
         avg_energy = total_energy / max(1, len(active_neurons))
@@ -1312,7 +1377,7 @@ def _rebuild_net_from_dict(d: dict) -> NeuraxonNetwork:
                         if attr in nd:
                             setattr(n, attr, nd[attr])
                     if 'dsn_input_buffer' in nd and isinstance(nd['dsn_input_buffer'], list):
-                        # v4.51: DSN buffer is now a deque(maxlen=k); preserve on load.
+                        # v4.52: DSN buffer is now a deque(maxlen=k); preserve on load.
                         k = max(1, len(nd['dsn_input_buffer']))
                         n.dsn_input_buffer = deque((float(x) for x in nd['dsn_input_buffer']), maxlen=k)
                         n._dsn_k = k
@@ -1330,3 +1395,5 @@ def _rebuild_net_from_dict(d: dict) -> NeuraxonNetwork:
         net._assign_branch_positions()
 
     return net
+
+

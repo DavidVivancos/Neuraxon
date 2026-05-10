@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.51 neuron (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 143 
+# Neuraxon Game of Life v.4.52 neuron (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 144 
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -86,7 +86,7 @@ class Neuraxon:
         self.state_tilde = 0.0
 
         # --- Neuraxon v2.0: DSN Dynamic Decay (Algorithm 1 Step 2) ---
-        # v4.51 PERF: use deque(maxlen=k) so the ring buffer is O(1) per push
+        # v4.52 PERF: use deque(maxlen=k) so the ring buffer is O(1) per push
         # instead of re-allocating a new list (list[1:] + [x]) every tick.
         k = max(int(getattr(params, 'dsn_kernel_size', 4)), 1)
         self._dsn_k = k
@@ -118,7 +118,7 @@ class Neuraxon:
         # NEW: Track for subthreshold logging
         self._prev_membrane_potential = 0.0
 
-        # v4.51 PERF: cache hot-path params — called per neuron per sub-step.
+        # v4.52 PERF: cache hot-path params — called per neuron per sub-step.
         self._phase_coupling_strength = params.phase_coupling_strength
         self._phase_coupling_local = params.phase_coupling_local_strength
         self._phase_coupling_momentum = params.phase_coupling_momentum
@@ -144,11 +144,11 @@ class Neuraxon:
         self._firing_rate_alpha = getattr(params, 'firing_rate_alpha', 0.01)
         self._spike_class_enabled = params.spike_classification_enabled
         self._driven_input_threshold = params.driven_input_threshold
-        # v4.51 PERF: precompute branch count (called every integration call)
+        # v4.52 PERF: precompute branch count (called every integration call)
         self._n_branches = len(self.dendritic_branches)
     
     def _nonlinear_dendritic_integration(self, synaptic_inputs: List[float], modulatory_inputs: List[float], dt: float) -> Tuple[float, List[float]]:
-        # v4.51 PERF: use cached _n_branches (was len(self.dendritic_branches) called 3× per invocation)
+        # v4.52 PERF: use cached _n_branches (was len(self.dendritic_branches) called 3× per invocation)
         nb = self._n_branches
         branch_outputs = []
         total_synaptic = 0.0
@@ -160,29 +160,40 @@ class Neuraxon:
         return total_synaptic * (1.0 + sum(modulatory_inputs) * 0.2), branch_outputs
     
     #v2.40 update
-    def _update_phase_oscillator(self, dt: float, global_osc: float, neighbor_phases: dict = None):
+    def _update_phase_oscillator(self, dt: float, global_osc: float, neighbor_phases=None):
+        """Kuramoto local coupling. v4.52 PERF (#3 phase-neighbor): accepts
+        EITHER the original dict form {neighbor_id: (phase, weight)} OR the
+        new list-of-tuples form [(phase, weight), ...]. The list form avoids
+        a full dict allocation per neuron per sub-step. neighbor_id is never
+        read inside this body, so the two shapes are observationally
+        equivalent — math identical."""
         # Natural frequency evolution
         d_phase = 2 * math.pi * self.natural_frequency * dt
         
         # Global coupling (WEAK - just sets rhythm)
-        # v4.51 PERF: use cached _phase_coupling_strength
+        # v4.52 PERF: use cached _phase_coupling_strength
         global_coupling = self._phase_coupling_strength * math.sin(global_osc - self.phase) * dt
         
         # Local Kuramoto coupling (STRONG - drives synchronization)
         local_coupling = 0.0
-        if neighbor_phases and len(neighbor_phases) > 0:
+        if neighbor_phases:
             total_weight = 0.0
             weighted_sin_sum = 0.0
-            for neighbor_id, (neighbor_phase, weight) in neighbor_phases.items():
-                phase_diff = neighbor_phase - self.phase
+            self_phase = self.phase
+            # Duck-type: tuples/lists of (phase, weight) iterate directly;
+            # dict {id: (phase, weight)} iterates via .values().
+            iterable = neighbor_phases.values() if isinstance(neighbor_phases, dict) else neighbor_phases
+            for item in iterable:
+                neighbor_phase, weight = item[0], item[1]
+                phase_diff = neighbor_phase - self_phase
                 weighted_sin_sum += weight * math.sin(phase_diff)
                 total_weight += weight
             if total_weight > 0.01:
-                # v4.51 PERF: cached _phase_coupling_local
+                # v4.52 PERF: cached _phase_coupling_local
                 local_coupling = (self._phase_coupling_local *
                                 weighted_sin_sum / total_weight * dt)
         
-        # Update with momentum — v4.51 PERF: cached _phase_coupling_momentum
+        # Update with momentum — v4.52 PERF: cached _phase_coupling_momentum
         mom = self._phase_coupling_momentum
         total_change = d_phase + global_coupling + local_coupling
         smoothed_change = (mom * self._prev_phase_change +
@@ -255,7 +266,7 @@ class Neuraxon:
     
     def _compute_dsn_alpha(self, current_input: float) -> float:
         """Neuraxon v2.0: alpha_t = Sigmoid(CausalConv1D(X_{t-k+1:t})) (Algorithm 1 Steps 5-6)."""
-        # v4.51 PERF: use cached flag; deque.append auto-evicts oldest (maxlen=k),
+        # v4.52 PERF: use cached flag; deque.append auto-evicts oldest (maxlen=k),
         # so pop-then-append collapses to a single append with identical semantics.
         if not self._dsn_enabled:
             return 0.5
@@ -274,7 +285,7 @@ class Neuraxon:
 
     def _update_complement(self, x_t: float):
         """Neuraxon v2.0: h_t, s_tilde(t) = s(t) + h(t) (Algorithm 1 Steps 7-8)."""
-        # v4.51 PERF: use cached flags.
+        # v4.52 PERF: use cached flags.
         if not self._ctsn_enabled:
             self.complement_h = 0.0
             return
@@ -289,13 +300,13 @@ class Neuraxon:
         if not self.is_active or self.energy_level <= 0: return
         receptor_activations = receptor_activations or {}
 
-        phase_coupling_strength = self._phase_coupling_strength  # v4.51 PERF
+        phase_coupling_strength = self._phase_coupling_strength  # v4.52 PERF
         
         self._update_intrinsic_timescale(dt)
         
         # CRITICAL FIX: Cap intrinsic timescale AFTER update, not before
         # This ensures the cap is always enforced regardless of ACW calculation
-        self.intrinsic_timescale = min(self.intrinsic_timescale, self._max_intrinsic_timescale)  # v4.51 PERF
+        self.intrinsic_timescale = min(self.intrinsic_timescale, self._max_intrinsic_timescale)  # v4.52 PERF
         
         # v2.39: Use Kuramoto coupling method
         self._update_phase_oscillator(dt, global_osc, neighbor_phases)
@@ -316,12 +327,12 @@ class Neuraxon:
         
         # Calculate total input strength for classification and gating
         total_input_strength = abs(total_synaptic) + abs(external_input)
-        has_strong_input = total_input_strength > self._sensory_gating_threshold  # v4.51 PERF
+        has_strong_input = total_input_strength > self._sensory_gating_threshold  # v4.52 PERF
         
         # Spontaneous probability with sensory gating
         effective_spont_rate = self.spontaneous_firing_rate + 0.3 * alpha2_act
         base_spont_prob = effective_spont_rate * dt * (1.0 + math.cos(self.phase) * 0.3) * noise_suppression
-        if self._sensory_gating_enabled and has_strong_input:  # v4.51 PERF
+        if self._sensory_gating_enabled and has_strong_input:  # v4.52 PERF
             spont_prob = base_spont_prob * self._sensory_gating_suppression
         else:
             spont_prob = base_spont_prob
@@ -332,7 +343,7 @@ class Neuraxon:
         # NB: random.random() sequence preserved exactly — do NOT reorder.
         if random.random() < spont_prob:
             is_spontaneous_firing = True
-            if self._spont_as_current:  # v4.51 PERF
+            if self._spont_as_current:  # v4.52 PERF
                 # v3.34 RC1-FIX: Balanced spontaneous current — 50% inhibitory, 50% excitatory
                 # BIOINSPIRED: Cortical spontaneous activity explores the FULL trinary
                 # state space symmetrically. In vivo, balanced E/I networks produce
@@ -340,7 +351,7 @@ class Neuraxon:
                 # postsynaptic events (Haider et al. 2006, J Neurosci). The prior 60/40
                 # inhibitory bias compounded with membrane_negative_bias to lock outputs
                 # into -1 from initialization (RC1 diagnostic: 97.5% SW quadrant).
-                spontaneous = random.choice([-1.0, 1.0]) * self._spont_current_mag  # v4.51 PERF
+                spontaneous = random.choice([-1.0, 1.0]) * self._spont_current_mag  # v4.52 PERF
             else:
                 # Legacy: force threshold
                 if random.random() < 0.5:
@@ -352,7 +363,7 @@ class Neuraxon:
         gain = 1.0 + (norepi - 0.5) * 0.4
         
         # v3.34 RC1-FIX: Bias now 0.0 from config; kept in formula for backward compat
-        negative_bias = self._membrane_neg_bias  # v4.51 PERF
+        negative_bias = self._membrane_neg_bias  # v4.52 PERF
         
         drive = (g_NA * total_synaptic + external_input + spontaneous + negative_bias * 2.0) * gain
         
@@ -366,7 +377,7 @@ class Neuraxon:
         # The prior asymmetry (positive 1.1×, negative 0.85×) created a ratchet effect
         # that trapped membrane potential in the negative range, contributing to RC1.
         # Paper claim: neutral state enables "swift transitions based on subsequent inputs"
-        # v4.51 PERF: use cached _resting_potential_decay (None if not in params).
+        # v4.52 PERF: use cached _resting_potential_decay (None if not in params).
         if self._resting_potential_decay is not None:
             resting_decay = self._resting_potential_decay * dt
             # v3.34: Symmetric decay for both positive and negative potentials
@@ -376,7 +387,7 @@ class Neuraxon:
         prev_potential = self.membrane_potential
         
         osc_component = 0.2 * math.cos(global_osc)  # 106: optional oscillator drive into DSN total_input
-        # v4.51 PERF: cached _dsn_enabled; deque.append auto-evicts (maxlen=k);
+        # v4.52 PERF: cached _dsn_enabled; deque.append auto-evicts (maxlen=k);
         # conv uses zip, one allocation-free pass. Mathematically identical.
         if self._dsn_enabled:
             self.dsn_input_buffer.append(float(external_input + total_synaptic))
@@ -449,11 +460,11 @@ class Neuraxon:
         self._update_complement(self.membrane_potential)
         self.state_tilde = self.membrane_potential + self.complement_h
 
-        # v4.51 PERF: use cached firing_rate_alpha
+        # v4.52 PERF: use cached firing_rate_alpha
         fr_alpha = self._firing_rate_alpha
         self.firing_rate_avg += fr_alpha * (abs(self.trinary_state) - self.firing_rate_avg) * dt
 
-        # v4.51 PERF: use cached agmp flag + lambda.
+        # v4.52 PERF: use cached agmp flag + lambda.
         if self._agmp_enabled_n:
             lam_a = self._agmp_lambda_a_n
             self.astrocyte_state = lam_a * self.astrocyte_state + (1.0 - lam_a) * abs(self.state_tilde)
@@ -467,10 +478,10 @@ class Neuraxon:
         # BIOINSPIRED: Biological neurons show ~70-90% driven, ~10-30% spontaneous activity
         # Paper Section 6: Spontaneous activity provides substrate for plasticity but 
         # most spikes during active behavior are stimulus-driven
-        # v4.51 PERF: resolve logger+level ONCE for the remainder of update().
+        # v4.52 PERF: resolve logger+level ONCE for the remainder of update().
         logger = get_data_logger()
         _ll = logger.log_level
-        if abs(self.trinary_state) > 0 and self._spike_class_enabled:  # v4.51 PERF
+        if abs(self.trinary_state) > 0 and self._spike_class_enabled:  # v4.52 PERF
             # Calculate relative contributions
             input_contribution = abs(total_synaptic) + abs(external_input)
             spont_contribution = abs(spontaneous)
@@ -480,7 +491,7 @@ class Neuraxon:
             # 1. Input contribution is above noise floor (driven_input_threshold), OR
             # 2. No spontaneous event triggered this spike
             # A spike is "spontaneous" only if spontaneous event occurred AND dominates
-            is_driven = (input_contribution > self._driven_input_threshold or  # v4.51 PERF
+            is_driven = (input_contribution > self._driven_input_threshold or  # v4.52 PERF
                         (not is_spontaneous_firing and input_contribution > 0.01))
             is_truly_spontaneous = is_spontaneous_firing and spont_contribution > input_contribution
             
@@ -586,3 +597,5 @@ class Neuraxon:
             'autoreceptor': self.autoreceptor, # Updated Save states in v 2.03
             'last_firing_time': self.last_firing_time  # Updated Save states in v 2.1
         }
+
+

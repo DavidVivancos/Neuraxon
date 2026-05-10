@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.51 logger (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 143 
+# Neuraxon Game of Life v.4.52 logger (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 144 
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -533,7 +533,7 @@ class DataLogger:
 
         phases = [n.phase for n in active_neurons]
         if len(phases) >= 2:
-            import cmath
+            # v4.52 PERF (#26): cmath already imported at module scope.
             complex_phases = [cmath.exp(1j * p) for p in phases]
             phase_coherence = abs(sum(complex_phases) / len(complex_phases))
         else:
@@ -689,9 +689,9 @@ class DataLogger:
     
     def _log_tick_level2(self, tick: int, alive_nxers: list):
         """Capture detailed time series data each tick from ALL alive NxErs."""
-        import numpy as np
-        import cmath
-        
+        # v4.52 PERF (#26): removed inline `import numpy as np` and `import
+        # cmath` — both already at module scope.
+
         # Trim old data if needed
         if len(self.time_series['ticks']) >= self.max_history_length:
             trim_count = self.max_history_length // 10
@@ -1951,3 +1951,5 @@ def get_data_logger() -> DataLogger:
 
 def set_data_logger_level(level: int):
     get_data_logger().set_level(level)
+
+
