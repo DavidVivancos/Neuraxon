@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.52 menus (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 144 
+# Neuraxon Game of Life v.4.53 menus (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 145
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -138,5 +138,3 @@ def run_config_screen() -> Optional[Dict[str, Any]]:
         screen.blit(test_text, (test_button_rect.x + (test_button_rect.width - test_text.get_width()) // 2, test_button_rect.y + (test_button_rect.height - test_text.get_height()) // 2))
         
         pygame.display.flip()
-
-

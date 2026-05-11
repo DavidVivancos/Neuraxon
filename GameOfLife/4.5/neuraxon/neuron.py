@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.52 neuron (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 144 
+# Neuraxon Game of Life v.4.53 neuron (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 145
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -597,5 +597,3 @@ class Neuraxon:
             'autoreceptor': self.autoreceptor, # Updated Save states in v 2.03
             'last_firing_time': self.last_firing_time  # Updated Save states in v 2.1
         }
-
-

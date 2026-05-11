@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.52 ui renderer (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 144 
+# Neuraxon Game of Life v.4.53 ui renderer (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 145
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -471,5 +471,3 @@ class Renderer:
         """Advances the Pygame clock, enforces an FPS cap, and returns the frame's delta time."""
         self.dt = self.clock.tick(fps_cap) / 1000.0
         return self.dt
-
-

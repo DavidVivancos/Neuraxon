@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.52 multisphere (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 144 
+# Neuraxon Game of Life v.4.53 multisphere (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 145
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -1043,5 +1043,3 @@ def load_sphere_from_dict(data: dict, rebuild_net_fn=None) -> NeuraxonSphere:
         modality_tags=data.get('modality_tags', []),
         description=data.get('description', ''),
     )
-
-

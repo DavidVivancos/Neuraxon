@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.52 genetics (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 144 
+# Neuraxon Game of Life v.4.53 genetics (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 145
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -1266,5 +1266,3 @@ def _mutate_link_weights(brain, rate: float = 0.05):
     Small noise on a fraction of link weights — preserves learned inter-sphere routing."""
     for link in brain.links.values():
         _mutate_weight_matrix(link.weight_matrix, rate=rate)
-
-

@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v4.52 Voice/Song System (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 144 
+# Neuraxon Game of Life v4.53 Voice/Song System (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 145
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -391,5 +391,3 @@ def discovery_pitch_spike(ticks_since_discovery: int, duration_ticks: int = 30) 
         return 0.0
     decay = 1.0 - (ticks_since_discovery / float(duration_ticks))
     return 2.0 * decay
-
-

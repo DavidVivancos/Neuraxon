@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.52 logger (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 144 
+# Neuraxon Game of Life v.4.53 logger (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 145
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -20,6 +20,54 @@ if TYPE_CHECKING:
     from neuraxon.network import NeuraxonNetwork
 
 from config import TEMP_CIRCADIAN_CORR_WINDOW
+
+# v145: Research probes — implements the 10-metric paper-fidelity dashboard.
+# See neuraxon/research_probes.py for full documentation.
+#
+# IMPLEMENTATION NOTE:
+#   logger.py is imported by neuraxon/neuron.py (for get_data_logger), and
+#   neuraxon/__init__.py imports .neuron. Therefore importing
+#   neuraxon.research_probes at logger module-load time triggers
+#   neuraxon/__init__.py, which triggers neuron.py, which tries to import
+#   logger.get_data_logger before logger has finished its top-level
+#   execution → circular ImportError.
+#
+#   Resolution: defer the import to first use via _ensure_research_probes_loaded().
+#   This costs one extra dict lookup the first time DataLogger.reset() runs and
+#   nothing thereafter.
+_RESEARCH_PROBES_AVAILABLE = False
+_RESEARCH_PROBES_IMPORT_ERROR: Optional[str] = None
+_ResearchProbeState = None
+_research_compute_all_metrics = None
+_research_all_metric_keys = None
+_RESEARCH_HEALTHY_BANDS = {}
+
+def _ensure_research_probes_loaded() -> bool:
+    """Import the research-probes module on first call. Idempotent.
+    Returns True if available."""
+    global _RESEARCH_PROBES_AVAILABLE, _RESEARCH_PROBES_IMPORT_ERROR
+    global _ResearchProbeState, _research_compute_all_metrics
+    global _research_all_metric_keys, _RESEARCH_HEALTHY_BANDS
+    if _RESEARCH_PROBES_AVAILABLE:
+        return True
+    if _RESEARCH_PROBES_IMPORT_ERROR is not None:
+        # we already tried and failed — don't retry on every reset()
+        return False
+    try:
+        # Import the file directly (NOT via neuraxon.__init__) so we avoid
+        # re-triggering the package's eager imports that include this module.
+        import importlib
+        mod = importlib.import_module('neuraxon.research_probes')
+        _ResearchProbeState = mod.ProbeState
+        _research_compute_all_metrics = mod.compute_all_metrics
+        _research_all_metric_keys = mod.all_metric_keys
+        _RESEARCH_HEALTHY_BANDS = mod.HEALTHY_BANDS
+        _RESEARCH_PROBES_AVAILABLE = True
+        return True
+    except BaseException as exc:
+        import traceback as _tb
+        _RESEARCH_PROBES_IMPORT_ERROR = f"{type(exc).__name__}: {exc}\n{_tb.format_exc()}"
+        return False
 
 
 class DataLogger:
@@ -63,11 +111,20 @@ class DataLogger:
         """Reset all logged data."""
         self.start_time = time.time()
         self.current_step_data = {}  # Add this line to fix the AttributeError
+        # v145 — lazy-load research probes on first reset (avoids circular import
+        # at module load — see _ensure_research_probes_loaded() docstring).
+        _ensure_research_probes_loaded()
         self.game_metadata = {
             'start_timestamp': datetime.now().isoformat(),
             'log_level': self.log_level,
-            'version': '4.5'
+            'version': '4.53',                     # v145
+            'internal_version': 145,               # v145
+            'research_probes_available': _RESEARCH_PROBES_AVAILABLE,
+            'research_probes_import_error': _RESEARCH_PROBES_IMPORT_ERROR,
         }
+        # v145 — Research probe state (M1-M10 from the v145 review)
+        self.research_probes = _ResearchProbeState() if _RESEARCH_PROBES_AVAILABLE else None
+        self.research_metric_keys = _research_all_metric_keys() if _RESEARCH_PROBES_AVAILABLE else []
         
         self.summary = {
             'total_ticks': 0,
@@ -355,6 +412,19 @@ class DataLogger:
             'ms_mean_link_integrity': [],      # Mean inter-sphere link integrity
             'ms_mean_inter_coherence': [],     # Mean inter-sphere oscillatory coherence
         }
+        
+        # ============================================================
+        # v145 (v4.53): RESEARCH-PROBE TIME SERIES — the 10 paper-fidelity
+        # metrics M1-M10. See neuraxon/research_probes.py and
+        # docs/LOGGING.md for the full per-metric explanation. Each key is
+        # appended exactly once per full-analytics tick from
+        # _log_tick_level2 → _log_research_probes_tick().
+        # ============================================================
+        if _RESEARCH_PROBES_AVAILABLE:
+            for k in _research_all_metric_keys():
+                if k not in self.time_series:
+                    self.time_series[k] = []
+        
         self.per_nxer_time_series: Dict[int, Dict[str, List]] = {}
     
     def _ensure_nxer_series(self, nxer_id: int, nxer_name: str):
@@ -642,6 +712,8 @@ class DataLogger:
             self.log_level = new_level
             self.game_metadata['log_level'] = self.log_level
             if new_level >= 2 and not hasattr(self, 'time_series'):
+                # v145 — make sure research probes are loaded before init
+                _ensure_research_probes_loaded()
                 self._init_level2_data()
     
     def log_tick(self, tick: int, nxers: dict = None, full_analytics: bool = True):
@@ -1311,10 +1383,147 @@ class DataLogger:
                         'ms_mean_brain_energy', 'ms_mean_link_integrity', 'ms_mean_inter_coherence']:
                 self.time_series[key].append(0.0)
         
+        # ============================================================
+        # v145 (v4.53): RESEARCH-PROBE METRICS  (M1-M10)
+        # ----------------------------------------------------------------
+        # See neuraxon/research_probes.py and docs/LOGGING.md.
+        # All sliding-window state lives in self.research_probes (ProbeState).
+        # We pass back the OBSERVATIONS already computed above so this block
+        # adds no extra O(neurons*synapses) scans — just slightly heavier
+        # post-processing.
+        # ============================================================
+        self._log_research_probes_tick(
+            tick=tick,
+            alive_nxers=alive_nxers,
+            all_active_neurons=all_active_neurons,
+            all_networks=all_networks,
+        )
+        
         # Take snapshots at intervals
         if tick - self.last_snapshot_tick >= self.snapshot_interval:
             self._take_snapshot_multi(tick, alive_nxers)
             self.last_snapshot_tick = tick
+    
+    # ============================================================
+    # v145 RESEARCH PROBES — implementation of the M1-M10 dashboard.
+    # ============================================================
+    def _log_research_probes_tick(self, tick: int, alive_nxers: list,
+                                   all_active_neurons: list, all_networks: list):
+        """Compute all M1-M10 metrics for this tick and append into time_series.
+        
+        Read-only over the population — does not mutate any NxEr / network /
+        synapse state. Designed to fail soft: any single probe failure logs a
+        zero rather than crashing the tick.
+        """
+        if not _RESEARCH_PROBES_AVAILABLE or self.research_probes is None:
+            return
+        try:
+            # Pull values already computed above in _log_tick_level2 from the
+            # tail of each time series. This avoids re-iterating the full
+            # neuron/synapse population.
+            ts = self.time_series
+            
+            def _last(key, default=0.0):
+                lst = ts.get(key)
+                return float(lst[-1]) if lst else default
+            
+            sample_low  = _last('oscillator_low')
+            sample_mid  = _last('oscillator_mid')
+            sample_high = _last('oscillator_high')
+            # We use the same value as both phase-and-amplitude proxies because
+            # we logged sin(2π·f·t + φ) which encodes both. The PAC code in
+            # research_probes pulls a phase angle via asin(value).
+            sample_phases = (sample_low, sample_mid, sample_high)
+            
+            spont_count  = int(_last('spontaneous_firing_count', 0))
+            driven_count = int(_last('driven_firing_count', 0))
+            
+            weight_means = {
+                'mean_w_fast': _last('mean_w_fast'),
+                'mean_w_slow': _last('mean_w_slow'),
+                'mean_w_meta': _last('mean_w_meta'),
+            }
+            
+            metrics = _research_compute_all_metrics(
+                probe_state=self.research_probes,
+                tick=tick,
+                alive_nxers=alive_nxers,
+                all_active_neurons=all_active_neurons,
+                all_networks=all_networks,
+                sample_oscillator_low=sample_low,
+                sample_oscillator_mid=sample_mid,
+                sample_oscillator_high=sample_high,
+                sample_phases=sample_phases,
+                spont_count=spont_count,
+                driven_count=driven_count,
+                weight_means=weight_means,
+            )
+            
+            # Append every M-key into its time series. Keys that didn't
+            # pre-exist (M8 dynamic per-sphere keys) are auto-created.
+            for k, v in metrics.items():
+                if k not in ts:
+                    ts[k] = []
+                try:
+                    ts[k].append(float(v))
+                except (TypeError, ValueError):
+                    ts[k].append(0.0)
+            
+            # Pad the canonical key list so every key appended-to-ts has the
+            # same length as 'ticks' even on this tick, preserving align.
+            target_len = len(ts.get('ticks', []))
+            for k in self.research_metric_keys:
+                if k not in ts:
+                    ts[k] = []
+                while len(ts[k]) < target_len:
+                    ts[k].append(0.0)
+        except Exception as exc:
+            # Fail soft. Append zeros so series stays aligned.
+            target_len = len(self.time_series.get('ticks', []))
+            for k in self.research_metric_keys:
+                if k not in self.time_series:
+                    self.time_series[k] = []
+                while len(self.time_series[k]) < target_len:
+                    self.time_series[k].append(0.0)
+    
+    def register_birth_for_heritability(self, child_nxer, parent_a_fitness: float,
+                                         parent_b_fitness: float):
+        """v145 — called by genetics.spawn_child / game_loop birth path so the
+        heritability tracker can lock in the parent-fitness baseline at the
+        moment of conception. Safe no-op if probes are disabled."""
+        if not _RESEARCH_PROBES_AVAILABLE or self.research_probes is None:
+            return
+        try:
+            avg = 0.5 * (float(parent_a_fitness) + float(parent_b_fitness))
+            self.research_probes.heritability.register_birth(child_nxer, avg)
+        except Exception:
+            pass
+    
+    def get_research_dashboard(self) -> dict:
+        """Return the most recent value of each M1-M10 metric plus its in-band
+        status. Useful for live HUD display or end-of-game summary."""
+        if not _RESEARCH_PROBES_AVAILABLE:
+            return {'available': False}
+        ts = self.time_series
+        out = {'available': True, 'tick': ts.get('ticks', [-1])[-1] if ts.get('ticks') else -1,
+               'metrics': {}, 'in_band': {}}
+        for k in self.research_metric_keys:
+            seq = ts.get(k, [])
+            if seq:
+                out['metrics'][k] = seq[-1]
+        for k in _RESEARCH_HEALTHY_BANDS.keys():
+            seq = ts.get(f'{k}__in_band', [])
+            if seq:
+                out['in_band'][k] = bool(seq[-1])
+        # quick traffic-light summary
+        ib = out['in_band']
+        n_in = sum(1 for v in ib.values() if v)
+        out['summary'] = {
+            'in_band_count': n_in,
+            'total': len(ib),
+            'pct_in_band': (100.0 * n_in / len(ib)) if ib else 0.0,
+        }
+        return out
     
     def _take_snapshot_multi(self, tick: int, alive_nxers: list):
         """Take detailed snapshots of ALL alive NxErs at intervals."""
@@ -1853,6 +2062,14 @@ class DataLogger:
                 'associativity_events': self.associativity_events[-limit_logs:],
                 'subthreshold_events': self.subthreshold_events[-limit_logs:],
             }
+        
+        # v145: always export the latest research-probe dashboard, regardless
+        # of log level. This is a tiny dict (the dashboard summary, NOT the
+        # full series — those are already inside time_series).
+        try:
+            data['research_dashboard_v145'] = self.get_research_dashboard()
+        except Exception:
+            data['research_dashboard_v145'] = {'available': False}
         return data
     
     def save_to_file(self, filepath: str):
@@ -1936,6 +2153,67 @@ def generate_paper_validation_report(logger: DataLogger) -> dict:
             'itu_fitness_tracked': len(logger.time_series.get('itu_mean_fitness', [])),
             'itu_fitness_history': len(logger.itu_fitness_history),
         },
+        # ============================================================
+        # v145 — RESEARCH DASHBOARD (M1-M10)
+        # Maps the 10 paper-fidelity metrics to the multi-Neuraxon /
+        # Neuraxon-v2.0 hypotheses they test (H1/H2/H3 + bio-fidelity).
+        # ============================================================
+        'research_v145_M1_trinary_distribution': {
+            'last_E': (logger.time_series.get('M1_excitatory_fraction') or [0])[-1],
+            'last_I': (logger.time_series.get('M1_inhibitory_fraction') or [0])[-1],
+            'last_N': (logger.time_series.get('M1_neutral_fraction') or [0])[-1],
+            'paper_target': 'E≈0.22, I≈0.10, N≈0.68 (Neuraxon v2.0 §I/§VII)',
+            'in_band_E': bool((logger.time_series.get('M1_excitatory_fraction__in_band') or [0])[-1]),
+        },
+        'research_v145_M2_ctc_gate': {
+            'last_mean_gate':       (logger.time_series.get('M2_mean_gate') or [0])[-1],
+            'last_modulation_std':  (logger.time_series.get('M2_gate_modulation_std') or [0])[-1],
+            'last_ff_fb_asymmetry': (logger.time_series.get('M2_ff_fb_asymmetry') or [0])[-1],
+            'paper_claim': 'Disabling CTC saturates gate at 1.0 (Multi-Neuraxon §3.2 C1).',
+        },
+        'research_v145_M3_pac': {
+            'last_pac_modulation_idx': (logger.time_series.get('M3_pac_modulation_idx') or [0])[-1],
+            'last_pac_delta_theta':    (logger.time_series.get('M3_pac_delta_theta_idx') or [0])[-1],
+            'paper_claim': 'Slow rhythms modulate fast amplitudes (Neuraxon v2.0 §VI).',
+        },
+        'research_v145_M4_weight_separation': {
+            'last_temporal_divergence': (logger.time_series.get('M4_temporal_divergence') or [0])[-1],
+            'last_w_meta_active_fraction': (logger.time_series.get('M4_w_meta_active_fraction') or [0])[-1],
+            'paper_claim': 'τ_fast < τ_slow < τ_meta (Neuraxon v2.0 §III).',
+        },
+        'research_v145_M5_criticality': {
+            'last_branching_ratio':       (logger.time_series.get('M5_branching_ratio') or [0])[-1],
+            'last_distance_from_critical':(logger.time_series.get('M5_distance_from_critical') or [0])[-1],
+            'paper_claim': 'Cortex sits near σ ≈ 1.0 criticality (Neuraxon v2.0 §V).',
+        },
+        'research_v145_M6_spontaneous': {
+            'last_spontaneous_fraction': (logger.time_series.get('M6_spontaneous_fraction') or [0])[-1],
+            'last_acw_heterogeneity':   (logger.time_series.get('M6_acw_heterogeneity') or [0])[-1],
+            'paper_claim': 'Self-generated activity is a cornerstone (Neuraxon v2.0 §V).',
+        },
+        'research_v145_M7_self_sustained': {
+            'last_zero_input_mi_ratio': (logger.time_series.get('M7_zero_input_mi_ratio') or [0])[-1],
+            'last_broadcast_index':     (logger.time_series.get('M7_broadcast_index') or [0])[-1],
+            'last_n_paired_nxers':      (logger.time_series.get('M7_n_paired_nxers') or [0])[-1],
+            'paper_claim': 'No-input MI ≈ 1.96 vs Nengo collapse to 0.42 (Multi-Neuraxon §3.8).',
+        },
+        'research_v145_M8_specialisation': {
+            'last_sensory_vs_assoc_dissociation': (logger.time_series.get('M8_sensory_vs_association_dissociation') or [0])[-1],
+            'paper_claim': 'Sensory spheres develop modality selectivity (Multi-Neuraxon §3.5).',
+        },
+        'research_v145_M9_compositional': {
+            'last_transfer_ratio':           (logger.time_series.get('M9_transfer_ratio') or [0])[-1],
+            'last_compositional_similarity': (logger.time_series.get('M9_compositional_similarity') or [0])[-1],
+            'paper_claim': 'Novel V×A combinations achieve ≥100% trained-pair MI (Multi-Neuraxon §3.7).',
+        },
+        'research_v145_M10_heritability_lesion': {
+            'last_heritability_r':       (logger.time_series.get('M10_heritability_r') or [0])[-1],
+            'last_heritability_pairs':   (logger.time_series.get('M10_heritability_pairs') or [0])[-1],
+            'last_lesion_retention_50':  (logger.time_series.get('M10_lesion_retention_50') or [0])[-1],
+            'last_lesion_retention_75':  (logger.time_series.get('M10_lesion_retention_75') or [0])[-1],
+            'paper_claim': '99-102% MI under 75% neuron loss (Multi-Neuraxon §3.9); heritability r > 0.3 (Aigarth §VIII).',
+        },
+        'research_v145_dashboard_summary': logger.get_research_dashboard().get('summary', {}),
     }
     return report
 
@@ -1951,5 +2229,3 @@ def get_data_logger() -> DataLogger:
 
 def set_data_logger_level(level: int):
     get_data_logger().set_level(level)
-
-

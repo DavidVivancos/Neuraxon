@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.52 game loop (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 144 
+# Neuraxon Game of Life v.4.53 game loop (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 145
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -1111,6 +1111,18 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                 'clan_id': new_clan_id,
             }
         )
+        # v145 — Heritability tracking (M10). Locks in the parent-fitness
+        # baseline at the moment of conception so we can later correlate
+        # parent fitness with child fitness. Falls through silently if the
+        # research-probes module is unavailable.
+        try:
+            get_data_logger().register_birth_for_heritability(
+                child,
+                float(A.stats.fitness_score) if A.stats else 0.0,
+                float(B.stats.fitness_score) if B.stats else 0.0,
+            )
+        except Exception:
+            pass
         
         # Paper Claim: Norepinephrine activated somewhat by the birth of offspring per se
         _neuromod_boost(A.net.neuromodulators, 'norepinephrine', 0.15, A.net.params)
@@ -3478,5 +3490,3 @@ def TestMode(games_count: int = 2, max_minutes: int = 1):
         time.sleep(1.0)
 
     print("--- TEST MODE COMPLETE ---")
-
-
