@@ -1,0 +1,106 @@
+{
+    "_meta": {
+        "name": "default",
+        "version": "v4.63 / 155 baseline",
+        "description": "Current Neuraxon GoL parameter set. Copy this file to architectures/<your_name>.json and tweak. Use --architecture <path> at startup or set NEURAXON_ARCH env var.",
+        "notes": [
+            "Sections are organisationally separated but loaded into one params object.",
+            "biology = game-world dynamics (food, atrophy, day/night, mate cooldown)",
+            "neural = network topology and per-neuron parameters",
+            "operating_ranges = tunable thresholds for plasticity/firing/exploration",
+            "healthy_bands = target ranges used by the dashboard to colour-code metrics",
+            "Anything NOT in this file falls through to the code defaults in config.py."
+        ]
+    },
+
+    "biology": {
+        "_doc": "Game-world / bio-inspired dynamics. Independent of neural architecture — change these to study survival pressure without touching the brain.",
+
+        "metabolic_ramp_per_sec": 10.0,
+        "_doc_metabolic_ramp_per_sec": "Multiplier added to food drain and metabolic_rate per second of idle. With 1s idle → factor (1 + 10*1) = 11×. Capped by max_atrophy.",
+
+        "max_atrophy": 5.0,
+        "_doc_max_atrophy": "Hard cap on the atrophy multiplier (v151 fix). 5.0 = max 5× normal drain even after extended idle.",
+
+        "metabolic_rate_abs_cap_multiple": 20.0,
+        "_doc_metabolic_rate_abs_cap_multiple": "Absolute ceiling on the per-NxEr metabolic_rate, expressed as a multiple of the initial value (v153 F-1).",
+
+        "start_food_default": 25.0,
+        "food_respawn_default": 400,
+        "food_sources_default": 50,
+        "_doc_food": "Defaults if the user doesn't change them via the menu sliders. The menu still overrides at startup.",
+
+        "mate_cooldown_seconds": 12,
+        "circadian_cycle_ticks": 600,
+
+        "idle_explore_seconds": 1.0,
+        "explore_probability": 0.50,
+        "_doc_idle_explore": "v152 idle-exploration safety net. If an NxEr has been idle ≥ idle_explore_seconds, with explore_probability per tick, override motor output with a random direction."
+    },
+
+    "neural": {
+        "_doc": "Network architecture (topology + per-neuron parameters). Change these to test different brain configurations.",
+
+        "num_input_neurons": 10,
+        "num_output_neurons": 7,
+        "num_hidden_neurons_default": 12,
+        "_doc_neuron_counts": "Inputs: 10 sensory channels (movement, encounter, terrain, hunger, sight, smell, daynight, temp, proprio, song). Outputs: 7 motor (MoveX, MoveY, Social, MateIntent, GiveFood, Resting, Sing).",
+
+        "connection_probability": 0.3,
+        "afferent_synapse_strength": 1.1,
+        "proprioceptive_afferent_gain": 1.8,
+        "sensory_input_gain": 0.9,
+
+        "firing_threshold_excitatory": 0.55,
+        "firing_threshold_inhibitory": -0.55,
+        "spontaneous_firing_rate": 0.020,
+        "intrinsic_timescale_default": 15.0,
+        "resting_potential_decay": 0.20,
+
+        "_doc_thresholds": "Membrane firing thresholds (above which trinary_state = +1, below -threshold = -1). The membrane potential is a low-pass filter with intrinsic_timescale ticks. resting_potential_decay multiplies mp by (1-this) each tick before the membrane equation update."
+    },
+
+    "operating_ranges": {
+        "_doc": "Plasticity / adaptation / brake tunables. Change these to test different learning dynamics.",
+
+        "learning_rate": 0.01,
+        "plasticity_threshold": 0.5,
+        "adaptation_tau_ticks": 20.0,
+        "adaptation_target_excitatory_multiplier": 1.5,
+        "adaptation_target_inhibitory_multiplier": 1.0,
+        "_doc_adaptation": "v149: adapt builds toward 0.55 × multiplier when firing. Tau=20 ticks. Excitatory uses 1.5× to bias the brake against +1 dominance.",
+
+        "autoreceptor_coefficient": 0.1,
+        "autoreceptor_tau_ticks": 150.0,
+        "autoreceptor_rate_coeff": 0.35,
+        "_doc_autoreceptor": "Per-neuron autoreceptor that subtracts from theta1_eff (v154 sign back to v152 form — see CHANGELOG_v154 for context).",
+
+        "sensory_boost_function": "tanh",
+        "sensory_boost_scale": 1.0,
+        "_doc_sensory_boost": "v152 saturating cap: boosted_external = scale * tanh(scale * external_input). Asymptote = scale. 1.0 keeps strong inputs near threshold; lowering compresses further.",
+
+        "plasticity_brake_threshold": 0.5,
+        "plasticity_brake_slope": 1.8,
+        "plasticity_brake_floor": 0.1,
+        "_doc_plasticity_brake": "v152: when input_saturation_fraction > brake_threshold, learning_rate_mod is multiplied by max(floor, 1 - slope*(sat-threshold))."
+    },
+
+    "healthy_bands": {
+        "_doc": "Target ranges shown on the dashboard. NxErs operating in these bands are coloured green.",
+
+        "M1_excitatory_fraction":          [0.18, 0.28],
+        "M2_mean_gate":                    [0.40, 0.85],
+        "M3_pac_modulation_idx":           [0.005, 0.10],
+        "M5_branching_ratio":              [0.92, 1.10],
+        "M6_spontaneous_fraction":         [0.10, 0.45],
+        "M7_zero_input_mi_ratio":          [0.40, 1.20],
+        "M9_transfer_ratio":               [0.85, 1.30],
+        "M10_heritability_r":              [0.20, 1.00],
+
+        "sensory_motor_corr":              [0.20, 1.00],
+        "pop_mean_idle_seconds":           [0.00, 1.50],
+        "input_saturation_fraction":       [0.00, 0.30],
+        "input_locked_fraction":           [0.00, 0.20],
+        "exploration_trigger_rate":        [0.01, 0.40]
+    }
+}
