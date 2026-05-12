@@ -1,5 +1,8 @@
 # Neuraxon Game of Life Researh Version<br>
 CHANGE LOG:<br>
+May 12th 2026:<br>
+Neuraxon Game of Life — v4.63 / Internal version 155 -> Firt External architectures loader
+
 May 11th 2026:<br>
 Neuraxon Game of Life v.4.53 Update Login System - First RealTime Panel Release
 
