@@ -1,4 +1,4 @@
-# 🚀 Multi Neuraxon V 2.0 Released + Cuda library 
+# 🪼 Multi Neuraxon V 2.0 Released + Cuda library 🚀
 
 <div align="center">
 <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.8+-1f425f.svg?color=purple"></a>
