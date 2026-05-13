@@ -20,7 +20,7 @@
 
 **Core implementation:** [`neuraxon2.py`](https://github.com/DavidVivancos/Neuraxon/blob/main/neuraxon2.py) (pure Python, no external dependencies, backward-compatible with v1).
 
-**CuNxon Cuda Kernels & Library for Multi Neuraxon 2.0:** (https://github.com/DavidVivancos/Neuraxon/cuNoxn) 
+**CuNxon Cuda Kernels & Library for Multi Neuraxon 2.0:** (https://github.com/DavidVivancos/Neuraxon/cuNxon) 
 
 **Interactive 3D Network Builder Demo** : [Hugging Face Space](https://huggingface.co/spaces/DavidVivancos/Neuraxon)
 <div align="center">
