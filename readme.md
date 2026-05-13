@@ -1,4 +1,4 @@
-# 🚀 Neuraxon V 2.0 Released!  
+# 🚀 Multi Neuraxon V 2.0 Released + Cuda library 
 
 <div align="center">
 <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.8+-1f425f.svg?color=purple"></a>
@@ -19,6 +19,8 @@
 **Full theoretical foundation:** [Neuraxon v2.0 Paper (ResearchGate)](https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint)
 
 **Core implementation:** [`neuraxon2.py`](https://github.com/DavidVivancos/Neuraxon/blob/main/neuraxon2.py) (pure Python, no external dependencies, backward-compatible with v1).
+
+**CuNxon Cuda Kernels & Library for Multi Neuraxon 2.0:** (https://github.com/DavidVivancos/Neuraxon/cuNoxn) 
 
 **Interactive 3D Network Builder Demo** : [Hugging Face Space](https://huggingface.co/spaces/DavidVivancos/Neuraxon)
 <div align="center">
