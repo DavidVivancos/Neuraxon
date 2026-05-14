@@ -246,7 +246,7 @@ A complete `ctypes` binding is sketched in `examples/python_binding.py` (if pres
 
 ---
 
-## Reproducing the AGI'26 brain
+## Reproducing the brain
 
 The paper's NAS-optimised "healthy brain" has four spheres VIS / AUD / ASC / MTR with **(input + hidden + output)** sizes and seven inter-sphere edges. `examples/example_4sphere.cu` builds a topologically faithful (scaled-down) version: two sensory spheres VIS and AUD feedforward into a larger association sphere ASC; ASC feedforwards into a narrow motor sphere MTR; MTR sends a feedback (efference-copy) projection to ASC; ASC sends thalamic-like top-down projections back to VIS and AUD; and VIS↔AUD have a lateral cross-sensory binding link in the theta band.
 
@@ -262,9 +262,8 @@ To replicate the paper's exact NAS configuration, plug your own NAS-found `(n_in
 
 ## Limitations / known caveats
 
-* This code is **structured for nvcc** but was authored in an environment without a CUDA toolkit; please report compile-time issues on first build for your target architecture.
 * The intra-step activity-stat reductions involve a small host roundtrip per sphere; very-large brains may benefit from keeping the device-resident scalars on-device until the end of the step.
-* Aigarth's mutation rates are interpreted as Gaussian σ rather than as ternary +1/-1/0 sampling probabilities — see `docs/API.md` §7 for the precise semantics.
+* Aigarth's mutation rates are interpreted atm as Gaussian σ rather than as ternary +1/-1/0 sampling probabilities — see `docs/API.md` §7 for the precise semantics.
 
 ---
 
