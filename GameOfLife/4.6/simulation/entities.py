@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.63 entities (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 155
+# Neuraxon Game of Life v.4.68 entities (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 160
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -20,7 +20,7 @@ from .voice import Voice
 # ============================================================================
 # VERSION CONSTANTS (UPDATED v4.5 Multi-Sphere + Voice)
 # ============================================================================
-VERSION = "4.63"
+VERSION = "4.68"
 NUM_INPUT_NEURONS = 10   # + Song (was 9 in v4.0)
 NUM_OUTPUT_NEURONS = 7   # + Sing (was 6 in v4.0)
 

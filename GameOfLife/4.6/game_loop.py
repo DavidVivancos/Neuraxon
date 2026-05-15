@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.63 game loop (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 155
+# Neuraxon Game of Life v.4.68 game loop (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 160
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -1978,6 +1978,51 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                         # only when zoomed in (see ui/audio.py thresholds).
                         new_state = audio_engine.toggle()
                         print(f"[AUDIO] NxEr singing {'ON' if new_state else 'OFF'}")
+                    # v157 (v4.65) — CHAMPION TRACKING HOTKEYS
+                    # ========================================
+                    # Number keys 1-6 select the current top champion in each
+                    # ranking category. Works whether running or paused, so
+                    # users can flip between champions as they evolve in real
+                    # time. The selection drives the detail panel + the gold
+                    # ring around the NxEr (already drawn by the renderer).
+                    elif ev.key in (pygame.K_1, pygame.K_2, pygame.K_3,
+                                     pygame.K_4, pygame.K_5, pygame.K_6):
+                        # Map number key → ranking category key (sort attribute)
+                        key_to_attr = {
+                            pygame.K_1: 'fitness_score',     # 1: Fitness
+                            pygame.K_2: 'food_found',        # 2: Food Found
+                            pygame.K_3: 'food_taken',        # 3: Food Stolen
+                            pygame.K_4: 'mates_performed',   # 4: Mates
+                            pygame.K_5: 'explored',          # 5: World Explored
+                            pygame.K_6: 'time_lived_s',      # 6: Time Lived
+                        }
+                        attr = key_to_attr[ev.key]
+                        alive_nxers = [a for a in nxers.values() if a.alive]
+                        if alive_nxers:
+                            champ = max(alive_nxers, key=lambda a: getattr(a.stats, attr, 0))
+                            renderer.selected_nxer_id = champ.id
+                            label = {'fitness_score': 'Fitness',
+                                     'food_found': 'Food Found',
+                                     'food_taken': 'Food Stolen',
+                                     'mates_performed': 'Mates',
+                                     'explored': 'World Explored',
+                                     'time_lived_s': 'Time Lived'}[attr]
+                            value = getattr(champ.stats, attr, 0)
+                            print(f"[CHAMPION] {label}: {champ.name} = "
+                                  f"{value:.2f}" if isinstance(value, float)
+                                  else f"[CHAMPION] {label}: {champ.name} = {value}")
+                    # v157 — F toggles "follow selected NxEr": camera auto-pans
+                    # to keep the selected agent centred each frame. Released
+                    # by selecting another NxEr or pressing F again. Useful
+                    # for watching a champion move around the world while
+                    # the simulation runs.
+                    elif ev.key == pygame.K_f:
+                        renderer.follow_selected = not getattr(
+                            renderer, 'follow_selected', False)
+                        print(f"[FOLLOW] {'ON' if renderer.follow_selected else 'OFF'}"
+                              + (f" (tracking NxEr id={renderer.selected_nxer_id})"
+                                 if renderer.follow_selected and renderer.selected_nxer_id is not None
+                                 else ""))
                 elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                     btn = renderer.button_clicked(ev.pos)
                     if btn == "playpause":
@@ -2025,22 +2070,36 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                             elif dbtn == "load_nxer": load_nxer_from_file(spawn_near=a.pos)
                             elif dbtn == "save_nxvizer": save_nxvizer_to_file(a)
                             elif dbtn == "load_nxvizer": load_nxvizer_from_file(spawn_near=a.pos)
-                        elif paused and not game_over:
+                        # v157 (v4.65) — CHAMPION TRACKING
+                        # ================================
+                        # Previously ranking clicks only worked when paused
+                        # (`elif paused and not game_over:`). Users couldn't
+                        # select / follow champions in real time without first
+                        # pausing the game — defeating the whole point of
+                        # watching them evolve. v157 splits the click handling:
+                        #
+                        #   1. Ranking clicks → always work (running or paused)
+                        #   2. World clicks   → only work when paused (otherwise
+                        #      clicks at random screen positions during play
+                        #      would accidentally select random NxErs)
+                        elif not game_over:
                             clicked_name = renderer.ranking_clicked(ev.pos)
                             if clicked_name:
                                 for a in nxers.values():
-                                    if a.name == clicked_name: renderer.selected_nxer_id = a.id; break
-                            else:
-                                if renderer.visual_mode:
-                                    mx, my = ev.pos
-                                    best_id, best_d = None, 1e9
-                                    for a in nxers.values():
-                                        if not a.alive: continue
-                                        sx, sy = renderer.world_to_screen(a.pos[0], a.pos[1])
-                                        d2 = (sx - mx) ** 2 + (sy - my) ** 2
-                                        if d2 < best_d: best_d = d2; best_id = a.id
-                                    if best_id is not None and best_d <= (14 * 14): renderer.selected_nxer_id = best_id
-                                    else: renderer.clear_detail()
+                                    if a.name == clicked_name:
+                                        renderer.selected_nxer_id = a.id
+                                        break
+                            elif paused and renderer.visual_mode:
+                                # World-click selection only while paused
+                                mx, my = ev.pos
+                                best_id, best_d = None, 1e9
+                                for a in nxers.values():
+                                    if not a.alive: continue
+                                    sx, sy = renderer.world_to_screen(a.pos[0], a.pos[1])
+                                    d2 = (sx - mx) ** 2 + (sy - my) ** 2
+                                    if d2 < best_d: best_d = d2; best_id = a.id
+                                if best_id is not None and best_d <= (14 * 14): renderer.selected_nxer_id = best_id
+                                else: renderer.clear_detail()
                 renderer.event_zoom_rotate_pan(ev)
             
             if game_over and game_over_start_time is not None and not user_declined_restart:                

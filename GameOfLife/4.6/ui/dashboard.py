@@ -1,9 +1,9 @@
-# Neuraxon Game of Life v.4.63 ui dashboard (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 155
+# Neuraxon Game of Life v.4.68 ui dashboard (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 160
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   "Multi-Neuraxon: Emergent Specialization, Modular, Frequency-Gated Neural Dynamics" by David Vivancos & Jose Sanchez
 """
-ui/dashboard.py  (NEW in v146 / v4.63)
+ui/dashboard.py  (NEW in v146 / v4.68)
 =======================================
 Overlay dashboard rendered on top of the game world when the user presses L.
 
@@ -330,6 +330,30 @@ class MetricsDashboard:
         self._font_body = pygame.font.SysFont("consolas", 14)
         self._font_tiny = pygame.font.SysFont("consolas", 11)
         self._font_big_value = pygame.font.SysFont("consolas", 32, bold=True)
+        # v158 (v4.68) — VIEW SELECTOR (ComboBox)
+        # =======================================
+        # The dashboard now supports two view modes:
+        #   "aggregate" — population-level M1-M10 + survivability strip
+        #                 (the v144-v157 default behaviour)
+        #   <nxer_id>  — per-NxEr view: that specific agent's stats &
+        #                network metrics in 10 panels, drawn from the
+        #                logger's per_nxer_time_series (populated in
+        #                logger._log_nxer_individual). When the selected
+        #                NxEr dies or no longer exists, falls back to
+        #                "aggregate" gracefully.
+        # The combo box is rebuilt per-frame from current champions so
+        # users see the live #1 in each category as they evolve.
+        from .widgets import ComboBox
+        self._view_combo = ComboBox(
+            rect=pygame.Rect(0, 0, 360, 26),   # position set at draw time
+            options=[("Overall aggregate", "aggregate")],
+            default_value="aggregate",
+        )
+        # Reference to the current NxEr dict — set by game_loop just before
+        # calling draw() so the dashboard can populate the combo box and
+        # render per-NxEr views. None means "no live nxers data available
+        # — show aggregate only".
+        self._nxers_ref: Optional[Dict] = None
 
     # ---- lifecycle ----
     def toggle(self):
@@ -347,6 +371,12 @@ class MetricsDashboard:
         the caller should not pass it on to other handlers)."""
         if not self.visible:
             return False
+        # v158 — let the ComboBox handle the event first. If it consumes
+        # (opens, selects an option, etc.), we're done. The combo box's
+        # own click-outside-to-close logic returns False so other dashboard
+        # handlers still see the event.
+        if self._view_combo.handle_event(ev):
+            return True
         if ev.type == pygame.KEYDOWN:
             if ev.key == pygame.K_l or ev.key == pygame.K_ESCAPE:
                 self.hide()
@@ -373,9 +403,49 @@ class MetricsDashboard:
             return False
         return False
 
+    # ---- v158 — set NxErs reference for per-NxEr view ----
+    def set_nxers(self, nxers: Dict):
+        """Called by game_loop before draw() so the dashboard can build
+        the per-champion combo box options and render per-NxEr panels.
+        Pass None or {} during headless / NAS runs — the combo box will
+        just have the "Overall aggregate" option."""
+        self._nxers_ref = nxers
+    
+    def _refresh_combo_options(self):
+        """Rebuild combo box options from current rankings. Called each
+        frame at draw time. Each champion category contributes one option:
+        the current top-stat live NxEr."""
+        options = [("Overall aggregate", "aggregate")]
+        if self._nxers_ref:
+            alive = [a for a in self._nxers_ref.values() if getattr(a, 'alive', False)]
+            if alive:
+                category_specs = [
+                    ('Fitness',        'fitness_score',   '{:.2f}'),
+                    ('Food Found',     'food_found',      '{:.1f}'),
+                    ('Food Stolen',    'food_taken',      '{:.1f}'),
+                    ('Mates',          'mates_performed', '{}'),
+                    ('Explorer',       'explored',        '{}'),
+                    ('Time Lived',     'time_lived_s',    '{:.0f}s'),
+                ]
+                for cat_label, attr, fmt in category_specs:
+                    try:
+                        champ = max(alive,
+                                    key=lambda a: getattr(a.stats, attr, 0) or 0)
+                        val = getattr(champ.stats, attr, 0) or 0
+                        try:
+                            val_str = fmt.format(val)
+                        except (ValueError, TypeError):
+                            val_str = str(val)
+                        label = f"Best {cat_label}: {champ.name} ({val_str})"
+                        options.append((label, champ.id))
+                    except Exception:
+                        # Defensive — never let combo-box construction break the dashboard
+                        continue
+        self._view_combo.set_options(options, preserve_value=True)
+
     # ---- save-to-file ----
     def _save_metrics_txt(self, logger, game_id: str) -> Optional[str]:
-        """v155 (v4.63) — thin wrapper around DataLogger.save_key_metrics().
+        """v155 (v4.68) — thin wrapper around DataLogger.save_key_metrics().
         Kept for API compatibility (K-key and Save-button still call this).
         The actual file-writing lives on the logger so the auto-save in
         game_loop.finally can call it directly without a UI surface."""
@@ -429,6 +499,19 @@ class MetricsDashboard:
 
         # Header
         self._draw_header(outer, logger, game_id)
+        
+        # v158 (v4.68) — VIEW COMBO BOX
+        # Refresh options from current champions, then position & draw
+        # the closed box. The OPEN dropdown is drawn at end-of-frame so
+        # it sits on top of all other content (z-order).
+        self._refresh_combo_options()
+        combo_x = outer.x + PANEL_PAD
+        combo_y = outer.y + 60  # below the title line in header
+        self._view_combo.rect = pygame.Rect(combo_x, combo_y, 360, 26)
+        self._view_combo.draw_closed(self.screen, self._font_body)
+        # "View:" label to the left of the box
+        lbl = self._font_tiny.render("View:", True, (170, 175, 180))
+        self.screen.blit(lbl, (combo_x, combo_y - 13))
 
         # Refresh cache if data has advanced
         ts = logger.time_series if logger is not None and hasattr(logger, 'time_series') else {}
@@ -436,11 +519,41 @@ class MetricsDashboard:
         if cur_len != self._cached_at_len:
             self._refresh_cache(ts)
             self._cached_at_len = cur_len
+        
+        # v158 — DISPATCH on current view selection
+        view_value = self._view_combo.get_value()
+        if view_value == "aggregate" or view_value is None:
+            self._draw_aggregate_view(outer, logger)
+        else:
+            # Per-NxEr view — find the agent, fall back to aggregate if dead/missing
+            nxer = None
+            if self._nxers_ref and isinstance(view_value, int):
+                nxer = self._nxers_ref.get(view_value)
+                if nxer is not None and not getattr(nxer, 'alive', False):
+                    nxer = None
+            if nxer is None:
+                # Selected NxEr is gone — fall back, and reset to aggregate
+                self._view_combo.selected_index = 0
+                self._draw_aggregate_view(outer, logger)
+            else:
+                self._draw_per_nxer_view(outer, logger, nxer)
 
+        # Footer
+        self._draw_footer(outer)
+        
+        # v158 — draw the OPEN dropdown LAST so it sits on top of the
+        # whole dashboard (z-order). If the combo isn't open this is a
+        # no-op.
+        self._view_combo.draw_open(self.screen, self._font_body)
+    
+    def _draw_aggregate_view(self, outer: pygame.Rect, logger):
+        """v158 — extracted as a method so the per-NxEr view can be a
+        sibling. Renders the v144-v157 default dashboard: survivability
+        strip + worker stats line + 10-panel M1-M10 grid."""
         # v147 — Survivability strip sits between the header and the metric grid
         SURV_STRIP_HEIGHT = 76
         surv_rect = pygame.Rect(outer.x + PANEL_PAD,
-                                outer.y + 88,
+                                outer.y + 88 + 32,  # +32 for combo box
                                 outer.width - 2 * PANEL_PAD,
                                 SURV_STRIP_HEIGHT)
         self._draw_survivability_strip(surv_rect, logger)
@@ -469,9 +582,239 @@ class MetricsDashboard:
             x = grid_left + c * (panel_w + PANEL_PAD)
             y = grid_top  + r * (panel_h + PANEL_PAD)
             self._draw_panel(pygame.Rect(x, y, panel_w, panel_h), desc)
-
-        # Footer
-        self._draw_footer(outer)
+    
+    def _draw_per_nxer_view(self, outer: pygame.Rect, logger, nxer):
+        """v158 (v4.68) — Per-NxEr dashboard view. Replaces the
+        population-aggregate M1-M10 grid with 10 panels showing this one
+        agent's metrics, computed from logger.per_nxer_time_series and
+        current network state.
+        
+        Layout:
+          Row 1: Vitals    | Stats         | Network basics
+          Row 2: Food/take | Mates/explore | Time/fitness
+          Row 3: E/I/N     | Energy/branch | Phase coherence
+          Row 4: Recent moves | Receptors  | Voice/sing
+        """
+        # === HEADER STRIP: this NxEr's identity ===
+        STRIP_H = 76
+        info_rect = pygame.Rect(outer.x + PANEL_PAD,
+                                 outer.y + 88 + 32,  # +32 for combo box
+                                 outer.width - 2 * PANEL_PAD,
+                                 STRIP_H)
+        pygame.draw.rect(self.screen, (24, 30, 40), info_rect, border_radius=6)
+        pygame.draw.rect(self.screen, (90, 110, 130), info_rect, 1, border_radius=6)
+        # Name + colour swatch + alive status
+        col = getattr(nxer, 'color', (200, 200, 200))
+        pygame.draw.circle(self.screen, col,
+                            (info_rect.x + 22, info_rect.y + 22), 12)
+        pygame.draw.circle(self.screen, (255, 255, 255),
+                            (info_rect.x + 22, info_rect.y + 22), 12, 1)
+        # Name + id
+        name_text = self._font_h2.render(
+            f"NxEr {nxer.name} (id={nxer.id})", True, (240, 240, 240))
+        self.screen.blit(name_text, (info_rect.x + 42, info_rect.y + 10))
+        # Status: alive, rounds_survived, age
+        alive_color = (120, 220, 130) if getattr(nxer, 'alive', False) else (220, 100, 100)
+        status_text = self._font_tiny.render(
+            f"alive={getattr(nxer, 'alive', False)}  "
+            f"round={getattr(nxer, 'rounds_survived', 0)}  "
+            f"resting={getattr(nxer, 'is_resting', False)}  "
+            f"temp={getattr(nxer, 'body_temperature', 37.0):.1f}°C",
+            True, alive_color)
+        self.screen.blit(status_text, (info_rect.x + 42, info_rect.y + 36))
+        # Hint on right
+        hint_text = self._font_tiny.render(
+            "View: per-NxEr — Use combo above to switch back to Overall aggregate",
+            True, (160, 165, 175))
+        self.screen.blit(hint_text,
+                          (info_rect.right - hint_text.get_width() - 12,
+                           info_rect.y + 50))
+        
+        # === 12 stats panels (3x4 grid) ===
+        # Pull per-NxEr time series if available
+        pnts = (logger.per_nxer_time_series.get(nxer.id, {})
+                if logger and hasattr(logger, 'per_nxer_time_series') else {})
+        
+        # Panel descriptors: (title, value_str, sparkline_key, sparkline_values, band, units)
+        stats = getattr(nxer, 'stats', None)
+        food_now = getattr(nxer, 'food', 0.0)
+        # Helper to read last value of a per-NxEr time series, defaulting safely
+        def _last(key, default=0.0):
+            seq = pnts.get(key, [])
+            return seq[-1] if seq else default
+        
+        # Compute current E/I/N from per_nxer last samples if available
+        ei_e = _last('excitatory_fraction', 0.0)
+        ei_i = _last('inhibitory_fraction', 0.0)
+        ei_n = _last('neutral_fraction', 0.0)
+        branch_now = _last('branching_ratio', 1.0)
+        energy_now = _last('average_energy', 0.0)
+        phase_coh = _last('phase_coherence', 0.0)
+        harm = _last('voice_harmonicity', 0.0)
+        sing_lvl = _last('sing_level', 0.0)
+        mp_mean = _last('membrane_potential_mean', 0.0)
+        mp_std = _last('membrane_potential_std', 0.0)
+        
+        panel_specs = [
+            # Row 1
+            {'title': 'Vitals',
+             'value': f"{food_now:.1f}",
+             'unit': 'food',
+             'sub': f"E={ei_e:.2f}  I={ei_i:.2f}  N={ei_n:.2f}",
+             'series': pnts.get('food', []),
+             'series_label': 'food',
+             'color_value': (210, 200, 90)},
+            {'title': 'Fitness score',
+             'value': f"{getattr(stats, 'fitness_score', 0.0):.3f}",
+             'unit': 'score',
+             'sub': '',
+             'series': pnts.get('fitness_score', []),
+             'series_label': 'fitness',
+             'color_value': (220, 220, 90)},
+            {'title': 'Time lived',
+             'value': f"{getattr(stats, 'time_lived_s', 0.0):.0f}",
+             'unit': 's',
+             'sub': f"round {getattr(nxer, 'rounds_survived', 0)}",
+             'series': [],  # time monotonic — sparkline not useful
+             'series_label': '',
+             'color_value': (180, 220, 220)},
+            # Row 2
+            {'title': 'Food found',
+             'value': f"{getattr(stats, 'food_found', 0):.1f}",
+             'unit': 'units',
+             'sub': '',
+             'series': pnts.get('food_found', []),
+             'series_label': 'cumul.',
+             'color_value': (110, 200, 130)},
+            {'title': 'Food stolen',
+             'value': f"{getattr(stats, 'food_taken', 0):.1f}",
+             'unit': 'units',
+             'sub': 'from clan',
+             'series': [],
+             'series_label': '',
+             'color_value': (220, 130, 90)},
+            {'title': 'Mates',
+             'value': f"{getattr(stats, 'mates_performed', 0)}",
+             'unit': '',
+             'sub': '',
+             'series': pnts.get('mates_performed', []),
+             'series_label': 'cumul.',
+             'color_value': (220, 140, 200)},
+            # Row 3
+            {'title': 'World explored',
+             'value': f"{getattr(stats, 'explored', 0)}",
+             'unit': 'tiles',
+             'sub': '',
+             'series': pnts.get('explored', []),
+             'series_label': 'cumul.',
+             'color_value': (130, 200, 220)},
+            {'title': 'Energy',
+             'value': f"{energy_now:.1f}",
+             'unit': '',
+             'sub': f"branching σ={branch_now:.2f}",
+             'series': pnts.get('average_energy', []),
+             'series_label': 'avg energy',
+             'color_value': (240, 200, 90)},
+            {'title': 'Phase coherence',
+             'value': f"{phase_coh:.3f}",
+             'unit': '',
+             'sub': f"mp mean={mp_mean:+.2f}, σ={mp_std:.2f}",
+             'series': pnts.get('phase_coherence', []),
+             'series_label': 'coh',
+             'color_value': (180, 180, 220)},
+            # Row 4
+            {'title': 'Dopamine',
+             'value': f"{_last('dopamine', 0.0):.3f}",
+             'unit': '',
+             'sub': f"5HT={_last('serotonin', 0.0):.2f}  ACh={_last('acetylcholine', 0.0):.2f}  NE={_last('norepinephrine', 0.0):.2f}",
+             'series': pnts.get('dopamine', []),
+             'series_label': 'DA',
+             'color_value': (220, 150, 200)},
+            {'title': 'Voice harmonicity',
+             'value': f"{harm:.2f}",
+             'unit': '',
+             'sub': f"sing level={sing_lvl:.0f}  freq={_last('voice_base_freq', 0.0):.0f}Hz",
+             'series': pnts.get('voice_harmonicity', []),
+             'series_label': 'harm',
+             'color_value': (200, 220, 120)},
+            {'title': 'Network activity',
+             'value': f"{_last('network_activity', 0.0):.3f}",
+             'unit': '',
+             'sub': f"forced turns={getattr(getattr(nxer, 'proprioceptron', None), 'forced_turn_count', 0)}  rocks={getattr(getattr(nxer, 'proprioceptron', None), 'total_rock_hits', 0)}",
+             'series': pnts.get('network_activity', []),
+             'series_label': 'act',
+             'color_value': (160, 200, 240)},
+        ]
+        
+        # Grid layout — 4 rows × 3 cols
+        PER_NXER_ROWS = 4
+        PER_NXER_COLS = 3
+        grid_top    = info_rect.bottom + 8
+        grid_bottom = outer.bottom - 90
+        grid_left   = outer.x + PANEL_PAD
+        grid_right  = outer.right - PANEL_PAD
+        avail_w = grid_right - grid_left - PANEL_PAD * (PER_NXER_COLS - 1)
+        avail_h = grid_bottom - grid_top - PANEL_PAD * (PER_NXER_ROWS - 1)
+        panel_w = avail_w // PER_NXER_COLS
+        panel_h = avail_h // PER_NXER_ROWS
+        for idx, spec in enumerate(panel_specs[:PER_NXER_ROWS * PER_NXER_COLS]):
+            r = idx // PER_NXER_COLS
+            c = idx % PER_NXER_COLS
+            x = grid_left + c * (panel_w + PANEL_PAD)
+            y = grid_top  + r * (panel_h + PANEL_PAD)
+            self._draw_per_nxer_panel(pygame.Rect(x, y, panel_w, panel_h), spec)
+    
+    def _draw_per_nxer_panel(self, rect: pygame.Rect, spec: dict):
+        """Draw one panel of the per-NxEr view. Layout matches the
+        aggregate panel: big value top-left, optional sub-line, sparkline."""
+        # Background
+        pygame.draw.rect(self.screen, (22, 28, 38), rect, border_radius=6)
+        pygame.draw.rect(self.screen, (70, 80, 100), rect, 1, border_radius=6)
+        # Title (top left, small)
+        title_surf = self._font_tiny.render(spec['title'], True, (170, 175, 185))
+        self.screen.blit(title_surf, (rect.x + 8, rect.y + 6))
+        # Big value
+        col = spec.get('color_value', (220, 220, 220))
+        value_surf = self._font_big_value.render(spec['value'], True, col)
+        self.screen.blit(value_surf, (rect.x + 8, rect.y + 18))
+        # Unit (right of value)
+        unit = spec.get('unit', '')
+        if unit:
+            unit_surf = self._font_tiny.render(unit, True, (140, 145, 155))
+            self.screen.blit(unit_surf, (rect.x + 8 + value_surf.get_width() + 4,
+                                          rect.y + 18 + value_surf.get_height() - 14))
+        # Sub line
+        sub = spec.get('sub', '')
+        if sub:
+            sub_surf = self._font_tiny.render(sub, True, (180, 185, 195))
+            self.screen.blit(sub_surf, (rect.x + 8, rect.y + 56))
+        # Sparkline (right half)
+        series = spec.get('series', [])
+        if series and len(series) >= 2:
+            sx = rect.x + rect.width // 2
+            sy = rect.y + 22
+            sw = rect.width // 2 - 12
+            sh = rect.height - 32
+            # Subsample to fit width
+            n = len(series)
+            stride = max(1, n // sw)
+            samples = series[::stride][-sw:]
+            if samples:
+                lo = min(samples)
+                hi = max(samples)
+                rng = hi - lo if hi > lo else 1.0
+                points = []
+                for i, v in enumerate(samples):
+                    px = sx + int(i * sw / max(1, len(samples) - 1))
+                    py = sy + sh - int((v - lo) / rng * sh)
+                    points.append((px, py))
+                if len(points) >= 2:
+                    pygame.draw.lines(self.screen, col, False, points, 2)
+            # n samples label
+            n_lbl = self._font_tiny.render(
+                f"n={len(series)}  [{spec.get('series_label', '')}]",
+                True, (130, 135, 145))
+            self.screen.blit(n_lbl, (sx, rect.bottom - 16))
     
     # ---- v147 survivability strip ----
     def _draw_survivability_strip(self, rect: pygame.Rect, logger):

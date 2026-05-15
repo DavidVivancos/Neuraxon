@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.63 ui renderer (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 155
+# Neuraxon Game of Life v.4.68 ui renderer (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 160
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -24,7 +24,7 @@ class Renderer:
     """Handles all Pygame-based rendering and user input for the main simulation window."""
     def __init__(self, world: 'World', textures: Dict[str, Optional[str]], textures_alpha: float):
         pygame.init()
-        pygame.display.set_caption("Neuraxon Game of Life v 4.63 (Research Version) - By David Vivancos & Dr Jose Sanchez for Qubic Science")
+        pygame.display.set_caption("Neuraxon Game of Life v 4.68 (Research Version) - By David Vivancos & Dr Jose Sanchez for Qubic Science")
         self.screen = pygame.display.set_mode((1920, 1080), pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
         self.world = world
@@ -44,6 +44,10 @@ class Renderer:
         self.button_rects = {}
         self.overlay_buttons = {}
         self.selected_nxer_id: Optional[int] = None # The ID of the currently selected NxEr for the detail view.
+        # v157 (v4.65) — auto-follow toggle. When True, draw_world pans the
+        # camera each frame so the selected NxEr stays centred. Off by
+        # default. Toggled with the F key in game_loop's KEYDOWN handler.
+        self.follow_selected: bool = False
         self.detail_buttons: Dict[str, pygame.Rect] = {}
         self.ranking_click_areas: List[Tuple[pygame.Rect, int]] = []
         self.visual_mode = False  # NEW: Visual mode flag, set to off for speed with V Key
@@ -221,6 +225,23 @@ class Renderer:
     
     def draw_world(self, foods: Dict[int, 'Food'], nxers: Dict[int, 'NxEr'], hud: Dict[str, List[Tuple[str, str]]], alive_count: int, dead_count: int, born_count: int, paused: bool, effects: List[dict], step_tick: int, GlobalTimeSteps: int, game_over: bool, game_index: int, best_scores: Optional[Dict[str, float]] = None):
         """The main rendering function, called once per frame to draw the entire scene."""
+        # v157 (v4.65) — auto-follow selected NxEr if follow_selected is on
+        # ------------------------------------------------------------------
+        # When follow mode is on, snap the camera centre to the selected
+        # NxEr's world position before any rendering. Soft-snap (lerp 0.25)
+        # so the camera feels less jittery as the NxEr makes small moves.
+        # If the selected NxEr died or doesn't exist, follow turns off.
+        if self.follow_selected and self.selected_nxer_id is not None:
+            a = nxers.get(self.selected_nxer_id)
+            if a is not None and a.alive:
+                target_x, target_y = a.pos[0] + 0.5, a.pos[1] + 0.5
+                # soft snap (25% per frame ≈ exponential ease)
+                self.pan[0] += (target_x - self.pan[0]) * 0.25
+                self.pan[1] += (target_y - self.pan[1]) * 0.25
+            else:
+                # Selected NxEr died — disable follow but keep selection so
+                # the user sees the death panel
+                self.follow_selected = False
         self.screen.fill((0, 0, 0))
         w, h = self.screen.get_size()
         cx, cy = self.pan
@@ -262,6 +283,29 @@ class Renderer:
                 rad = max(4, int(self.zoom * 0.45))
                 pygame.draw.circle(self.screen, a.color, (sx, sy), rad)
                 pygame.draw.circle(self.screen, (20, 20, 20), (sx, sy), rad, 1)
+                # v157 (v4.65) — gold selection ring around the currently
+                # selected NxEr. Pulses slightly so it's visible at any
+                # zoom level. The ring is drawn AFTER the body but BEFORE
+                # the energy/note glyphs so it sits behind them.
+                if a.id == self.selected_nxer_id:
+                    pulse = 1.0 + 0.18 * abs(((step_tick % 60) / 30.0) - 1.0)
+                    ring_r = max(rad + 4, int(rad * 1.6 * pulse))
+                    pygame.draw.circle(self.screen, (255, 215, 0),
+                                       (sx, sy), ring_r, 2)
+                    if self.follow_selected:
+                        # Extra crosshair when actively following
+                        pygame.draw.line(self.screen, (255, 215, 0),
+                                         (sx - ring_r - 4, sy),
+                                         (sx - ring_r + 2, sy), 1)
+                        pygame.draw.line(self.screen, (255, 215, 0),
+                                         (sx + ring_r - 2, sy),
+                                         (sx + ring_r + 4, sy), 1)
+                        pygame.draw.line(self.screen, (255, 215, 0),
+                                         (sx, sy - ring_r - 4),
+                                         (sx, sy - ring_r + 2), 1)
+                        pygame.draw.line(self.screen, (255, 215, 0),
+                                         (sx, sy + ring_r - 2),
+                                         (sx, sy + ring_r + 4), 1)
                 # Draw an inner yellow circle representing the agent's energy level.
                 if hasattr(a.net, 'get_energy_status'):
                     energy = a.net.get_energy_status().get('average_energy', 0.0)
@@ -317,17 +361,46 @@ class Renderer:
         # Ranking click areas must still be rebuilt per frame because the
         # y-coordinates depend on the laid-out HUD.
         self.ranking_click_areas = []
+        # v157 (v4.65) — map ranking titles → hotkey numbers (matches the
+        # K_1..K_6 handler in game_loop). Shown as small "[N]" hint next
+        # to each title so the user discovers them. ORDER matches HUD,
+        # which comes from rankings() in game_loop — Food found (2),
+        # Food taken (3), World explored (5), Time lived (6), Mates (4),
+        # Fitness (1).
+        title_to_hotkey = {
+            "Food found":     "2",
+            "Food taken":     "3",
+            "World explored": "5",
+            "Time lived (s)": "6",
+            "Mates":          "4",
+            "Fitness":        "1",
+        }
         for title, rows in hud.items():
             display_title = title
             score = best_scores.get(title) if best_scores else None
             if score is not None: display_title = f"{title} ({score:.2f})" if isinstance(score, float) else f"{title} ({int(score)})"
+            # v157 — append hotkey hint
+            hotkey = title_to_hotkey.get(title)
+            if hotkey:
+                display_title = f"{display_title}  [{hotkey}]"
             self.screen.blit(self.small.render(display_title, True, (180, 180, 180)), (x, y)); y += 18
-            for name, val in rows[:3]:
+            for row_idx, (name, val) in enumerate(rows[:3]):
                 base_name = name.replace(" [Die]", "")
                 base_name = base_name.split(" [", 1)[0].strip()   #now the round is emmbedd in the name in hud
                 dot_c = name2color.get(base_name, (200, 200, 200))
                 pygame.draw.circle(self.screen, dot_c, (x + 8, y + 8), 6)
-                name_text = self.small.render(f"{name}", True, (230, 230, 230))
+                # v157 — mark top-row champion with a star, plus highlight the
+                # currently selected NxEr's row in gold so it's easy to track
+                # which one you've selected across categories.
+                prefix = "★ " if row_idx == 0 else "  "
+                is_selected_row = (self.selected_nxer_id is not None
+                                    and base_name in name2color
+                                    and self.selected_nxer_id is not None
+                                    and any(getattr(_a, 'name', None) == base_name
+                                            and getattr(_a, 'id', None) == self.selected_nxer_id
+                                            for _a in nxers.values()))
+                name_color = (255, 215, 0) if is_selected_row else (230, 230, 230)
+                name_text = self.small.render(f"{prefix}{name}", True, name_color)
                 val_text = self.small.render(f"{val}", True, (220, 220, 220))
                 name_rect = name_text.get_rect(topleft=(x + 20, y))
                 val_rect = val_text.get_rect(topleft=(x + 180, y))
@@ -512,6 +585,9 @@ class Renderer:
             try:
                 from logger import get_data_logger
                 import config as _cfg
+                # v158 (v4.66) — pass current nxers so the dashboard can
+                # build the per-champion combo box and render per-NxEr views.
+                self.metrics_dashboard.set_nxers(nxers)
                 self.metrics_dashboard.draw(get_data_logger(), _cfg._game_id or "unknown")
             except Exception as _exc_dash:
                 # Render a tiny error ribbon, never crash the renderer

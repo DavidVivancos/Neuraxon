@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.63 logger (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 155
+# Neuraxon Game of Life v.4.68 logger (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 160
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -301,8 +301,8 @@ class DataLogger:
         self.game_metadata = {
             'start_timestamp': datetime.now().isoformat(),
             'log_level': self.log_level,
-            'version': '4.63',                     # v155
-            'internal_version': 155,               # v152
+            'version': '4.68',                     # v160
+            'internal_version': 160,               # v152
             'research_probes_available': _RESEARCH_PROBES_AVAILABLE,
             'research_probes_import_error': _RESEARCH_PROBES_IMPORT_ERROR,
         }
@@ -2342,7 +2342,7 @@ class DataLogger:
         filename = os.path.join(out_dir, f"{gid}__MembraneDiag.txt")
         try:
             with open(filename, 'w', encoding='utf-8') as f:
-                f.write("# Neuraxon Game of Life v4.63 — Membrane diagnostics\n")
+                f.write("# Neuraxon Game of Life v4.68 — Membrane diagnostics\n")
                 f.write(f"# game_id={gid}\n")
                 f.write(f"# rows={len(self._membrane_diag_rows)}\n")
                 f.write(f"# sampled every {self._membrane_diag_sample_every} ticks, "
@@ -2364,7 +2364,7 @@ class DataLogger:
     def save_key_metrics(self, game_id: str, out_dir: str = ".",
                           headline_keys: Optional[list] = None,
                           diagnostic_keys: Optional[list] = None) -> Optional[str]:
-        """v155 (v4.63) — write FULL TIME SERIES of key metrics to a
+        """v156 (v4.63) — write FULL TIME SERIES of key metrics to a
         tab-separated file. Does NOT depend on UI state — no pygame, no
         MetricsDashboard, no renderer. Safe to call from finally blocks
         where the display may already be in shutdown.
@@ -2426,7 +2426,7 @@ class DataLogger:
         filename = os.path.join(out_dir, f"{gid}__KeyMetrics.txt")
         try:
             with open(filename, 'w', encoding='utf-8') as f:
-                f.write("# Neuraxon Game of Life v4.63 — Key metrics export\n")
+                f.write("# Neuraxon Game of Life v4.68 — Key metrics export\n")
                 f.write(f"# game_id={gid}\n")
                 f.write(f"# samples={n}\n")
                 f.write("# format=tab-separated, header row, one row per "
@@ -3178,9 +3178,23 @@ def generate_paper_validation_report(logger: DataLogger) -> dict:
 _data_logger: Optional[DataLogger] = None
 
 def get_data_logger() -> DataLogger:
+    """v156 (v4.64) — default `log_level=2` so the time_series and
+    membrane-diag attributes are initialised on first construction.
+    
+    Background: prior to v156 this defaulted to log_level=1, which skipped
+    `_init_level2_data()` entirely. The only path that bumped the logger
+    to level 2 was the menu (`ui/menus.py` line 116 calls
+    `set_data_logger_level(2)`). Any programmatic entry that bypassed the
+    menu (NxonArchNAS subprocesses, future research scripts, headless
+    benchmark runs) ended up with a logger that had no `time_series`
+    attribute → AUTO-SAVE printed "no samples to write" → NAS trials
+    returned `no_time_series` fitness = -1.
+    
+    The menu still explicitly calls `set_data_logger_level(2)` so its
+    behaviour is unchanged; this just fixes the default path."""
     global _data_logger
     if _data_logger is None:
-        _data_logger = DataLogger(log_level=1)
+        _data_logger = DataLogger(log_level=2)
     return _data_logger
 
 def set_data_logger_level(level: int):
