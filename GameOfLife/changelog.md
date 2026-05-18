@@ -1,5 +1,8 @@
 # Neuraxon Game of Life Researh Version<br>
 CHANGE LOG:<br>
+May 18th 2026:<br>
+Neuraxon Game of Life — v4.73 / Internal version 165 -> New Evolutionary strategies
+
 May 15th 2026:<br>
 Neuraxon Game of Life — v4.68 / Internal version 160 -> NAS
 
