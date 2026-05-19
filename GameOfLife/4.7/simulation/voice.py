@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v4.73 Voice/Song System (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 165
+# Neuraxon Game of Life v4.79 Voice/Song System (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 171
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/

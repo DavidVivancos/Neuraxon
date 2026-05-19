@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.73 architecture loader (Internal version 165)
+# Neuraxon Game of Life v.4.79 architecture loader (Internal version 171)
 # v155 introduces JSON-driven architecture parameterisation. See
 # architectures/README.md for usage.
 import json
@@ -35,6 +35,9 @@ KNOWN_KEYS = {
         "spontaneous_firing_rate",
         "intrinsic_timescale_default",
         "resting_potential_decay",
+        "sensorimotor_coupling",   # v164
+        "symmetric_stdp",          # v169 (v4.77) — MultiNeuraxon2 Bug #3 opt-in
+        "refractory_period_ticks", # v171 (v4.79) — state 0 buffer after firing
     },
     "operating_ranges": {
         "learning_rate",

@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.73 neuron (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 165
+# Neuraxon Game of Life v.4.79 neuron (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 171
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -84,6 +84,17 @@ class Neuraxon:
         # M1 lock-in pathology. Cheap: one int compare + increment per tick.
         self.state_streak: int = 0
         self.last_streak_state: int = 0
+        
+        # v171 (v4.79) — refractory period / "state 0 buffer".
+        # After a neuron fires (transitions from 0 → ±1), it must spend
+        # `refractory_period_ticks` at state 0 before it can fire again.
+        # This mirrors the biological refractory period and creates the
+        # 0-state buffer described in the Neuraxon paper. Without it the
+        # network dynamics collapse to bistable +1/-1 oscillation (the
+        # v170 @2400s membrane diag showed only 0.6% time at state 0).
+        # Default 0 = no refractory, preserves v161-v170 behaviour.
+        self._refractory_period = int(getattr(params, 'refractory_period_ticks', 0))
+        self.refractory_counter: int = 0
         
         self.circle_id = None
         self.fitness_score = 0.0
@@ -554,10 +565,26 @@ class Neuraxon:
         
         # Trinary readout — use state_tilde when ctsn_enabled else membrane_potential
         readout = self.state_tilde if getattr(self.params, 'ctsn_enabled', False) else self.membrane_potential
-        if readout > theta1_eff:
+        # v171 (v4.79) — refractory period enforcement.
+        # If we just fired (counter > 0), force state=0 and decrement. This
+        # creates the "state 0 buffer" — a mandatory rest period between
+        # firing events. The membrane potential continues to evolve normally
+        # (so the neuron can be ready to fire again when refractory ends),
+        # only the OUTPUT state is held at 0.
+        prev_trinary_state = self.trinary_state
+        if self.refractory_counter > 0:
+            self.trinary_state = TrinaryState.NEUTRAL.value
+            self.refractory_counter -= 1
+        elif readout > theta1_eff:
             self.trinary_state = TrinaryState.EXCITATORY.value
+            # Trigger refractory ONLY on a firing transition (avoids decrementing
+            # to zero immediately and re-firing on the next tick).
+            if prev_trinary_state == 0 and self._refractory_period > 0:
+                self.refractory_counter = self._refractory_period
         elif readout < theta2_eff:
             self.trinary_state = TrinaryState.INHIBITORY.value
+            if prev_trinary_state == 0 and self._refractory_period > 0:
+                self.refractory_counter = self._refractory_period
         else:
             self.trinary_state = TrinaryState.NEUTRAL.value
         

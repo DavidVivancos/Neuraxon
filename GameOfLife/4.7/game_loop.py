@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.73 game loop (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 165
+# Neuraxon Game of Life v.4.79 game loop (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 171
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -1215,11 +1215,34 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
     def push_effect(kind: str, pos: Tuple[int, int]): effects.append({'kind': kind, 'pos': pos, 'start': step_tick})
     
     # --- Save/Load Functions ---
-    def save_nxer_to_file(a: NxEr, save_name: str = None):
+    def save_nxer_to_file(a: NxEr, save_name: str = None, auto_save: bool = False):
+        """Save an NxEr's state to JSON.
+        
+        v167 (v4.75) — `auto_save` parameter added. When True, bypasses
+        the tkinter file dialog and saves directly to cwd with the given
+        `save_name`. Without this fix the menu "Save Best NxErs" button
+        and the end-of-game champion auto-save both opened a dialog per
+        champion (6 dialogs in sequence), blocking subsequent rounds of
+        play. Auto-save callers (programmatic saves with a pre-chosen
+        filename) should pass auto_save=True. Manual user-driven saves
+        (clicking "Save NxEr" on a specific selected NxEr) leave
+        auto_save=False so the dialog opens and lets the user choose
+        location/name.
+        
+        Args:
+          a: the NxEr to serialise
+          save_name: filename or initial default for the dialog
+          auto_save: if True, skip dialog entirely and write directly
+                     to ./{save_name} (resolved via _safe_path)
+        """
         if config._session_id is None:
             config._session_id = _generate_session_id()
         default = save_name or f"{config._session_id}_nxer_{a.name}_{_now_str()}.json"
-        path = _pick_save_file(default)
+        # v167 — auto_save bypasses the dialog so multi-round flows don't stall
+        if auto_save:
+            path = _safe_path(default)
+        else:
+            path = _pick_save_file(default)
         if not path: return
         data = {"meta": {"created": _now_str(), "type": "NxEr", "session_id": config._session_id, "game_id": config._game_id}, "nxer": _serialize_nxer(a)}
         if get_data_logger().log_level >= 2:
@@ -2096,7 +2119,7 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                             if category not in file_mapping: continue
                             filename = f"{gid_prefix}__{file_mapping[category]}"
                             for champ in champs[:1]:
-                                save_nxer_to_file(champ, save_name=filename)
+                                save_nxer_to_file(champ, save_name=filename, auto_save=True)  # v167 — no dialog
                         print(f"[SAVE BEST] Saved champions with game prefix '{gid_prefix}'")
                     elif btn == "exit":
                         if limit_minutes is not None:
@@ -3665,8 +3688,14 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
         # ESC, window close, crash). This ensures we never lose run data
         # because someone forgot to press K.
         # All files are prefixed with the game_id so they're traceable.
+        # v167 (v4.75) — added flush=True on all auto-save prints and
+        # log absolute working directory + saved paths so the user can
+        # verify where files actually land (the user reported KeyMetrics
+        # "not saved at end of game" — turned out to be cwd confusion
+        # plus pygame-shutdown output buffering).
         try:
             gid = config._game_id or "unknown"
+            print(f"[AUTO-SAVE] Starting end-of-game saves in: {os.path.abspath(os.getcwd())}", flush=True)
             # v155 (v4.63) — BULLETPROOF AUTO-SAVE
             # =====================================
             # The previous version called MetricsDashboard(renderer.screen)
@@ -3681,14 +3710,20 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
             # produce identical files).
             try:
                 logger_ref = get_data_logger()
-                saved = logger_ref.save_key_metrics(gid)
-                if saved:
-                    n = len(logger_ref.time_series.get('ticks', []))
-                    print(f"[AUTO-SAVE] KeyMetrics ({n} samples) -> {saved}")
+                n_samples = len(logger_ref.time_series.get('ticks', [])) if hasattr(logger_ref, 'time_series') else 0
+                if n_samples == 0:
+                    print(f"[AUTO-SAVE] KeyMetrics SKIPPED — no samples in time_series. "
+                          f"This means the game ended before the metrics-worker captured any ticks.", flush=True)
                 else:
-                    print(f"[AUTO-SAVE] KeyMetrics: no samples to write")
+                    saved = logger_ref.save_key_metrics(gid)
+                    if saved:
+                        print(f"[AUTO-SAVE] KeyMetrics ({n_samples} samples) -> {saved}", flush=True)
+                    else:
+                        print(f"[AUTO-SAVE] KeyMetrics save returned None despite {n_samples} samples — see preceding error", flush=True)
             except Exception as exc:
-                print(f"[AUTO-SAVE] KeyMetrics failed: {exc}")
+                import traceback
+                print(f"[AUTO-SAVE] KeyMetrics FAILED: {exc}", flush=True)
+                traceback.print_exc()
             # 2. Best NxErs with game prefix
             try:
                 if 'all_time_best' in locals() and 'update_all_time_best' in locals():
@@ -3707,23 +3742,43 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
                         filename = f"{gid}__{file_mapping[category]}"
                         for champ in champs[:1]:
                             try:
-                                save_nxer_to_file(champ, save_name=filename)
+                                save_nxer_to_file(champ, save_name=filename, auto_save=True)  # v167 — no dialog
                                 saved_count += 1
                             except Exception:
                                 pass
                     if saved_count > 0:
-                        print(f"[AUTO-SAVE] {saved_count} Best NxErs with game prefix '{gid}'")
+                        print(f"[AUTO-SAVE] {saved_count} Best NxErs with game prefix '{gid}'", flush=True)
+                    else:
+                        print(f"[AUTO-SAVE] Best NxErs: no champions to save (no qualifying NxErs lived through the game)", flush=True)
             except Exception as exc:
-                print(f"[AUTO-SAVE] Best NxErs failed: {exc}")
+                import traceback
+                print(f"[AUTO-SAVE] Best NxErs FAILED: {exc}", flush=True)
+                traceback.print_exc()
             # 3. Membrane diagnostics (v153 H instrumentation)
             try:
                 saved = get_data_logger().save_membrane_diagnostics(gid)
                 if saved:
-                    print(f"[AUTO-SAVE] Membrane diag -> {saved}")
+                    print(f"[AUTO-SAVE] Membrane diag -> {saved}", flush=True)
             except Exception as exc:
-                print(f"[AUTO-SAVE] Membrane diag failed: {exc}")
+                print(f"[AUTO-SAVE] Membrane diag failed: {exc}", flush=True)
+            # 4. v170 (v4.78) — per-NxEr lifespan log
+            try:
+                logger_ref = get_data_logger()
+                saved = logger_ref.save_lifespan_log(gid)
+                if saved:
+                    surv = logger_ref.survivability
+                    print(f"[AUTO-SAVE] Lifespan log -> {saved}  "
+                          f"(founders alive: {surv.original_alive_count}/{surv.original_total})",
+                          flush=True)
+                else:
+                    print(f"[AUTO-SAVE] Lifespan log: no deaths to record",
+                          flush=True)
+            except Exception as exc:
+                print(f"[AUTO-SAVE] Lifespan log failed: {exc}", flush=True)
         except Exception as exc:
-            print(f"[AUTO-SAVE] outer block failed: {exc}")
+            import traceback
+            print(f"[AUTO-SAVE] outer block failed: {exc}", flush=True)
+            traceback.print_exc()
         # v147 (v4.55) — cleanly join the metrics worker thread.
         try:
             data_logger.shutdown()

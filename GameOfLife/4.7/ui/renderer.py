@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.73 ui renderer (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 165
+# Neuraxon Game of Life v.4.79 ui renderer (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 171
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -24,7 +24,7 @@ class Renderer:
     """Handles all Pygame-based rendering and user input for the main simulation window."""
     def __init__(self, world: 'World', textures: Dict[str, Optional[str]], textures_alpha: float):
         pygame.init()
-        pygame.display.set_caption("Neuraxon Game of Life v 4.73 (Research Version) - By David Vivancos & Dr Jose Sanchez for Qubic Science")
+        pygame.display.set_caption("Neuraxon Game of Life v 4.79 (Research Version) - By David Vivancos & Dr Jose Sanchez for Qubic Science")
         self.screen = pygame.display.set_mode((1920, 1080), pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
         self.world = world

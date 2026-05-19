@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.73 components (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 165
+# Neuraxon Game of Life v.4.79 components (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 171
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -145,6 +145,14 @@ class Synapse:
         self._meta_clamp = getattr(params, 'meta_clamp_max', 1.0)
         self._assoc_strength = params.associativity_strength
         self._synapse_death_prob = params.synapse_death_prob
+        # v169 (v4.77) — opt-in symmetric STDP (MultiNeuraxon2 Bug #3 fix).
+        # When True: pre_trace/pre_trace_ltd accumulate the SIGNED state
+        # (float(pre_state)), so state==-1 is no longer invisible to STDP.
+        # Also enables the missing (-1,-1) → LTP and (-1,+1) → LTD branches.
+        # When False (default): preserves v161-v168 asymmetric behavior so
+        # existing architectures (e.g. v166 trial 38 at 6.97) score identically.
+        # NAS searches this as a binary choice; if it helps, it'll show up.
+        self._symmetric_stdp = bool(getattr(params, 'symmetric_stdp', False))
     
     def mark_as_afferent(self):
         """Mark as afferent synapse and strengthen."""
@@ -217,8 +225,21 @@ class Synapse:
             self._pending_delta_w = 0.0
             return 0.0
         # Use localized tau_ltp / tau_ltd
-        self.pre_trace += (-self.pre_trace / self.tau_ltp + (1 if pre_state == 1 else 0)) * dt
-        self.pre_trace_ltd += (-self.pre_trace_ltd / self.tau_ltd + (1 if pre_state == 1 else 0)) * dt
+        # v169 — when symmetric_stdp is True, traces accumulate the SIGNED
+        # pre_state instead of the indicator-on-1. This is the MultiNeuraxon2
+        # Bug #3 fix: state==-1 now contributes to traces (with negative sign).
+        # Plus the post_trace tracks SIGNED post_state too, so opposite-sign
+        # correlations can produce signed A_plus/A_minus values downstream.
+        if self._symmetric_stdp:
+            self.pre_trace += (-self.pre_trace / self.tau_ltp + float(pre_state)) * dt
+            self.pre_trace_ltd += (-self.pre_trace_ltd / self.tau_ltd + float(pre_state)) * dt
+            # Clamp signed traces to prevent runaway
+            self.pre_trace = max(-2.0, min(2.0, self.pre_trace))
+            self.pre_trace_ltd = max(-2.0, min(2.0, self.pre_trace_ltd))
+        else:
+            # v161-v168 asymmetric behavior (default)
+            self.pre_trace += (-self.pre_trace / self.tau_ltp + (1 if pre_state == 1 else 0)) * dt
+            self.pre_trace_ltd += (-self.pre_trace_ltd / self.tau_ltd + (1 if pre_state == 1 else 0)) * dt
 
         if _ra_cache is not None:
             d1_act = _ra_cache[0]
@@ -363,6 +384,45 @@ class Synapse:
                         'pre_state': pre_state,
                         'post_state': post_state,
                     }
+                )
+            return delta
+        # v169 — SYMMETRIC STDP branches (only fire when neural.symmetric_stdp=True).
+        # These add the missing trinary cases that MultiNeuraxon2 Bug #3 identified:
+        # (-1, -1) → LTP (same-sign correlation, mirror of (+1, +1))
+        # (-1, +1) → LTD (opposite-sign correlation, mirror of (+1, -1))
+        # When the flag is False, control falls through to the original
+        # _pending_delta_w = 0 return, preserving v161-v168 behaviour exactly.
+        elif self._symmetric_stdp and pre_state == -1 and post_state == -1:
+            # Mirror of (+1, +1) LTP — same-sign negative correlation reinforces
+            # the inhibitory pathway. Uses absolute trace values since signed
+            # traces would be negative for pre_state=-1.
+            hebbian_frac = self._hebbian_ltp_rate
+            da_component = self.learning_rate * self.learning_rate_mod * d1_act * abs(self.pre_trace)
+            hebbian_component = self.learning_rate * hebbian_frac * abs(self.pre_trace) * abs(self.post_trace)
+            delta = da_component + hebbian_component
+            self._pending_delta_w = delta
+            if delta > 0.0001 and _ll >= 2:
+                logger.log_plasticity_event(
+                    tick=tick, event_type='LTP_neg',
+                    pre_id=self.pre_id, post_id=self.post_id,
+                    delta_w=delta,
+                    details={'pre_state': pre_state, 'post_state': post_state,
+                             'symmetric_stdp': True}
+                )
+            return delta
+        elif self._symmetric_stdp and pre_state == -1 and post_state == 1:
+            # Mirror of (+1, -1) LTD — opposite-sign correlation depresses.
+            ach_forgetting_mult = 1.5 if ach > 0.6 else 1.0
+            ltd_scale = self._ltd_neutral_scale * ach_forgetting_mult
+            delta = -self.learning_rate * self.learning_rate_mod * d2_act * abs(self.pre_trace_ltd) * ltd_scale
+            self._pending_delta_w = delta
+            if delta < -0.0001 and _ll >= 2:
+                logger.log_plasticity_event(
+                    tick=tick, event_type='LTD_opp',
+                    pre_id=self.pre_id, post_id=self.post_id,
+                    delta_w=delta,
+                    details={'pre_state': pre_state, 'post_state': post_state,
+                             'symmetric_stdp': True}
                 )
             return delta
         self._pending_delta_w = 0.0

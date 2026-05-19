@@ -81,6 +81,17 @@ SEARCH_SPACE: Dict[str, Any] = {
     # Designed to unblock the sm_corr fitness component (max 0.125 in
     # 1425 v163 trials at 900s — the only unsaturated fitness piece).
     'neural.sensorimotor_coupling':             ('uniform', 0.0, 3.0),
+    # v169 (v4.77) — opt-in for MultiNeuraxon2 Bug #3 fix. Binary search:
+    # False preserves v161-v168 asymmetric STDP. True enables signed traces
+    # and (-1,-1)/(-1,+1) branches. If symmetric STDP improves fitness on
+    # average, evolutionary search will concentrate sampling on True.
+    'neural.symmetric_stdp':                    [False, True],
+    # v171 (v4.79) — refractory period after firing (state 0 buffer).
+    # 0 = no refractory (v161-v170 behaviour). Higher values force more
+    # time at state=0 between firings, restoring the paper's intended
+    # trinary dynamics. Range chosen to cover both "minimal" (1-3 ticks)
+    # and "substantial buffer" (8-12 ticks) regimes.
+    'neural.refractory_period_ticks':           ('int_uniform', 0, 12),
     
     # -- OPERATING RANGES: plasticity / adaptation --
     'operating_ranges.learning_rate':           ('loguniform', 0.002, 0.05),
@@ -278,40 +289,138 @@ class EvolutionaryStrategy(_SearchStrategy):
                   p_mutation: float = 0.50,
                   p_crossover: float = 0.30,
                   mutation_n_params: Tuple[int, int] = (1, 3),
-                  mutation_sigma_frac: float = 0.15):
+                  mutation_sigma_frac: float = 0.15,
+                  escape_threshold: int = 30,
+                  escape_sigma_frac: float = 0.35,
+                  escape_n_params: Tuple[int, int] = (3, 6)):
         super().__init__(rng)
         self.elite_pool_size = elite_pool_size
         self.random_seed_trials = random_seed_trials
         self.p_random = p_random
         self.p_mutation = p_mutation
         self.p_crossover = p_crossover
-        self.mutation_n_params = mutation_n_params
-        self.mutation_sigma_frac = mutation_sigma_frac
+        # v169 — store the "normal" mutation knobs and the "escape" knobs separately
+        # so we can switch between them as `trials_since_last_best` grows
+        self.mutation_n_params_normal = mutation_n_params
+        self.mutation_sigma_frac_normal = mutation_sigma_frac
+        self.mutation_n_params = mutation_n_params       # current (toggled)
+        self.mutation_sigma_frac = mutation_sigma_frac   # current (toggled)
+        # v169 — escape mode parameters
+        self.escape_threshold = escape_threshold
+        self.escape_sigma_frac = escape_sigma_frac
+        self.escape_n_params = escape_n_params
         
         # Thread-safe archive of all completed trials
         self._lock = threading.Lock()
         self._archive: List[Dict[str, Any]] = []
+        
+        # v169 (v4.77) — NAS escape state tracking
+        # =========================================
+        # The v168 @1800s run revealed an evolutionary search failure mode:
+        # the best architecture was found at trial 9 (seed phase) and the
+        # next 115 trials produced ZERO improvements. Evolutionary search
+        # got trapped exploiting trial 9's neighborhood without ever
+        # exploring far enough to discover better regions.
+        # 
+        # Fix: track trials_since_last_best. When it exceeds escape_threshold
+        # (default 30), switch to escape mode:
+        #   - mutation_sigma_frac: 0.15 → 0.35 (broader Gaussian per-param)
+        #   - mutation_n_params:   (1,3) → (3,6) (more params mutated per child)
+        # This produces "long-range" mutations that genuinely explore distant
+        # regions of the search space. When a new best is found, revert to
+        # normal mode and reset the counter.
+        self.best_fitness = -1.0
+        self.trials_since_last_best = 0
+        self.in_escape_mode = False
+        self.escape_events = []   # list of (trial_id_started, trial_id_resolved or None)
         
         # Op counters (for status reporting)
         self.op_count = {'random': 0, 'mutation': 0, 'crossover': 0}
     
     def update(self, result: Dict[str, Any]) -> None:
         """Called from saver thread. Add this trial to the archive if it
-        has a usable fitness."""
-        if result.get('fitness', -1.0) <= -1.0:
+        has a usable fitness. v169 — also tracks the trials-since-last-best
+        counter that drives escape mode."""
+        fit = result.get('fitness', -1.0)
+        if fit <= -1.0:
             return
+        tid = result.get('trial_id', -1)
         with self._lock:
             self._archive.append({
-                'fitness': result['fitness'],
+                'fitness': fit,
                 'arch':    result['arch'],
-                'trial_id': result['trial_id'],
+                'trial_id': tid,
             })
+            # v169 — escape state machine
+            if fit > self.best_fitness:
+                # New global best — exit escape if active, reset counter
+                if self.in_escape_mode:
+                    # Mark the escape event as resolved
+                    if self.escape_events and self.escape_events[-1][1] is None:
+                        self.escape_events[-1] = (self.escape_events[-1][0], tid)
+                    self.in_escape_mode = False
+                    self.mutation_sigma_frac = self.mutation_sigma_frac_normal
+                    self.mutation_n_params = self.mutation_n_params_normal
+                    print(f"[NAS escape] RESOLVED at trial {tid} "
+                          f"(new best {fit:.3f}) — reverting to normal mutation",
+                          flush=True)
+                self.best_fitness = fit
+                self.trials_since_last_best = 0
+            else:
+                self.trials_since_last_best += 1
+                # Enter escape mode if we've been stuck too long
+                if (not self.in_escape_mode and
+                    self.trials_since_last_best >= self.escape_threshold and
+                    len(self._archive) > self.random_seed_trials):
+                    self.in_escape_mode = True
+                    self.mutation_sigma_frac = self.escape_sigma_frac
+                    self.mutation_n_params = self.escape_n_params
+                    self.escape_events.append((tid, None))
+                    print(f"[NAS escape] TRIGGERED at trial {tid} "
+                          f"({self.trials_since_last_best} trials without improvement, "
+                          f"best={self.best_fitness:.3f}) — switching to broad mutation "
+                          f"(sigma={self.escape_sigma_frac}, n_params={self.escape_n_params})",
+                          flush=True)
     
     def _get_elites(self) -> List[Dict[str, Any]]:
         """Return top-N archive entries by fitness. Snapshot under lock."""
         with self._lock:
             sorted_arch = sorted(self._archive, key=lambda x: -x['fitness'])
             return sorted_arch[:self.elite_pool_size]
+    
+    def seed_with_archs(self, seed_archs: List[Dict[str, Any]],
+                          assumed_fitness: float = 6.0) -> None:
+        """v170 (v4.78) — pre-populate the elite pool with known-good
+        architectures (e.g. nas_top1.json, nas_top2.json from a previous run).
+        Each architecture is added to the archive with `assumed_fitness` so
+        it dominates the elite-pool selection until real trials produce
+        higher-fitness alternatives. Also bumps the trials_since_last_best
+        counter to 0 and sets best_fitness so the escape mechanism has a
+        meaningful baseline.
+        
+        Typical usage: cross-duration validation. Load the top-N
+        architectures discovered at 1800s, then run a short search at
+        2400s. The seeded architectures get evaluated first (their stored
+        fitness is replaced by the real 2400s fitness on first evaluation),
+        and evolutionary search refines around them.
+        
+        Args:
+          seed_archs: list of architecture dicts (output of
+                      load_architecture_from_file or sample_random_architecture)
+          assumed_fitness: placeholder fitness used until real evaluation
+                           (default 6.0 — high enough to dominate random seeds)
+        """
+        with self._lock:
+            for i, arch in enumerate(seed_archs):
+                self._archive.append({
+                    'fitness': assumed_fitness,
+                    'arch': arch,
+                    'trial_id': -1 - i,   # negative trial_ids mark "seeded"
+                })
+            self.best_fitness = max(assumed_fitness, self.best_fitness)
+            self.trials_since_last_best = 0
+        print(f"[NAS] Seeded elite pool with {len(seed_archs)} pre-evaluated "
+              f"architectures (assumed_fitness={assumed_fitness})", flush=True)
     
     def _empty_arch(self, trial_id: int) -> Dict[str, Any]:
         """Initialise an empty arch shell with sections matching
@@ -627,10 +736,46 @@ def _trial_worker(args: Tuple) -> Dict[str, Any]:
             start_alive = float(alive_series[0]) if alive_series else 0.0
             peak_alive = max((float(v) for v in alive_series), default=0.0)
             
+            # v168 (v4.76) — multi-checkpoint survival sampling.
+            # Old v161-v167 fitness used `final_alive` only, which credits
+            # "transient crash then recovery" the same as "stable throughout."
+            # Specifically: a trial alive=10 at 25%, 5 at 50%, 5 at 75%, 10 at
+            # end (recovered from a crash) scored 3.0 survival pts — same as
+            # one that maintained 10 the whole time. This selects for
+            # architectures that look good at trial end but may have crashed
+            # mid-trial. The 1200s NAS run revealed that the v166 champions
+            # (trial 38/34) had this exact pattern: they survived 900s fine
+            # but couldn't sustain 1200s without mid-trial losses.
+            #
+            # New: sample alive count at 25%, 50%, 75%, 100% of the trial
+            # and use the MEAN. Architectures that maintain population
+            # THROUGHOUT score higher than those that crash and recover.
+            n_alive = len(alive_series)
+            if n_alive >= 4:
+                q1_idx = max(0, n_alive // 4 - 1)
+                q2_idx = max(0, n_alive // 2 - 1)
+                q3_idx = max(0, (3 * n_alive) // 4 - 1)
+                q4_idx = n_alive - 1
+                alive_q1 = float(alive_series[q1_idx])
+                alive_q2 = float(alive_series[q2_idx])
+                alive_q3 = float(alive_series[q3_idx])
+                alive_q4 = float(alive_series[q4_idx])  # == final_alive
+                alive_mean_checkpoints = (alive_q1 + alive_q2 + alive_q3 + alive_q4) / 4.0
+            else:
+                # Short trial — degrade to final_alive
+                alive_q1 = alive_q2 = alive_q3 = alive_q4 = final_alive
+                alive_mean_checkpoints = final_alive
+            
             result['metrics'] = {
                 'final_alive':       final_alive,
                 'start_alive':       start_alive,
                 'peak_alive':        peak_alive,
+                # v168 — checkpoint alive counts for sustained-survival fitness
+                'alive_q1':          alive_q1,
+                'alive_q2':          alive_q2,
+                'alive_q3':          alive_q3,
+                'alive_q4':          alive_q4,
+                'alive_mean_checkpoints': alive_mean_checkpoints,
                 'M1_last':           last_mean('M1_excitatory_fraction'),
                 'M6_last':           last_mean('M6_spontaneous_fraction'),
                 'M9_last':           last_mean('M9_transfer_ratio'),
@@ -684,10 +829,50 @@ def fitness(metrics: Optional[Dict[str, float]]) -> float:
         return -1.0
     
     # Component 1 — population survival (normalised to 0-1)
-    surv = min(1.0, metrics.get('final_alive', 0.0) / NAS_TRIAL_CONFIG['StartingNxErs'])
+    # v168 (v4.76) — use mean of 4 checkpoint samples (25/50/75/100% of trial)
+    # instead of just final_alive. Old fitness credited a "transient crash and
+    # recover" trial the same as "stable throughout" — a critical blind spot
+    # exposed by the 1200s NAS run, where v166 champions (trial 38/34) scored
+    # 6.97 at 900s but dropped to 6.17 at 1200s because they had been winning
+    # the sprint while crashing mid-marathon. Mean-of-checkpoints rewards
+    # sustained population maintenance throughout the trial duration.
+    # Backward compat: falls back to final_alive if checkpoint metrics absent
+    # (legacy v161-v167 result dicts).
+    # v171 (v4.79) — normalise by the ACTUAL starting population
+    # (metrics['start_alive']) rather than the hardcoded NAS_TRIAL_CONFIG
+    # value. The v170 @2400s run used start_alive=20 NxErs but fitness still
+    # divided by 10, so survival was trivially saturated for any trial
+    # maintaining >10 NxErs (essentially all top trials). With this fix the
+    # metric is duration- AND population-agnostic: maintaining 99% of starting
+    # population scores 0.99 whether you start with 10 or 20 NxErs.
+    alive_signal = metrics.get('alive_mean_checkpoints',
+                                metrics.get('final_alive', 0.0))
+    # Use the actual founder count as the denominator. Fall back through
+    # start_alive → peak_alive → hardcoded 10 for backward compatibility.
+    start_pop = metrics.get('start_alive', 0.0)
+    if start_pop <= 0:
+        # Legacy result dicts may lack start_alive; try peak as a sensible
+        # upper bound, otherwise fall back to the hardcoded config value.
+        start_pop = metrics.get('peak_alive', NAS_TRIAL_CONFIG['StartingNxErs'])
+    if start_pop <= 0:
+        start_pop = float(NAS_TRIAL_CONFIG['StartingNxErs'])
+    surv = min(1.0, alive_signal / start_pop)
     
     # Component 2 — heritability (clamp + normalise)
-    m10 = max(0.0, min(1.0, metrics.get('M10_last', 0.0)))
+    # v166 (v4.74) — use M10_peak (max |M10| over full trial) instead of
+    # M10_last (mean of last 20%). Same diagnostic pattern as v165's
+    # sm_corr fix: across 1333 v165 trials, 98 (7.4%) had M10_peak - M10_last > 0.3,
+    # with some hitting |M10_peak|=1.0 mid-trial but M10_last drifting to -0.99
+    # by trial end due to small-sample noise (heritability is computed on
+    # only 4-8 parent-child pairs, so a single late birth can flip the
+    # Pearson r dramatically). The architectural capability is in the peak;
+    # the last-mean was noise. abs() is used because M10_peak is logged as
+    # max(|r|) — a strong negative correlation is still evidence the
+    # architecture has heritability structure, just measured at small N.
+    # Hypothetical re-scoring of v165 data showed best fitness rising
+    # from 6.875 → 6.970 (+0.10) with this change alone.
+    m10 = max(0.0, min(1.0, abs(metrics.get('M10_peak',
+                                              metrics.get('M10_last', 0.0)))))
     
     # Component 3 — lock-in penalty (mean_state_streak)
     # streak ~2-5 is healthy, > 100 is severe lock-in
@@ -755,14 +940,17 @@ _SCHEDULER_POLL_SEC = 0.5
 
 def _write_csv_header(csv_path: Path):
     """Write a fresh CSV header. v160 simplified — one row per finished
-    trial. v165 adds sm_corr_peak, sm_corr_mean, M10_peak columns
-    (sm_corr_peak is now the fitness driver — see fitness() docstring).
+    trial. v165 added sm_corr_peak, sm_corr_mean, M10_peak columns.
+    v168 adds alive_q1, alive_q2, alive_q3, alive_mean checkpoint columns
+    (alive_mean is the new survival fitness driver — see fitness() docstring).
     """
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow([
             'trial_id', 'completed_at_iso', 'fitness',
-            'final_alive', 'peak_alive', 'M1', 'M6', 'M9',
+            'final_alive', 'peak_alive',
+            'alive_q1', 'alive_q2', 'alive_q3', 'alive_mean',
+            'M1', 'M6', 'M9',
             'M10', 'M10_peak',
             'mean_streak_last', 'mean_streak_first',
             'locked', 'surv_score', 'expl_rate',
@@ -775,13 +963,18 @@ def _write_csv_header(csv_path: Path):
 def _append_csv_row(csv_path: Path, result: Dict, is_global_best: bool):
     """Append a single finished trial's row. Called from the saver
     thread, never from the worker callback (avoids file lock contention
-    on Windows). v165 — extra columns for M10_peak + sm_corr peak/mean."""
+    on Windows). v165 — extra columns for M10_peak + sm_corr peak/mean.
+    v168 — extra columns for checkpoint alive counts (q1/q2/q3/mean)."""
     m = result.get('metrics') or {}
     row = [
         result['trial_id'],
         time.strftime('%Y-%m-%dT%H:%M:%S'),
         f"{result['fitness']:.4f}",
         m.get('final_alive', ''), m.get('peak_alive', ''),
+        # v168 — checkpoint columns
+        m.get('alive_q1', ''), m.get('alive_q2', ''),
+        m.get('alive_q3', ''),
+        f"{m.get('alive_mean_checkpoints', 0):.2f}",
         f"{m.get('M1_last', 0):.4f}", f"{m.get('M6_last', 0):.4f}",
         f"{m.get('M9_last', 0):.4f}", f"{m.get('M10_last', 0):.4f}",
         f"{m.get('M10_peak', 0):.4f}",
@@ -798,8 +991,6 @@ def _append_csv_row(csv_path: Path, result: Dict, is_global_best: bool):
         arch_summary_string(result['arch']),
         1 if is_global_best else 0,
     ]
-    # Use 'a' mode with line buffering so partial writes flush even if
-    # the script is killed before clean exit
     with open(csv_path, 'a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(row)
@@ -1052,22 +1243,33 @@ class _NASScheduler:
                 
                 if self.verbose:
                     m = r.get('metrics') or {}
+                    # v168 — show alive_mean (the new fitness driver) alongside final
                     alive = m.get('final_alive', '?')
+                    alive_mean = m.get('alive_mean_checkpoints', alive)
                     streak = m.get('mean_streak_last', 0)
-                    M10 = m.get('M10_last', 0)
-                    # v165 — show sm_peak alongside M10. This is the new
-                    # fitness driver (post v164's architectural fix); the
-                    # old sm_corr_last collapsed to 0 from input saturation.
+                    # v166 — show M10_pk (the new fitness driver) and sm_peak.
+                    # M10_last was 0.027 mean across 1333 v165 trials while
+                    # M10_peak averaged much higher; the small-N (4-8 pairs)
+                    # Pearson computation produced noisy last-window values
+                    # that hid the architectural heritability capability.
+                    M10_pk = abs(m.get('M10_peak', m.get('M10_last', 0)))
                     sm_peak = m.get('sm_corr_peak', 0)
                     marker = " ★ NEW BEST" if new_best else ""
+                    # v169 — show escape mode indicator
+                    escape_marker = ""
+                    if hasattr(self.strategy, 'in_escape_mode') and self.strategy.in_escape_mode:
+                        escape_marker = " [escape]"
                     err_short = (' err' if r.get('error') else '')
+                    # v168 — `alive` now shows mean checkpoints (sustained
+                    # population) rather than just final count
+                    alive_disp = f"{alive_mean:.1f}" if isinstance(alive_mean, (int, float)) else str(alive_mean)
                     print(f"[NAS] trial {r['trial_id']:>4}{err_short:>4} "
-                          f"fit={r['fitness']:6.3f}  alive={alive:>4} "
-                          f"streak={streak:>5.1f}  M10={M10:5.2f}  "
+                          f"fit={r['fitness']:6.3f}  aliveQ={alive_disp:>4} "
+                          f"streak={streak:>5.1f}  M10_pk={M10_pk:5.2f}  "
                           f"sm_peak={sm_peak:5.2f}  "
                           f"| done {completed:>4}/{submitted}  "
                           f"errs={errors:>3}  best={best_fit:6.3f}"
-                          f"{marker}", flush=True)
+                          f"{marker}{escape_marker}", flush=True)
             except Exception as exc:
                 # Saver thread must never die — catch and log
                 print(f"[NAS] saver-thread warning: {exc}", flush=True)
@@ -1242,8 +1444,14 @@ def run_continuous(num_trials: int = 8,
                      evo_p_random: float = 0.20,
                      evo_p_mutation: float = 0.50,
                      evo_p_crossover: float = 0.30,
-                     evo_mutation_sigma: float = 0.15) -> Dict[str, Any]:
+                     evo_mutation_sigma: float = 0.15,
+                     evo_escape_threshold: int = 30,
+                     evo_escape_sigma: float = 0.35,
+                     evo_escape_n_params: Tuple[int, int] = (3, 6),
+                     seed_archs: Optional[List[Dict[str, Any]]] = None,
+                     seed_archs_fitness: float = 6.0) -> Dict[str, Any]:
     """v160 — Streaming NAS. v164 adds pluggable search_strategy.
+    v169 — adds escape mechanism for evolutionary strategy when stuck.
     
     Args:
       num_trials: legacy display-batch size
@@ -1256,6 +1464,8 @@ def run_continuous(num_trials: int = 8,
       verbose: per-trial console output
       search_strategy: 'random' (v161-v163) or 'evolutionary' (v164)
       evo_*: evolutionary parameters when search_strategy='evolutionary'
+      evo_escape_*: v169 escape parameters — trigger broad mutation when
+                    no improvement for evo_escape_threshold trials.
     """
     if workers is None:
         workers = max(1, mp.cpu_count() - 1)
@@ -1280,7 +1490,19 @@ def run_continuous(num_trials: int = 8,
         p_mutation=evo_p_mutation,
         p_crossover=evo_p_crossover,
         mutation_sigma_frac=evo_mutation_sigma,
+        # v169 escape knobs (ignored by random strategy)
+        escape_threshold=evo_escape_threshold,
+        escape_sigma_frac=evo_escape_sigma,
+        escape_n_params=evo_escape_n_params,
     ) if search_strategy != 'random' else RandomSearchStrategy(strategy_rng)
+    
+    # v170 (v4.78) — pre-populate elite pool with known-good architectures.
+    # Only supported by EvolutionaryStrategy; random strategy ignores seeds.
+    if seed_archs and hasattr(strategy, 'seed_with_archs'):
+        strategy.seed_with_archs(seed_archs, assumed_fitness=seed_archs_fitness)
+    elif seed_archs:
+        print(f"[NAS] WARNING: --seed-archs requires --search-strategy evolutionary; "
+              f"ignoring {len(seed_archs)} seed archs", flush=True)
     
     scheduler = _NASScheduler(
         num_trials=num_trials, wall_seconds=wall_seconds,
@@ -1355,7 +1577,59 @@ def main():
     parser.add_argument('--evo-mutation-sigma', type=float, default=0.15,
                         help='[evolutionary] Gaussian noise stddev as fraction of param range '
                              '(default: 0.15)')
+    # v169 (v4.77) — NAS escape mechanism CLI
+    parser.add_argument('--evo-escape-threshold', type=int, default=30,
+                        help='[evolutionary] Trials without improvement before switching to '
+                             'escape mode (broad mutation). Set to a very large number to '
+                             'disable. Default: 30.')
+    parser.add_argument('--evo-escape-sigma', type=float, default=0.35,
+                        help='[evolutionary] Mutation sigma during escape mode '
+                             '(default: 0.35, vs normal 0.15)')
+    parser.add_argument('--evo-escape-n-params-lo', type=int, default=3,
+                        help='[evolutionary] Min params mutated per child in escape mode '
+                             '(default: 3, vs normal 1)')
+    parser.add_argument('--evo-escape-n-params-hi', type=int, default=6,
+                        help='[evolutionary] Max params mutated per child in escape mode '
+                             '(default: 6, vs normal 3)')
+    # v170 (v4.78) — seed-architecture bootstrapping for cross-duration validation
+    parser.add_argument('--seed-archs', type=str, default=None,
+                        help='[evolutionary] Comma-separated list of JSON architecture '
+                             'files to pre-populate the elite pool with. Use this for '
+                             'cross-duration validation (e.g. take nas_top1.json from a '
+                             '1800s run and re-evaluate at 2400s). The seeded archs are '
+                             'evaluated first and then mutated. Recommend setting '
+                             '--evo-random-seed-trials to a small number (5-10) so '
+                             'evolutionary search starts immediately from the seeds.')
+    parser.add_argument('--seed-archs-fitness', type=float, default=6.0,
+                        help='[evolutionary] Placeholder fitness for seeded archs '
+                             '(default 6.0). Higher → more likely to dominate the '
+                             'elite pool until real evaluations complete.')
     args = parser.parse_args()
+    
+    # v170 — load seed architectures if specified
+    seed_archs = None
+    if args.seed_archs:
+        from pathlib import Path
+        seed_archs = []
+        for path_str in args.seed_archs.split(','):
+            path = Path(path_str.strip()).expanduser().resolve()
+            if not path.is_file():
+                print(f"[NAS] --seed-archs: file not found: {path}", flush=True)
+                return 1
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    raw = json.load(f)
+                # Strip _meta wrapper if present (saved arch files have it)
+                if isinstance(raw, dict) and 'biology' in raw:
+                    seed_archs.append(raw)
+                else:
+                    print(f"[NAS] --seed-archs: {path} doesn't look like an arch JSON "
+                          f"(no 'biology' section)", flush=True)
+                    return 1
+                print(f"[NAS] Loaded seed arch from {path}", flush=True)
+            except Exception as exc:
+                print(f"[NAS] --seed-archs: failed to load {path}: {exc}", flush=True)
+                return 1
     
     max_trials = args.max_trials
     if args.single_batch:
@@ -1378,6 +1652,11 @@ def main():
         evo_p_mutation=args.evo_p_mutation,
         evo_p_crossover=args.evo_p_crossover,
         evo_mutation_sigma=args.evo_mutation_sigma,
+        evo_escape_threshold=args.evo_escape_threshold,
+        evo_escape_sigma=args.evo_escape_sigma,
+        evo_escape_n_params=(args.evo_escape_n_params_lo, args.evo_escape_n_params_hi),
+        seed_archs=seed_archs,
+        seed_archs_fitness=args.seed_archs_fitness,
     )
     
     if summary['best_arch'] is not None:

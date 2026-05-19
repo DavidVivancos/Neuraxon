@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.73 menus (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 165
+# Neuraxon Game of Life v.4.79 menus (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 171
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -23,7 +23,7 @@ def run_config_screen() -> Optional[Dict[str, Any]]:
 
     pygame.init()
     screen = pygame.display.set_mode((1920, 1080), pygame.RESIZABLE)
-    pygame.display.set_caption("Neuraxon Game Of Life v 4.73 (Research Version) By David Vivancos & Dr Jose Sanchez for Qubic Science - Configuration")
+    pygame.display.set_caption("Neuraxon Game Of Life v 4.79 (Research Version) By David Vivancos & Dr Jose Sanchez for Qubic Science - Configuration")
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("consolas", 16); title_font = pygame.font.SysFont("consolas", 32, bold=True)
     

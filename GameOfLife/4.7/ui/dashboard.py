@@ -1,9 +1,9 @@
-# Neuraxon Game of Life v.4.73 ui dashboard (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 165
+# Neuraxon Game of Life v.4.79 ui dashboard (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 171
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   "Multi-Neuraxon: Emergent Specialization, Modular, Frequency-Gated Neural Dynamics" by David Vivancos & Jose Sanchez
 """
-ui/dashboard.py  (NEW in v146 / v4.73)
+ui/dashboard.py  (NEW in v146 / v4.79)
 =======================================
 Overlay dashboard rendered on top of the game world when the user presses L.
 
@@ -330,7 +330,7 @@ class MetricsDashboard:
         self._font_body = pygame.font.SysFont("consolas", 14)
         self._font_tiny = pygame.font.SysFont("consolas", 11)
         self._font_big_value = pygame.font.SysFont("consolas", 32, bold=True)
-        # v158 (v4.73) — VIEW SELECTOR (ComboBox)
+        # v158 (v4.79) — VIEW SELECTOR (ComboBox)
         # =======================================
         # The dashboard now supports two view modes:
         #   "aggregate" — population-level M1-M10 + survivability strip
@@ -445,7 +445,7 @@ class MetricsDashboard:
 
     # ---- save-to-file ----
     def _save_metrics_txt(self, logger, game_id: str) -> Optional[str]:
-        """v155 (v4.73) — thin wrapper around DataLogger.save_key_metrics().
+        """v155 (v4.79) — thin wrapper around DataLogger.save_key_metrics().
         Kept for API compatibility (K-key and Save-button still call this).
         The actual file-writing lives on the logger so the auto-save in
         game_loop.finally can call it directly without a UI surface."""
@@ -500,7 +500,7 @@ class MetricsDashboard:
         # Header
         self._draw_header(outer, logger, game_id)
         
-        # v158 (v4.73) — VIEW COMBO BOX
+        # v158 (v4.79) — VIEW COMBO BOX
         # Refresh options from current champions, then position & draw
         # the closed box. The OPEN dropdown is drawn at end-of-frame so
         # it sits on top of all other content (z-order).
@@ -584,7 +584,7 @@ class MetricsDashboard:
             self._draw_panel(pygame.Rect(x, y, panel_w, panel_h), desc)
     
     def _draw_per_nxer_view(self, outer: pygame.Rect, logger, nxer):
-        """v158 (v4.73) — Per-NxEr dashboard view. Replaces the
+        """v158 (v4.79) — Per-NxEr dashboard view. Replaces the
         population-aggregate M1-M10 grid with 10 panels showing this one
         agent's metrics, computed from logger.per_nxer_time_series and
         current network state.

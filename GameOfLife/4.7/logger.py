@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.73 logger (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 165
+# Neuraxon Game of Life v.4.79 logger (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 171
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -144,6 +144,20 @@ class SurvivabilityTracker:
         self.stuck_fraction: float = 0.0       # fraction stuck >= STUCK_TICKS
         self.survivability_score: float = 0.5  # composite [0, 1]
         self.last_tick_seen: int = 0
+        
+        # v170 (v4.78) — track the founding NxEr cohort separately so users
+        # can answer "how many of the original 10 survived to 30 minutes?".
+        # The set is populated by the FIRST sample() call (before any birth
+        # events register), so it captures whichever NxErs were alive at
+        # game start. Once an original dies, its id is removed from the set
+        # (preserving the invariant: |_original_ids| = originals still alive).
+        self._original_ids: set = set()
+        self._original_ids_locked: bool = False
+        self.original_alive_count: int = 0      # how many founders are still alive
+        self.original_total: int = 0             # how many founders there were
+        # v170 — full per-NxEr lifespan log (for distribution analysis).
+        # Each entry: (nxer_id, birth_tick, death_tick, was_original)
+        self._lifespan_log: list = []
     
     def register_birth(self, nxer_id: int, tick: int):
         self._birth_tick[nxer_id] = tick
@@ -151,17 +165,40 @@ class SurvivabilityTracker:
     
     def register_death(self, nxer_id: int, tick: int):
         if nxer_id in self._birth_tick:
-            lifespan = tick - self._birth_tick[nxer_id]
+            birth = self._birth_tick[nxer_id]
+            lifespan = tick - birth
             self._lifespans_recent.append(lifespan)
+            # v170 — full lifespan log for distribution analysis
+            was_original = nxer_id in self._original_ids
+            self._lifespan_log.append((nxer_id, birth, tick, was_original))
             del self._birth_tick[nxer_id]
+        else:
+            # NxEr died without a recorded birth (loaded-from-save or founder
+            # before the tracker locked in). Still record the death for the
+            # lifespan distribution, with birth_tick=0 as best-effort.
+            was_original = nxer_id in self._original_ids
+            self._lifespan_log.append((nxer_id, 0, tick, was_original))
+        # v170 — if this was an original NxEr, drop it from the alive set
+        self._original_ids.discard(nxer_id)
         self._last_pos.pop(nxer_id, None)
         self._last_move_tick.pop(nxer_id, None)
         self._death_ticks_window.append(tick)
     
     def sample(self, tick: int, alive_nxers: list):
-        """Called once per full-analytics tick from _log_tick_level2."""
+        """Called once per full-analytics tick from _log_tick_level2.
+        v170 — lock the founding cohort on the first call so we can
+        report 'originals still alive' separately from total population."""
         self.last_tick_seen = tick
         self.alive_count = len(alive_nxers)
+        
+        # v170 — lock originals on first sample
+        if not self._original_ids_locked:
+            self._original_ids = {a.id for a in alive_nxers}
+            self._original_ids_locked = True
+            self.original_total = len(self._original_ids)
+        # Compute original_alive_count (intersection of still-alive set with originals)
+        alive_ids = {a.id for a in alive_nxers}
+        self.original_alive_count = len(alive_ids & self._original_ids)
         # ---- births/deaths within window ----
         cutoff = tick - self.STUCK_WINDOW_TICKS
         # trim deques cheaply
@@ -251,6 +288,10 @@ class SurvivabilityTracker:
             'survivability_score': round(self.survivability_score, 4),
             'window_ticks': self.STUCK_WINDOW_TICKS,
             'stuck_ticks_threshold': self.STUCK_TICKS,
+            # v170 — original-cohort survival tracking
+            'original_alive_count': self.original_alive_count,
+            'original_total': self.original_total,
+            'lifespan_log_size': len(self._lifespan_log),
         }
 
 
@@ -301,8 +342,8 @@ class DataLogger:
         self.game_metadata = {
             'start_timestamp': datetime.now().isoformat(),
             'log_level': self.log_level,
-            'version': '4.73',                     # v165
-            'internal_version': 165,               # v152
+            'version': '4.79',                     # v171
+            'internal_version': 171,               # v152
             'research_probes_available': _RESEARCH_PROBES_AVAILABLE,
             'research_probes_import_error': _RESEARCH_PROBES_IMPORT_ERROR,
         }
@@ -646,6 +687,7 @@ class DataLogger:
             'surv_mean_motion_rate',
             'surv_stuck_fraction',
             'surv_score',
+            'surv_original_count',   # v170 — founders still alive
         ]:
             if k not in self.time_series:
                 self.time_series[k] = []
@@ -2085,6 +2127,8 @@ class DataLogger:
                     ('surv_mean_motion_rate',sd['mean_motion_rate']),
                     ('surv_stuck_fraction',  sd['stuck_fraction']),
                     ('surv_score',           sd['survivability_score']),
+                    # v170 — original-cohort survival
+                    ('surv_original_count',  sd['original_alive_count']),
                 ]:
                     if k not in ts0:
                         ts0[k] = []
@@ -2342,7 +2386,7 @@ class DataLogger:
         filename = os.path.join(out_dir, f"{gid}__MembraneDiag.txt")
         try:
             with open(filename, 'w', encoding='utf-8') as f:
-                f.write("# Neuraxon Game of Life v4.73 — Membrane diagnostics\n")
+                f.write("# Neuraxon Game of Life v4.79 — Membrane diagnostics\n")
                 f.write(f"# game_id={gid}\n")
                 f.write(f"# rows={len(self._membrane_diag_rows)}\n")
                 f.write(f"# sampled every {self._membrane_diag_sample_every} ticks, "
@@ -2359,6 +2403,38 @@ class DataLogger:
             return os.path.abspath(filename)
         except Exception as exc:
             print(f"[DataLogger] membrane diag save failed: {exc}")
+            return None
+    
+    def save_lifespan_log(self, game_id: str,
+                          out_dir: str = ".") -> Optional[str]:
+        """v170 (v4.78) — write the per-NxEr lifespan log to a tab-separated
+        file. Each row represents one NxEr that DIED during the trial:
+          nxer_id  birth_tick  death_tick  age_ticks  was_original
+        Founders that survived to trial end are NOT in this file (they're
+        still alive). To see the surviving cohort, look at the final value
+        of surv_original_count in KeyMetrics.
+        Returns the saved path, or None if no deaths were recorded.
+        """
+        log = getattr(self.survivability, '_lifespan_log', None)
+        if not log:
+            return None
+        gid = (game_id or "unknown").replace('/', '_').replace('\\', '_')
+        filename = os.path.join(out_dir, f"{gid}__LifespanLog.txt")
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write("# Neuraxon Game of Life v4.79 — Per-NxEr lifespan log\n")
+                f.write(f"# game_id={gid}\n")
+                f.write(f"# rows={len(log)} (one row per NxEr death)\n")
+                f.write(f"# founders_at_start={self.survivability.original_total}\n")
+                f.write(f"# founders_still_alive_at_export={self.survivability.original_alive_count}\n")
+                f.write("# format: tab-separated, header row\n")
+                f.write("nxer_id\tbirth_tick\tdeath_tick\tage_ticks\twas_original\n")
+                for nxer_id, birth, death, was_original in log:
+                    age = death - birth
+                    f.write(f"{nxer_id}\t{birth}\t{death}\t{age}\t{1 if was_original else 0}\n")
+            return os.path.abspath(filename)
+        except Exception as exc:
+            print(f"[DataLogger] lifespan log save failed: {exc}")
             return None
     
     def save_key_metrics(self, game_id: str, out_dir: str = ".",
@@ -2417,6 +2493,7 @@ class DataLogger:
                 'input_variance_mean',
                 'surv_score',
                 'surv_alive_count',
+                'surv_original_count',   # v170 — how many of the founding NxErs are still alive
             ]
         all_export_keys = headline_keys + diagnostic_keys
         n = len(ts['ticks'])
@@ -2426,7 +2503,7 @@ class DataLogger:
         filename = os.path.join(out_dir, f"{gid}__KeyMetrics.txt")
         try:
             with open(filename, 'w', encoding='utf-8') as f:
-                f.write("# Neuraxon Game of Life v4.73 — Key metrics export\n")
+                f.write("# Neuraxon Game of Life v4.79 — Key metrics export\n")
                 f.write(f"# game_id={gid}\n")
                 f.write(f"# samples={n}\n")
                 f.write("# format=tab-separated, header row, one row per "

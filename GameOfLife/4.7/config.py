@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.4.73 config (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 165
+# Neuraxon Game of Life v.4.79 config (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 171
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -493,6 +493,25 @@ class NetworkParameters:
     agmp_lambda_a: float = 0.95
     agmp_eta: float = 0.005
     agmp_enabled: bool = True
+
+    # v169 (v4.77) — symmetric STDP opt-in (MultiNeuraxon2 Bug #3 fix).
+    # Default False to preserve v161-v168 behaviour exactly. When True,
+    # STDP traces accumulate the SIGNED state (not indicator-on-1), and
+    # the (-1, -1) → LTP and (-1, +1) → LTD branches activate. NAS
+    # searches this as a binary parameter; will discover whether
+    # symmetric STDP improves fitness vs asymmetric.
+    symmetric_stdp: bool = False
+
+    # v171 (v4.79) — refractory period after firing ("state 0 buffer").
+    # When >0, every firing event (0 → ±1) is followed by N forced
+    # state=0 ticks. The membrane evolves normally during refractory;
+    # only the output state is held at 0. Default 0 = no refractory
+    # (v161-v170 behaviour). The v170 @2400s membrane diag showed only
+    # 0.6% time at state 0 — neurons were bistable +1/-1 oscillators with
+    # no rest band, contradicting the paper's trinary firing model. This
+    # parameter restores the paper's intended dynamics. NAS searches
+    # 0-12 ticks as an integer parameter.
+    refractory_period_ticks: int = 0
 
     # --- MSTH: Multi-Scale Temporal Homeostasis (Section 5) ---
     msth_ultrafast_tau: float = 2.5
