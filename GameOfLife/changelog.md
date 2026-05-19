@@ -1,5 +1,8 @@
 # Neuraxon Game of Life Researh Version<br>
 CHANGE LOG:<br>
+May 19th 2026:<br>
+Neuraxon Game of Life — v4.79 / Internal version 171 -> Survival normalization fix, State 0 buffer refractory 
+
 May 18th 2026:<br>
 Neuraxon Game of Life — v4.73 / Internal version 165 -> New Evolutionary strategies
 
