@@ -35,11 +35,7 @@
 
 **Core implementation:** [`MultiNeuraxon2.py`](https://github.com/DavidVivancos/Neuraxon/blob/main/MultiNeuraxon2.py)
 
-**Neuraxon Game of Life 3.5 Research Version (Based on Neuraxon 2.0) code:** (https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/3.5))
-
-**Neuraxon Game of Life 4.0 Research Version Mulit Nxon 2.0 (Based on Neuraxon 2.0) code:** (https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/4)
-
-**Neuraxon Game of Life 4.7 Research Version Mulit Nxon 2.0 (Based on Neuraxon 2.0)  + First Proto-Language/Audition code + External Architectures:** (https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/4.7)
+**Neuraxon Game of Life 5.0 Research Version Mulit Nxon 2.0 (Based on Neuraxon 2.0)  + First g factor introduced:** (https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/5)
 
 **Neuraxon Game of Life 4.5 Lite Demo (Based on Multi Neuraxon 2.0) + First Proto-Language/Audition :** [Neuraxon Game of Life Hugging Face Space](https://huggingface.co/spaces/DavidVivancos/NeuraxonLife)
 <div align="center">
