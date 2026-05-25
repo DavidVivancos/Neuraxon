@@ -1,0 +1,4057 @@
+# Neuraxon Game of Life v.5.0 game loop (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 185
+# Based on the Papers:
+#   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
+#   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
+# https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint  (Neuraxon V2.0 )
+# https://www.researchgate.net/publication/397331336_Neuraxon (V1) 
+# Play the Lite Version of the Game of Life 3 at https://huggingface.co/spaces/DavidVivancos/NeuraxonLife
+import os
+import sys
+import time
+import json
+import math
+import random
+import heapq  # v4.52 PERF: for nlargest top-N champion selection
+from collections import deque
+from dataclasses import asdict
+from typing import Dict, List, Tuple, Optional, Set
+
+import pygame
+import numpy as np
+
+# Import Configuration and Globals
+import config
+from config import (
+    NetworkParameters, RESERVED_COLORS,
+    T_SEA, T_LAND, T_ROCK,
+    _generate_session_id, _get_next_global_name, _reset_session_globals
+)
+
+# Import Utilities
+from utils import (
+    _clamp, _rand_color, _now_str, _safe_path, 
+    _pick_save_file, _pick_open_file, _strip_leading_digits,
+    safe_json_save  
+)
+
+# Import Logging
+from logger import get_data_logger
+
+# Import Neural Core
+from neuraxon.network import NeuraxonNetwork, _rebuild_net_from_dict
+from neuraxon.genetics import Inheritance, InheritanceMultiSphere
+
+# Multi-Sphere Architecture (Paper Sections 7-8)
+from neuraxon.multisphere import (
+    NeuraxonMultiSphere, NeuraxonSphere, SphereInterface, SphereLink,
+    SphereLinkParameters, build_default_multisphere, build_brain,
+    save_multisphere_to_dict, load_multisphere_from_dict,
+)
+
+# Import Simulation Entities & World
+from simulation.world import World
+from simulation.entities import NxEr, NxErStats, Food, Proprioceptron
+from simulation.voice import (
+    Voice, song_classification, tone_similarity,
+    exchange_tone_on_mate, food_pitch_shift, discovery_pitch_spike,
+    compute_harmonicity,
+)
+
+# Import UI
+from ui.renderer import Renderer
+from ui.audio import AudioEngine
+
+# Import config constants
+# v4.52 PERF (#26): TEMP_DAY_WARMING hoisted to module scope to remove the
+# per-call `from config import TEMP_DAY_WARMING` inside update_body_temperature.
+from config import CIRCADIAN_CYCLE_TICKS, TEMP_BASELINE, TEMP_MIN, TEMP_MAX, TEMP_NIGHT_DROP, TEMP_ACTIVITY_GAIN, TEMP_SOCIAL_GAIN, TEMP_FOOD_GAIN, TEMP_DECAY_RATE, TEMP_BASELINE_VARIANCE, RESTING_METABOLISM_MULTIPLIER, RESTING_METABOLISM_MULT, TEMP_CIRCADIAN_CORR_WINDOW, SYNAPSE_SILENCING_ACTIVITY_THRESHOLD, TEMP_DAY_WARMING
+
+# ============================================================================
+# v4.52 PERF: Shared neighborhood offset constants
+# ============================================================================
+# Cardinal + diagonal 8-neighborhood, excluding (0,0). Used for food-sharing (O5)
+# and any other 1-ring neighbor scans. Pre-built once at import; never mutated.
+NEIGHBOR_OFFSETS: Tuple[Tuple[int, int], ...] = (
+    (-1, -1), (0, -1), (1, -1),
+    (-1,  0),          (1,  0),
+    (-1,  1), (0,  1), (1,  1),
+)
+
+# Cache of (dx, dy) offset tuples for smell/vision square-radius scans.
+# Keyed by radius; each scan for a given radius returns the SAME precomputed
+# tuple, avoiding re-iterating (2r+1)² inner ranges per agent per tick.
+_SMELL_OFFSETS_CACHE: Dict[int, Tuple[Tuple[int, int], ...]] = {}
+
+def _smell_offsets(radius: int) -> Tuple[Tuple[int, int], ...]:
+    """Return cached (dx, dy) offsets within square radius (excluding (0,0))."""
+    t = _SMELL_OFFSETS_CACHE.get(radius)
+    if t is None:
+        t = tuple(
+            (dx, dy)
+            for dy in range(-radius, radius + 1)
+            for dx in range(-radius, radius + 1)
+            if not (dx == 0 and dy == 0)
+        )
+        _SMELL_OFFSETS_CACHE[radius] = t
+    return t
+
+
+# ============================================================================
+# v4.52 PERF: CIRCADIAN LOOK-UP TABLES (#20 Precomputed Trigonometry)
+# ============================================================================
+# BIOINSPIRED INTEGRITY PRESERVED: the math below is IDENTICAL to the prior
+# dynamic compute_circadian_phase / get_circadian_modulation / metabolic
+# multiplier functions — only the evaluation path changes from math.sin/cos
+# calls at runtime to O(1) array indexing into a precomputed table.
+#
+# The circadian cycle length is known at start of a game (DayNightCycle kwarg,
+# default 2400). We build one table PER cycle length encountered, keyed by
+# integer cycle_ticks, and reuse it forever. Key (_circadian_luts) is
+# module-scoped so all games in a session share the same tables.
+#
+# Each LUT entry stores, for tick index i in [0, cycle_ticks):
+#   phase          = i / cycle_ticks
+#   day_mod        = max(0, cos(2π * (phase - 0.25)))   # peak at noon
+#   night_mod      = max(0, cos(2π * (phase - 0.75)))   # peak at midnight
+#   metab_mult     = 0.95 + 0.25 * clip(cos(2π * (phase - 0.25)), -1, 1)
+#   night_intensity = sin(π * (phase - 0.5) * 2) if phase >= 0.5 else 0.0
+#   day_intensity   = sin(π * phase * 2)           if phase < 0.5 else 0.0
+#
+# Values are identical to a function-call path up to floating-point
+# round-off. The tables are built once with np arrays and kept as tuples of
+# floats for sub-microsecond Python-level access.
+
+_circadian_luts: Dict[int, dict] = {}
+
+def _build_circadian_lut(cycle_ticks: int) -> dict:
+    """Build and cache a circadian LUT for the given cycle length.
+
+    Returns a dict of parallel numpy arrays indexed by (tick % cycle_ticks).
+    Science-neutral: values exactly match the prior dynamic sin/cos compute.
+    """
+    ct = max(1, int(cycle_ticks))
+    if ct in _circadian_luts:
+        return _circadian_luts[ct]
+    # Phase per integer tick in [0, cycle_ticks)
+    idx = np.arange(ct, dtype=np.float64)
+    phases = idx / ct
+    two_pi = 2.0 * math.pi
+    day_signal = np.cos(two_pi * (phases - 0.25))
+    night_signal = np.cos(two_pi * (phases - 0.75))
+    day_mod = np.maximum(0.0, day_signal)
+    night_mod = np.maximum(0.0, night_signal)
+    metab_mult = 0.95 + 0.25 * np.clip(day_signal, -1.0, 1.0)
+    # night_intensity only valid for phase >= 0.5 (else 0)
+    night_mask = phases >= 0.5
+    night_intensity = np.zeros_like(phases)
+    night_intensity[night_mask] = np.sin(math.pi * (phases[night_mask] - 0.5) * 2.0)
+    # day_intensity only valid for phase < 0.5 (else 0)
+    day_mask = phases < 0.5
+    day_intensity = np.zeros_like(phases)
+    day_intensity[day_mask] = np.sin(math.pi * phases[day_mask] * 2.0)
+    lut = {
+        'cycle_ticks': ct,
+        'phases': phases.tolist(),
+        'day_mod': day_mod.tolist(),
+        'night_mod': night_mod.tolist(),
+        'metab_mult': metab_mult.tolist(),
+        'night_intensity': night_intensity.tolist(),
+        'day_intensity': day_intensity.tolist(),
+    }
+    _circadian_luts[ct] = lut
+    return lut
+
+
+def _circadian_phase_from_tick(tick: int, cycle_ticks: int) -> float:
+    """Fast O(1) replacement for compute_circadian_phase(tick, cycle_ticks)."""
+    # Single modulo + division — identical output to the prior function.
+    return (tick % cycle_ticks) / cycle_ticks
+
+
+def _get_circadian_mods_for_tick(tick: int, lut: dict) -> Tuple[float, float, float, float]:
+    """Return (dopamine, serotonin, norepinephrine, acetylcholine) additive
+    modulations — identical to the old get_circadian_modulation() dict, but
+    via LUT. Returns a tuple rather than a dict to avoid per-tick allocation.
+    The caller can unpack as needed.
+    """
+    i = tick % lut['cycle_ticks']
+    d_mod = lut['day_mod'][i]
+    n_mod = lut['night_mod'][i]
+    return (d_mod * 0.02, n_mod * 0.03, d_mod * 0.015, d_mod * 0.012)
+
+
+def _get_circadian_metabolic_mult(tick: int, lut: dict) -> float:
+    """O(1) lookup replacement for get_circadian_metabolic_multiplier(phase)."""
+    return lut['metab_mult'][tick % lut['cycle_ticks']]
+
+# ============================================================================
+# v4.1: SPATIAL HASH GRID — O(1) neighbor lookups (was O(r²) per agent)
+# ============================================================================
+
+class SpatialGrid:
+    """Grid-based spatial index for O(1) neighbor queries."""
+    __slots__ = ('cell_size', 'world_n', 'grid', '_pos_to_id')
+    
+    def __init__(self, world_n, cell_size=4):
+        self.cell_size = cell_size
+        self.world_n = world_n
+        self.grid = {}
+        self._pos_to_id = {}
+    
+    def _cell(self, pos):
+        return (pos[0] // self.cell_size, pos[1] // self.cell_size)
+    
+    def clear(self):
+        self.grid.clear()
+        self._pos_to_id.clear()
+    
+    def insert(self, eid, pos):
+        # v4.52 PERF: setdefault() collapses "if c not in grid: grid[c]=set()" to one lookup.
+        cs = self.cell_size
+        c = (pos[0] // cs, pos[1] // cs)
+        self.grid.setdefault(c, set()).add(eid)
+        self._pos_to_id[pos] = eid
+    
+    def remove(self, eid, pos):
+        c = self._cell(pos)
+        bucket = self.grid.get(c)
+        if bucket:
+            bucket.discard(eid)
+            if not bucket:
+                del self.grid[c]
+        self._pos_to_id.pop(pos, None)
+    
+    def move(self, eid, old_pos, new_pos):
+        self.remove(eid, old_pos)
+        self.insert(eid, new_pos)
+    
+    def occupant_at(self, pos):
+        return self._pos_to_id.get(pos)
+    
+    def count_nearby(self, pos, radius=2):
+        """Count entities within radius. O(cells_in_radius) amortized.
+        v4.52 PERF: hoist cs + grid_get to locals — called per-agent per-tick."""
+        cs = self.cell_size
+        grid_get = self.grid.get
+        cx0 = (pos[0] - radius) // cs
+        cx1 = (pos[0] + radius) // cs
+        cy0 = (pos[1] - radius) // cs
+        cy1 = (pos[1] + radius) // cs
+        count = 0
+        for cx in range(cx0, cx1 + 1):
+            for cy in range(cy0, cy1 + 1):
+                bucket = grid_get((cx, cy))
+                if bucket:
+                    count += len(bucket)
+        if self._pos_to_id.get(pos) is not None:
+            count -= 1
+        return max(0, count)
+
+# ============================================================================
+# v4.0: AUTORECEPTOR NEGATIVE FEEDBACK SYSTEM
+# ============================================================================
+# BIOINSPIRED: Presynaptic autoreceptors (5-HT1A, α2-adrenergic, D2-short)
+# detect high synaptic neurotransmitter concentration and reduce vesicle release.
+# This prevents runaway accumulation at the ceiling (2.0) by scaling down the
+# effective release magnitude as concentration rises.
+# Reference: Bhatt et al. (2021) "Autoreceptor modulation of monoamine systems"
+
+def _autoreceptor_scale(current_level, ceiling=2.0, strength=1.0):
+    """Return [0.05, 1.0] scaling factor — high levels suppress further release."""
+    ratio = current_level / ceiling
+    return max(0.05, 1.0 - strength * ratio * ratio)
+
+def _neuromod_boost(neuromodulators, mod, raw_boost, params=None, ceiling=2.0):
+    """Apply a neuromodulator boost with autoreceptor negative feedback."""
+    current = neuromodulators.get(mod, 0.12)
+    strength = getattr(params, 'autoreceptor_strength', 1.0) if params else 1.0
+    scale = _autoreceptor_scale(current, ceiling, strength)
+    neuromodulators[mod] = min(ceiling, current + raw_boost * scale)
+
+# ============================================================================
+# CIRCADIAN RHYTHM SYSTEM (NEW v3.0)
+# ============================================================================
+# BIOINSPIRED: The suprachiasmatic nucleus (SCN) drives circadian rhythms
+# affecting nearly every aspect of physiology and behavior.
+
+def compute_circadian_phase(tick: int, cycle_ticks: int) -> float:
+    """
+    Compute current circadian phase [0, 1) from simulation tick.
+    
+    Phase mapping:
+    0.00 - 0.25: Dawn to Noon (increasing activity)
+    0.25 - 0.50: Noon to Dusk (peak activity, then declining)
+    0.50 - 0.75: Dusk to Midnight (transition to rest)
+    0.75 - 1.00: Midnight to Dawn (deep rest)
+    """
+    return (tick % cycle_ticks) / cycle_ticks
+
+def get_circadian_modulation(phase: float) -> dict:
+    """
+    Calculate neuromodulator adjustments based on circadian phase.
+    
+    BIOINSPIRED:
+    - Dopamine: Peaks during day (reward-seeking behavior)
+    - Serotonin: Elevated at night (converted to melatonin for sleep)
+    - Norepinephrine: Higher during day (alertness, arousal)
+    - Acetylcholine: Peaks during active waking and REM sleep
+    
+    Returns dict of additive modulation values.
+    """
+    # v4.52 PERF (#26): removed `import math` — math is already imported at module scope.
+
+    # Day phase peaks at 0.25 (noon), night phase peaks at 0.75 (midnight)
+    day_signal = math.cos(2 * math.pi * (phase - 0.25))  # Max at phase=0.25
+    night_signal = math.cos(2 * math.pi * (phase - 0.75))  # Max at phase=0.75
+    
+    # Clamp to [0, 1] range
+    day_mod = max(0, day_signal)
+    night_mod = max(0, night_signal)
+    
+    # v109 FIX: Further reduced to 10-15% of baseline (biologically accurate).
+    # SCN circadian output in biology shifts tonic baselines by ~10-20%,
+    # not by 50-80% as v108 values did relative to 0.12-0.15 baselines.
+    # These values now add at most 0.02/tick, well within the decay budget.
+    return {
+        'dopamine': day_mod * 0.02,
+        'serotonin': night_mod * 0.03,
+        'norepinephrine': day_mod * 0.015,
+        'acetylcholine': day_mod * 0.012,
+    }
+
+def get_circadian_metabolic_multiplier(phase: float) -> float:
+    """
+    Calculate metabolic rate multiplier based on circadian phase.
+    
+    BIOINSPIRED: Basal metabolic rate follows circadian patterns,
+    being higher during active periods and lower during rest.
+    """
+    # v4.52 PERF (#26): removed `import math` (already at module scope).
+    day_signal = math.cos(2 * math.pi * (phase - 0.25))
+    # Range: 0.7 (night) to 1.2 (day)
+    return 0.95 + 0.25 * max(-1, min(1, day_signal))
+
+def is_night_phase(phase: float) -> bool:
+    """Check if current phase is considered 'night' (rest period)."""
+    return phase >= 0.5  # Night is 50%-100% of cycle
+
+# ============================================================================
+# TEMPERATURE SYSTEM (NEW v3.0)
+# ============================================================================
+# BIOINSPIRED: Body temperature affects virtually all biochemical processes.
+# Enzyme kinetics follow Q10 rules, neural firing rates change with temperature,
+# and temperature homeostasis is crucial for survival.
+
+def update_body_temperature(nxer, params, step_tick: int, 
+                            circadian_phase: float, 
+                            nearby_nxers_count: int,
+                            just_ate: bool,
+                            just_moved: bool) -> float:
+    """
+    Update NxEr body temperature based on multiple factors.
+    
+    BIOINSPIRED factors:
+    - Circadian rhythm (core temp drops at night)
+    - Activity level (movement generates heat)
+    - Social proximity (huddling for warmth)
+    - Food consumption (thermogenic effect of digestion)
+    - Ambient decay toward baseline
+    
+    Returns new temperature.
+    """
+    # v4.52 PERF (#26): removed `import math` and inline `from config import
+    # TEMP_DAY_WARMING` — both now at module scope.
+
+    current_temp = getattr(nxer, 'body_temperature', params.temperature_baseline)
+    # v4.0: Individual baseline with variance (kept from v3.3)
+    baseline = getattr(nxer, '_temp_baseline_individual', params.temperature_baseline)
+    
+    # v4.0: Circadian effect — MUCH stronger coupling
+    # Results-97: circadian_phase vs body_temp r=-0.106 (still very weak)
+    # FIX: TEMP_NIGHT_DROP 2.5→4.0, explicit TEMP_DAY_WARMING=1.5
+    night_drop = 0.0
+    if is_night_phase(circadian_phase):
+        night_intensity = math.sin(math.pi * (circadian_phase - 0.5) * 2)
+        night_drop = -TEMP_NIGHT_DROP * night_intensity
+    else:
+        # v4.0: Day warming — stronger, uses new TEMP_DAY_WARMING constant
+        day_intensity = math.sin(math.pi * circadian_phase * 2) if circadian_phase < 0.5 else 0.0
+        # v4.52: module-level TEMP_DAY_WARMING (no per-call inline import).
+        day_warm = getattr(nxer, '_config_temp_day_warming', None)
+        if day_warm is None:
+            day_warm = TEMP_DAY_WARMING
+        night_drop = day_warm * day_intensity  # Positive = warming during day
+    
+    # v4.0: Activity heat (kept from v3.3)
+    activity_heat = TEMP_ACTIVITY_GAIN if just_moved else -0.15
+    
+    # Social warmth
+    social_heat = min(TEMP_SOCIAL_GAIN * nearby_nxers_count, 0.8)
+    
+    # Food heat
+    food_heat = TEMP_FOOD_GAIN if just_ate else 0.0
+    
+    # v4.0: Resting reduces temperature (increased from -0.4 to -0.6)
+    rest_cooling = -0.6 if getattr(nxer, 'is_resting', False) else 0.0
+    
+    # Calculate target temperature
+    target_temp = baseline + night_drop + activity_heat + social_heat + food_heat + rest_cooling
+    
+    # v4.0: Decay toward target (kept from v3.3)
+    new_temp = current_temp + TEMP_DECAY_RATE * (target_temp - current_temp)
+    
+    # Clamp to biological limits
+    return max(params.temperature_min, min(params.temperature_max, new_temp))
+
+def get_temperature_neural_effects(temperature: float, baseline: float = 37.0) -> dict:
+    """
+    Calculate neural effects of body temperature deviation.
+    
+    BIOINSPIRED: Q10 effect - metabolic/neural rates roughly double per 10°C.
+    Fever increases activity, hypothermia decreases it.
+    """
+    temp_deviation = temperature - baseline
+    
+    # Firing threshold modifier: lower threshold when warm (easier to fire)
+    threshold_mod = -0.02 * temp_deviation
+    
+    # Metabolic modifier: Q10 effect
+    q10_factor = 2.0 ** (temp_deviation / 10.0)
+    metabolic_mod = q10_factor
+    
+    # Spontaneous firing: increases with temperature
+    spontaneous_mod = 1.0 + 0.1 * temp_deviation
+    
+    return {
+        'threshold_mod': threshold_mod,
+        'metabolic_mod': metabolic_mod,
+        'spontaneous_mod': max(0.5, min(2.0, spontaneous_mod))
+    }
+
+def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: float = 0.05, 
+               StartingNxErs: int = 30, MaxNxErs: int = 400, MaxFood: int = 300, 
+               FoodRespan: int = 600, StartFood: float = 40.0, MaxNeurons: int = 12, 
+               GlobalTimeSteps: int = 60, DayNightCycle: int = 2400, TextureLand: Optional[str] = None, 
+               TextureSea: Optional[str] = None, TextureRock: Optional[str] = None, 
+               TextureFood: Optional[str] = None, TextureNxEr: Optional[str] = None, 
+               TexturesAlpha: float = 0.7, MateCooldownSeconds: int = 10, 
+               random_seed: Optional[int] = None, limit_minutes: Optional[int] = None, 
+               auto_save: bool = False, auto_save_prefix: str = "", 
+               auto_start: bool = False, save_on_round_end: bool = True,
+               max_rounds: Optional[int] = None, round_time_limit: Optional[int] = None,
+               save_full_logs: bool = False):  # v153 (v4.61) — opt-in full-log persistence  
+    """
+    The main function that initializes and runs the entire Game of Life simulation.
+    """
+    # Clamp parameters
+    NxWorldSize = _clamp(int(NxWorldSize), 30, 1000)
+    NxWorldSea = _clamp(float(NxWorldSea), 0.0, 0.95)
+    NxWorldRocks = _clamp(float(NxWorldRocks), 0.0, 0.9)
+    StartingNxErs = _clamp(int(StartingNxErs), 1, 150)
+    MaxNxErs = _clamp(int(MaxNxErs), 100, 50000) # v4.1: Raised from 180 — optimized engine handles 10K+
+    MaxFood = _clamp(int(MaxFood), 10, 1000)
+    FoodRespan = _clamp(int(FoodRespan), 10, 3000)
+    StartFood = _clamp(float(StartFood), 10.0, 250.0)
+    MaxNeurons = _clamp(int(MaxNeurons), 1, 50)
+    GlobalTimeSteps = _clamp(int(GlobalTimeSteps), 30, 300)
+    MateCooldownSeconds = _clamp(int(MateCooldownSeconds), 0, 300)
+
+    # v178 (v4.86) — biology.mate_cooldown_seconds and
+    # biology.circadian_cycle_ticks were sampled/logged by NAS but never
+    # read from the architecture: NAS_TRIAL_CONFIG pins DayNightCycle=2400 /
+    # MateCooldownSeconds=10 for every trial, and these kwargs were the only
+    # source. Override from the architecture here (BEFORE mate_cooldown_ticks
+    # and circadian_cycle_ticks are derived below). Fallback = the clamped
+    # kwarg value, so no architecture key / no architecture loaded reproduces
+    # pre-v178 behaviour exactly. Same get_param pattern as the other
+    # biology.* params (metabolic_ramp etc.).
+    try:
+        from architecture import get_param as _arch_get_bio
+        _mcs = _arch_get_bio('biology', 'mate_cooldown_seconds', None)
+        if _mcs is not None:
+            MateCooldownSeconds = _clamp(int(round(float(_mcs))), 0, 300)
+        _cct = _arch_get_bio('biology', 'circadian_cycle_ticks', None)
+        if _cct is not None:
+            DayNightCycle = _clamp(int(round(float(_cct))), 60, 100000)
+    except Exception as _exc_bio:
+        print(f"[game_loop] v178 biology wiring failed "
+              f"(using kwarg defaults): {_exc_bio}", flush=True)
+    
+    if random_seed is not None: random.seed(int(random_seed))
+    
+    mate_cooldown_ticks = MateCooldownSeconds * GlobalTimeSteps
+    textures = {"TextureLand": TextureLand, "TextureSea": TextureSea, "TextureRock": TextureRock, "TextureFood": TextureFood, "TextureNxEr": TextureNxEr}
+    
+    # Initialize Core Components
+    world = World(NxWorldSize, NxWorldSea, NxWorldRocks, rnd_seed=random_seed)
+    renderer = Renderer(world, textures, TexturesAlpha)
+    # v4.5: Audio engine — OFF by default, toggle with M key.
+    audio_engine = AudioEngine(enabled=False)
+    renderer.audio_engine = audio_engine  # so renderer can show a status hint
+    nxers: Dict[int, NxEr] = {}
+    foods: Dict[int, Food] = {}
+    occupied = set()
+    # v4.1: Spatial hash grids for O(1) position lookups
+    _agent_grid = SpatialGrid(NxWorldSize, cell_size=max(4, NxWorldSize // 64))
+    _food_grid = SpatialGrid(NxWorldSize, cell_size=max(4, NxWorldSize // 64))
+    births_count = 0
+    deaths_count = 0
+    effects: List[dict] = []
+    champion_counts: Dict[str, int] = {}
+    game_index = 1
+    
+    # Initialize session globals
+    if config._session_id is None:
+        _reset_session_globals()
+    config._current_round = game_index
+    config._game_id = "nxon2_" + "".join([str(random.randint(0, 9)) for _ in range(9)])
+
+    all_time_best: Dict[str, List[NxEr]] = {'food_found': [], 'food_taken': [], 'explored': [], 'time_lived_s': [], 'mates_performed': [], 'fitness_score': [], 'g_factor': []}
+
+    # v4.52 PERF (#StaticFoodSet): persistent set of live food positions —
+    # maintained incrementally by place_initial_food / try_respawns /
+    # schedule_respawn. Previously rebuilt from scratch every tick as
+    #   food_at = {f.pos for f in foods.values() if f.alive}
+    # which scaled O(|foods|) per tick. Now O(1) amortized. Science-neutral:
+    # identical membership semantics — the set is only read by
+    # `(tx, ty) in food_at` in the vision raycast and similar membership
+    # checks, no sort-order dependency.
+    food_at: Set[Tuple[int, int]] = set()
+    
+    # --- CLAN & DIRECTION GLOBALS ---
+    # 0=NW, 1=N, 2=NE, 3=E, 4=SE, 5=S, 6=SW, 7=W
+    DIR_OFFSETS = {
+        0: (-1, -1), 1: (0, -1), 2: (1, -1),
+        3: (1, 0),               7: (-1, 0),
+        4: (1, 1),   5: (0, 1),  6: (-1, 1)
+    }
+
+    # =========================================================================
+    # CIRCADIAN SYSTEM INITIALIZATION (NEW v3.0)
+    # v4.52 PERF (#LUT): precompute all circadian curves once at game start.
+    # The tables are module-cached so subsequent games with the same cycle
+    # length reuse the arrays immediately (no rebuild cost).
+    # =========================================================================
+    circadian_cycle_ticks = DayNightCycle
+    circadian_enabled = getattr(NetworkParameters(), 'circadian_enabled', True)
+
+    # Build + hoist LUT columns to local names for fast inner-loop indexing.
+    _circ_lut = _build_circadian_lut(circadian_cycle_ticks)
+    _circ_phases           = _circ_lut['phases']
+    _circ_day_mod          = _circ_lut['day_mod']
+    _circ_night_mod        = _circ_lut['night_mod']
+    _circ_metab_mult       = _circ_lut['metab_mult']
+    _circ_night_intensity  = _circ_lut['night_intensity']
+    _circ_day_intensity    = _circ_lut['day_intensity']
+
+    # Global circadian phase (all NxErs share the same day/night cycle)
+    global_circadian_phase = 0.0
+
+    # v4.52 PERF (#inline): wrap_pos is called millions of times per game by
+    # vision raycasts and movement. The closure-scope function call costs ~200ns
+    # on CPython; the hot paths below now inline `(x % world.N, y % world.N)`
+    # directly. The wrapper is KEPT for lukewarm paths (find_free, mating,
+    # loaders) where readability wins. `_wN` is the cached world size used by
+    # inline modulo sites.
+    _wN = world.N
+    def wrap_pos(p: Tuple[int, int]) -> Tuple[int, int]: return (p[0] % _wN, p[1] % _wN)
+
+    def _heading_would_be_blocked(agent: NxEr, heading: int) -> bool:
+        """One-step lookahead used to expose pre-motor obstacle warnings to the brain."""
+        dx, dy = DIR_OFFSETS.get(int(heading), (0, 0))
+        target = wrap_pos((agent.pos[0] + dx, agent.pos[1] + dy))
+        tt = world.terrain(target)
+        if tt == T_ROCK:
+            return True
+        if tt == T_LAND and not agent.can_land:
+            return True
+        if tt == T_SEA and not agent.can_sea:
+            return True
+        occ = _agent_grid.occupant_at(target)
+        return occ is not None and occ != agent.id
+    
+    def find_free(allow_sea=True, allow_land=True, forbid=None, near=None, search_radius=5):
+        """Finds a valid, unoccupied coordinate in the world, optionally near a specific point."""
+        forbid = forbid or set()
+        if near is not None:
+            nx, ny = near
+            for r in range(0, max(2, search_radius)):
+                cand = []
+                for dy in range(-r, r + 1):
+                    for dx in range(-r, r + 1):
+                        x, y = wrap_pos((nx + dx, ny + dy))
+                        if (x, y) in forbid or (x, y) in occupied: continue
+                        t = world.terrain((x, y))
+                        if t == T_ROCK or (t == T_LAND and not allow_land) or (t == T_SEA and not allow_sea): continue
+                        cand.append((x, y))
+                random.shuffle(cand)
+                for c in cand: return c
+            return None
+        else:
+            for _ in range(4000): # Try a number of random positions.
+                x = random.randrange(world.N)
+                y = random.randrange(world.N)
+                if (x, y) in forbid or (x, y) in occupied: continue
+                t = world.terrain((x, y))
+                if t == T_ROCK or (t == T_LAND and not allow_land) or (t == T_SEA and not allow_sea): continue
+                return (x, y)
+            return None
+            
+    def place_initial_food(count):
+        """Populates the world with the initial set of food sources.
+
+        v4.52 PERF (#StaticFoodSet): also refreshes the persistent food_at set
+        so the per-tick `in food_at` lookups stay in sync.
+        """
+        foods.clear()
+        food_at.clear()  # persistent set — keep identity, update contents
+        for i in range(count):
+            p = find_free(allow_sea=True, allow_land=True)
+            if not p: break
+            foods[i] = Food(id=i, anchor=p, pos=p, alive=True, respawn_at_tick=None, remaining=25, progress={})
+            food_at.add(p)
+    
+    place_initial_food(min(MaxFood, max(30, MaxFood // 2)))
+    used_colors = set(RESERVED_COLORS)
+    
+    def _random_params(hidden_max: int) -> NetworkParameters:
+        """Creates a randomized set of network parameters WITH BIOLOGICAL CORRELATIONS."""
+        # v162-v163 — read genetic_lottery section so per-NxEr trait ranges
+        # become architecture-controlled (not hardcoded). This is the path
+        # to non-zero M10 heritability: NAS can widen these ranges to
+        # maximize diversity that selection acts on. v163 wires three
+        # genetic_lottery params:
+        #   - metabolic_rate_multiplier_range  (v162)
+        #   - intrinsic_timescale_jitter       (v163 — applied to firing
+        #     threshold & timescale at neuron-level; here we set the param
+        #     so the network builder uses it)
+        #   - firing_threshold_jitter          (v163 — same)
+        # The fourth (mutation_strength) is wired separately in
+        # neuraxon/genetics.py (Inheritance() blend variation).
+        try:
+            from architecture import get_param as _arch_get
+            _mr_range = _arch_get('genetic_lottery', 'metabolic_rate_multiplier_range', [0.6, 1.2])
+            if not (isinstance(_mr_range, (list, tuple)) and len(_mr_range) == 2):
+                _mr_range = [0.6, 1.2]
+            _mr_lo, _mr_hi = float(_mr_range[0]), float(_mr_range[1])
+            if _mr_lo > _mr_hi: _mr_lo, _mr_hi = _mr_hi, _mr_lo
+            
+            # v163 — intrinsic_timescale jitter: ±this around the architecture default
+            _ts_jitter = float(_arch_get('genetic_lottery', 'intrinsic_timescale_jitter', 0.0))
+            _ts_jitter = max(0.0, min(15.0, _ts_jitter))   # clamp to sane bounds
+            
+            # v163 — firing_threshold jitter: ±this around the architecture default
+            _thr_jitter = float(_arch_get('genetic_lottery', 'firing_threshold_jitter', 0.0))
+            _thr_jitter = max(0.0, min(0.20, _thr_jitter)) # clamp (thresholds are ~0.5)
+        except Exception:
+            _mr_lo, _mr_hi = 0.6, 1.2
+            _ts_jitter = 0.0
+            _thr_jitter = 0.0
+        
+        p = NetworkParameters(network_name="Neuraxon NxEr", num_input_neurons=10, num_hidden_neurons=random.randint(3, hidden_max), num_output_neurons=7)
+        
+        # --- Network Topology ---
+        p.connection_probability = random.uniform(0.06, 0.19) 
+        p.small_world_k = random.randint(4, 10)
+        p.small_world_rewire_prob = random.uniform(0.08, 0.25)
+        p.preferential_attachment = random.choice([True, False])
+        
+        # --- Core Neuron Properties ---
+        # v163 — apply ±intrinsic_timescale_jitter as a per-NxEr genetic lottery
+        # on top of the base distribution. The base range is wide; the jitter
+        # is the architecture-controlled diversity dimension that inheritance
+        # will preserve (and mutate via mutation_strength) at mating.
+        p.membrane_time_constant = random.uniform(9.0, 48.0) + random.uniform(-_ts_jitter, _ts_jitter)
+        p.membrane_time_constant = max(5.0, min(60.0, p.membrane_time_constant))
+        # v132 FIX (M6+M12): Rolled back θ_exc to v130 values.
+        # v131 pushed [0.55, 0.80] which got E from 54%→49% but regressed M12
+        # from B(0.83) to D(0.42) — the higher threshold eliminated the gap
+        # between spontaneous and driven activity. v130's [0.45, 0.65] was the
+        # sweet spot that kept M12=B while getting M7=A and M27=A.
+        # The remaining E reduction is achieved via resting_potential_decay (config.py).
+        # v163 — apply ±firing_threshold_jitter on TOP of the existing per-NxEr
+        # variation. This creates a genetic-lottery dimension that survives
+        # mating (inheritance.blend uses mutation_strength variance).
+        p.firing_threshold_excitatory = random.uniform(0.45, 0.65) + random.uniform(-_thr_jitter, _thr_jitter)
+        p.firing_threshold_inhibitory = random.uniform(-0.60, -0.40) + random.uniform(-_thr_jitter, _thr_jitter)
+        # Clamp to sane bounds so an extreme jitter can't push thresholds across zero
+        p.firing_threshold_excitatory = max(0.20, min(0.85, p.firing_threshold_excitatory))
+        p.firing_threshold_inhibitory = max(-0.85, min(-0.20, p.firing_threshold_inhibitory))
+        p.adaptation_rate = random.uniform(0.0, 0.2)        
+        # v130 FIX (M6): Spontaneous rate [0.02, 0.08] was 5-15x too high.
+        # Config.py had 0.003 but _random_params() overwrote it.
+        # New range [0.002, 0.01] provides state exploration without
+        # chronically biasing the membrane above θ_exc.
+        p.spontaneous_firing_rate = random.uniform(0.002, 0.01)
+        p.neuron_health_decay = random.uniform(0.0001, 0.005)  
+        
+        # --- Dendritic Branch Properties ---
+        p.num_dendritic_branches = random.randint(2, 6)
+        p.branch_threshold = random.uniform(0.4, 0.8)
+        p.plateau_decay = random.uniform(200.0, 800.0)
+        
+        # --- SYNAPTIC TIME CONSTANTS ---        
+        p.tau_fast = random.uniform(2.0, 8.0)
+        p.tau_slow = p.tau_fast * random.uniform(5, 12) 
+        p.tau_meta = random.uniform(270, 2900) 
+        p.tau_ltp = random.uniform(10.0, 25.0)
+        p.tau_ltd = p.tau_ltp * random.uniform(1.5, 3.0)  
+        
+        # --- Synaptic Weight Initialization ---
+        p.w_fast_init_min = random.uniform(0.1, 0.3)
+        p.w_fast_init_max = random.uniform(0.8, 1.2)
+        p.w_slow_init_min = random.uniform(-0.8, -0.3)
+        p.w_slow_init_max = random.uniform(0.3, 0.8)
+        p.w_meta_init_min = random.uniform(-0.5, -0.1)
+        p.w_meta_init_max = random.uniform(0.1, 0.5)
+        
+        # --- Learning and Plasticity ---
+        p.learning_rate = random.uniform(0.005, 0.038) 
+        p.stdp_window = random.uniform(15.0, 40.0)
+        p.plasticity_threshold = random.uniform(0.3, 0.7)
+        p.associativity_strength = random.uniform(0.05, 0.2)
+        
+        # --- Structural Plasticity ---
+        p.synapse_integrity_threshold = random.uniform(0.05, 0.2)
+        p.synapse_formation_prob = random.uniform(0.02, 0.06)
+        p.synapse_death_prob = random.uniform(0.0001, 0.0005)
+        p.neuron_death_threshold = random.uniform(0.05, 0.2)
+        
+        # neuromodulators baseline levels
+        base_neuromod = random.uniform(0.10, 0.22)  
+        p.dopamine_baseline = base_neuromod * random.uniform(0.85, 1.15)
+        p.serotonin_baseline = base_neuromod * random.uniform(0.85, 1.15)
+        p.acetylcholine_baseline = base_neuromod * random.uniform(0.85, 1.15)
+        p.norepinephrine_baseline = base_neuromod * random.uniform(0.85, 1.15)
+        
+        # --- Neuromodulator Affinity Thresholds ---
+        p.dopamine_high_affinity_threshold = random.uniform(0.005, 0.05)
+        p.dopamine_low_affinity_threshold = random.uniform(0.5, 1.5)
+        p.serotonin_high_affinity_threshold = random.uniform(0.005, 0.05)
+        p.serotonin_low_affinity_threshold = random.uniform(0.5, 1.5)
+        p.acetylcholine_high_affinity_threshold = random.uniform(0.005, 0.05)
+        p.acetylcholine_low_affinity_threshold = random.uniform(0.5, 1.5)
+        p.norepinephrine_high_affinity_threshold = random.uniform(0.005, 0.05)
+        p.norepinephrine_low_affinity_threshold = random.uniform(0.5, 1.5)
+        
+        # v110 FIX (M18): Evolution range [0.005,0.05]→[0.10,0.35].
+        # Old range was 3-30× weaker than default (0.15), ensuring every
+        # evolved offspring had critically insufficient decay.
+        p.neuromod_decay_rate = random.uniform(0.10, 0.35)
+        # v4.0: Evolvable reuptake transporter kinetics
+        p.reuptake_vmax_ne = random.uniform(0.05, 0.12)
+        p.reuptake_vmax_da = random.uniform(0.03, 0.08)
+        p.reuptake_vmax_5ht = random.uniform(0.02, 0.05)
+        p.reuptake_vmax_ach = random.uniform(0.06, 0.15)
+        p.reuptake_km = random.uniform(0.3, 0.8)
+        p.autoreceptor_strength = random.uniform(0.7, 1.3)
+        p.diffusion_rate = random.uniform(0.01, 0.05) 
+        
+        # --- Oscillators & Synchronization ---
+        p.oscillator_low_freq = random.uniform(0.04, 0.12)
+        p.oscillator_mid_freq = random.uniform(0.5, 1.2)
+        p.oscillator_high_freq = random.uniform(2.5, 5.0)
+        p.oscillator_strength = random.uniform(0.12, 0.30)  
+        p.phase_coupling_strength = random.uniform(0.10, 0.25)  
+                
+        # Higher metabolism needs more energy baseline and faster recovery
+        # v162 — _mr_lo / _mr_hi come from architecture's genetic_lottery
+        # section (see top of _random_params). Default (0.6, 1.2) preserves
+        # pre-v162 behaviour exactly.
+        p.metabolic_rate = random.uniform(_mr_lo, _mr_hi)
+        p.energy_baseline = 80 + 35 * p.metabolic_rate 
+        p.recovery_rate = 0.35 + 0.35 * p.metabolic_rate  
+        p.firing_energy_cost = random.uniform(2.0, 6.0)  
+        p.plasticity_energy_cost = random.uniform(5.0, 12.0)
+        
+        # --- Homeostasis ---
+        p.target_firing_rate = random.uniform(0.05, 0.2)
+        p.homeostatic_plasticity_rate = random.uniform(0.0005, 0.003)
+        
+        # --- Aigarth/ITU Evolution ---
+        p.itu_circle_radius = random.randint(7, 14)  
+        p.evolution_interval = random.randint(510, 1700) 
+        
+        # Normalize fitness weights to sum to ~1.0
+        ft = random.uniform(0.2, 0.5)
+        fe = random.uniform(0.2, 0.4)
+        fp = 1.0 - ft - fe
+        p.fitness_temporal_weight = ft
+        p.fitness_energy_weight = fe
+        p.fitness_pattern_weight = max(0.1, fp)
+        
+        # --- Miscellaneous ---
+        p.max_axonal_delay = random.uniform(5.0, 15.0)
+        p.activity_threshold = random.uniform(0.3, 0.7)
+        
+        # --- NEW v3.1: Brain-Instinct Balance ---
+        p.brain_movement_base_weight = random.uniform(0.5, 0.9)
+        p.brain_rest_override_threshold = random.uniform(0.2, 0.4)
+        p.circadian_rest_tendency = random.uniform(0.5, 0.85)
+        p.temp_cold_threshold = random.uniform(34.5, 36.0)
+        p.temp_hot_threshold = random.uniform(38.0, 39.5)
+        p.temp_movement_bonus = random.uniform(0.1, 0.25)
+        
+        # --- Temporal/Simulation ---
+        p.dt = 1.0
+        p.simulation_steps = random.randint(10, max(20, 2 * GlobalTimeSteps))
+        
+        # === v175 (v4.83) CRITICAL BUGFIX — wire architecture `neural`
+        # section onto the per-NxEr params. ===
+        #
+        # Root cause (found from byte-identical lifespan logs across
+        # v172→v174 despite code changes): game_loop builds the NxEr's
+        # NetworkParameters here and pulled the biology + genetic_lottery
+        # sections from the architecture via _arch_get, but NEVER the
+        # `neural` section. The only neural param that worked was
+        # sensorimotor_coupling, because network.py reads it directly from
+        # the arch dict. Everything else (symmetric_stdp, refractory_period_
+        # ticks, post_spike_mp_reset) is read via getattr(params, ...) in
+        # components.py / neuron.py — and nothing ever SET those attributes
+        # from the architecture. They silently used the config.py dataclass
+        # defaults (False / 0 / 0.0) on EVERY trial, regardless of what NAS
+        # sampled. This made v169 symmetric_stdp, v171 refractory, v172 AHP,
+        # v173 complement reset, and v174 ungating all dead no-ops — the
+        # NAS A/B columns recorded the SAMPLED values but the simulation
+        # always ran with the defaults. Deterministic seed + dead code =
+        # the byte-identical results the user correctly flagged.
+        #
+        # Fix: explicitly copy the architecture-controlled neural knobs onto
+        # `p` here, with the config default as fallback (so an absent key or
+        # missing architecture preserves prior behaviour exactly). These are
+        # the architecture-level neural parameters that are meant to be
+        # NAS-controlled (not per-NxEr randomised like connection_probability
+        # or firing thresholds, which game_loop deliberately samples above).
+        try:
+            from architecture import get_param as _arch_get
+            # v169 — symmetric STDP opt-in (MultiNeuraxon2 Bug #3)
+            p.symmetric_stdp = bool(_arch_get(
+                'neural', 'symmetric_stdp',
+                getattr(p, 'symmetric_stdp', False)))
+            # v171 — refractory period (state 0 buffer)
+            _rp = _arch_get('neural', 'refractory_period_ticks',
+                            getattr(p, 'refractory_period_ticks', 0))
+            p.refractory_period_ticks = max(0, int(_rp))
+            # v172 — post-spike mp reset (after-hyperpolarization)
+            _psr = _arch_get('neural', 'post_spike_mp_reset',
+                             getattr(p, 'post_spike_mp_reset', 0.0))
+            p.post_spike_mp_reset = max(0.0, min(1.0, float(_psr)))
+        except Exception as _exc:
+            # On any failure, leave the config.py defaults in place — this
+            # preserves pre-v175 behaviour rather than crashing the spawn.
+            print(f"[game_loop] v175 neural-param wiring failed "
+                  f"(using config defaults): {_exc}", flush=True)
+
+        # === v178 (v4.86) CRITICAL BUGFIX — wire the ~11 remaining dead
+        # SEARCH_SPACE dimensions from the architecture onto `p`. ===
+        #
+        # Audit finding: _random_params RANDOMISES connection_probability /
+        # firing_threshold / spontaneous_firing_rate / learning_rate /
+        # plasticity_threshold with hardcoded random.uniform() and NEVER sets
+        # afferent_synapse_strength / intrinsic_timescale / resting_potential
+        # _decay / num_hidden / adaptation_tau / autoreceptor_coeff from the
+        # architecture at all. So neural.* (minus the v164/v175 four) and the
+        # ENTIRE operating_ranges section were dead — NAS sampled and logged
+        # them but the simulation ignored them (same class as v175/v177).
+        #
+        # Design (user-approved): the architecture value is the per-NxEr
+        # BASE; where the genetic_lottery defines a jitter dimension
+        # (firing_threshold_jitter, intrinsic_timescale_jitter) the existing
+        # per-NxEr ±jitter is layered on top so v162 genetic diversity / M10
+        # heritability is preserved. Params with no lottery dimension are set
+        # directly from the architecture (like the biology.* params), which
+        # is the correct semantics: the architecture defines the value, the
+        # lottery defines which params get per-individual spread.
+        #
+        # Fallback for every key = the current value already on `p` (the
+        # randomised/config value), so an absent architecture key or no
+        # architecture loaded reproduces pre-v178 behaviour exactly. The
+        # v177 deepcopy in build_default_multisphere then propagates all of
+        # these to every Sphere automatically.
+        try:
+            from architecture import get_param as _arch_get
+
+            # -- neural topology / core (no lottery → direct from arch) --
+            _cp = _arch_get('neural', 'connection_probability', None)
+            if _cp is not None:
+                p.connection_probability = max(0.01, min(0.95, float(_cp)))
+            _ass = _arch_get('neural', 'afferent_synapse_strength', None)
+            if _ass is not None:
+                p.afferent_synapse_strength = max(0.1, float(_ass))
+            _sfr = _arch_get('neural', 'spontaneous_firing_rate', None)
+            if _sfr is not None:
+                p.spontaneous_firing_rate = max(0.0, min(0.5, float(_sfr)))
+            _rpd = _arch_get('neural', 'resting_potential_decay', None)
+            if _rpd is not None:
+                p.resting_potential_decay = max(0.0, min(0.95, float(_rpd)))
+            _nh = _arch_get('neural', 'num_hidden_neurons_default', None)
+            if _nh is not None:
+                p.num_hidden_neurons = max(3, int(round(float(_nh))))
+
+            # -- firing thresholds: arch = base, lottery jitter on top --
+            _fte = _arch_get('neural', 'firing_threshold_excitatory', None)
+            if _fte is not None:
+                p.firing_threshold_excitatory = max(0.20, min(0.85,
+                    float(_fte) + random.uniform(-_thr_jitter, _thr_jitter)))
+            _fti = _arch_get('neural', 'firing_threshold_inhibitory', None)
+            if _fti is not None:
+                p.firing_threshold_inhibitory = max(-0.85, min(-0.20,
+                    float(_fti) + random.uniform(-_thr_jitter, _thr_jitter)))
+
+            # -- intrinsic timescale → membrane_time_constant: base + jitter
+            #    (neuron.py initialises intrinsic_timescale from this). --
+            _itd = _arch_get('neural', 'intrinsic_timescale_default', None)
+            if _itd is not None:
+                p.membrane_time_constant = max(5.0, min(60.0,
+                    float(_itd) + random.uniform(-_ts_jitter, _ts_jitter)))
+
+            # -- operating_ranges: plasticity / adaptation (no lottery) --
+            _lr = _arch_get('operating_ranges', 'learning_rate', None)
+            if _lr is not None:
+                p.learning_rate = max(1e-5, float(_lr))
+            _pt = _arch_get('operating_ranges', 'plasticity_threshold', None)
+            if _pt is not None:
+                p.plasticity_threshold = max(0.0, min(1.0, float(_pt)))
+            _atau = _arch_get('operating_ranges', 'adaptation_tau_ticks', None)
+            if _atau is not None:
+                p.adaptation_tau_ticks = max(1.0, float(_atau))
+            _arc = _arch_get('operating_ranges', 'autoreceptor_coefficient', None)
+            if _arc is not None:
+                p.autoreceptor_coefficient = max(0.0, float(_arc))
+            _sbs = _arch_get('operating_ranges', 'sensory_boost_scale', None)
+            if _sbs is not None:
+                p.sensory_boost_scale = max(0.05, float(_sbs))
+        except Exception as _exc2:
+            # Any failure → keep the randomised/config values (pre-v178
+            # behaviour). Never crash the spawn.
+            print(f"[game_loop] v178 neural/operating_ranges wiring failed "
+                  f"(using randomised defaults): {_exc2}", flush=True)
+
+        # === v179 (v4.87) — CHC six-sphere topology + g-factor levers. ===
+        # Same backward-compat contract as v178: fallback for every key is
+        # the current value on `p` (the config default), so an absent key /
+        # no architecture reproduces the legacy 3-sphere build EXACTLY.
+        try:
+            from architecture import get_param as _arch_get179
+            _st = _arch_get179('neural', 'sphere_topology', None)
+            if _st is not None:
+                _st = str(_st)
+                if _st in ('sensory_association_motor', 'chc6'):
+                    p.sphere_topology = _st
+            _ksc = _arch_get179('neural', 'cross_sphere_coupling', None)
+            if _ksc is not None:
+                p.cross_sphere_coupling = max(0.0, min(5.0, float(_ksc)))
+            _lc = _arch_get179('neural', 'cryst_capacity', None)
+            if _lc is not None:
+                p.cryst_capacity = max(0.1, min(4.0, float(_lc)))
+            _bf = _arch_get179('neural', 'free_energy_beta', None)
+            if _bf is not None:
+                p.free_energy_beta = max(0.0, min(3.0, float(_bf)))
+            _gw = _arch_get179('operating_ranges', 'fitness_g_weight', None)
+            if _gw is not None:
+                p.fitness_g_weight = max(0.0, min(2.0, float(_gw)))
+        except Exception as _exc3:
+            print(f"[game_loop] v179 topology/g wiring failed "
+                  f"(using defaults): {_exc3}", flush=True)
+
+        return p
+
+    def make_nxer() -> NxEr:
+        """Factory function to create a single new NxEr.
+        
+        v5.0: When multisphere_enabled, builds a 3-sphere brain (Sensory→Association→Motor)
+        per Paper Sections 7-8. The `net` field points to the motor sphere's network
+        for backward compatibility with all existing game logic.
+        """
+        
+        idx = config._next_nxer_id
+        config._next_nxer_id += 1
+        
+        p = _random_params(MaxNeurons)
+        net = NeuraxonNetwork(p)
+        
+        # v5.0: Build multi-sphere brain if enabled
+        brain = None
+        if getattr(p, 'multisphere_enabled', True):
+            try:
+                brain = build_brain(p)  # v179: topology dispatcher (chc6 | legacy)
+                # The motor sphere's network becomes the primary `net` for backward compat
+                if 'motor' in brain.spheres:
+                    net = brain.spheres['motor'].network
+            except Exception:
+                brain = None  # Fallback to single-net mode
+        
+        pos = find_free(allow_sea=True, allow_land=True) or (random.randrange(world.N), random.randrange(world.N))
+        terrain = world.terrain(pos)
+        if terrain == T_LAND: can_land, can_sea = True, False
+        elif terrain == T_SEA: can_land, can_sea = False, True
+        else: can_land, can_sea = True, False
+        is_male = random.random() < 0.5
+        
+        # Use global name counter for unique name
+        name = _get_next_global_name()
+        
+        vision = random.randint(2, 15)
+        smell = random.randint(2, 5)
+        heading = random.randint(0, 7)
+        
+        # Create individual clan for this NxEr
+        clan_id = config._next_clan_id
+        config._next_clan_id += 1
+        config._clan_history[clan_id] = {
+            'members': {name},
+            'merged_from': [],
+            'created_at_round': config._current_round,
+            'active': True
+        }
+        
+        nx = NxEr(
+            id=idx, 
+            name=name, 
+            color=_rand_color(list(used_colors)), 
+            pos=pos, 
+            can_land=can_land, 
+            can_sea=can_sea, 
+            net=net, 
+            food=float(StartFood), 
+            is_male=is_male, 
+            ticks_per_action=max(1, int(GlobalTimeSteps / max(1, p.simulation_steps))), 
+            stats=NxErStats(), 
+            visited=set([pos]), 
+            parents=(None, None),
+            parent_ids=(None, None),
+            ancestors=[],  # No ancestors for original NxErs
+            rounds_survived=0,
+            mate_cooldown_until_tick=0, 
+            last_move_tick=0, 
+            last_pos=pos,
+            vision_range=vision, 
+            smell_radius=smell, 
+            heading=heading, 
+            clan_id=clan_id,
+            # NEW v3.0: Circadian and temperature
+            body_temperature=p.temperature_baseline if hasattr(p, 'temperature_baseline') else 37.0,
+            circadian_phase=0.0,
+            is_resting=False,
+            # NEW v3.0: Proprioceptron
+            proprioceptron=Proprioceptron(),
+            # NEW v5.0: Multi-Sphere brain
+            brain=brain,
+            brain_topology=getattr(p, 'multisphere_topology', 'sensory_association_motor'),
+        )
+        used_colors.add(nx.color)
+        # v3.3: Set individual temperature baseline with variance
+        nx._temp_baseline_individual = p.temperature_baseline + random.uniform(
+            -TEMP_BASELINE_VARIANCE, TEMP_BASELINE_VARIANCE)
+        # v3.3: FIX — Set inherited metabolism attributes on first-gen NxErs too
+        nx.temperature_tolerance_cold = getattr(p, 'temp_cold_threshold', 35.5)
+        nx.temperature_tolerance_hot = getattr(p, 'temp_hot_threshold', 38.5)
+        nx.resting_metabolism_multiplier = RESTING_METABOLISM_MULTIPLIER
+        # UPDATED v4.5: 10 inputs (adds Song channel)
+        nx.last_inputs = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        # v4.5: Give the founder a fresh harmonically-sampled voice
+        nx.voice = Voice()
+        return nx
+
+    nxer_archive: Dict[int, dict] = {}
+
+    def _serialize_nxer(a: NxEr) -> dict:
+        parent_ids = tuple(getattr(a, 'parent_ids', (None, None)) or (None, None))
+        parent_names = tuple(getattr(a, 'parents', (None, None)) or (None, None))
+        ancestors = list(getattr(a, 'ancestors', []) or [])
+        return {
+            "id": a.id,
+            "name": a.name,
+            "color": a.color,
+            "pos": a.pos,
+            "can_land": a.can_land,
+            "can_sea": a.can_sea,
+            "food": a.food,
+            "is_male": a.is_male,
+            "alive": a.alive,
+            "born_ts": a.born_ts,
+            "died_ts": a.died_ts,
+            "last_inputs": a.last_inputs,
+            "last_outputs": a.last_outputs,
+            "ticks_per_action": a.ticks_per_action,
+            "tick_accum": a.tick_accum,
+            "harvesting": a.harvesting,
+            "mating_with": a.mating_with,
+            "mating_end_tick": a.mating_end_tick,
+            "visited": list(a.visited),
+            "dopamine_boost_ticks": a.dopamine_boost_ticks,
+            "_last_O4": a._last_O4,
+            "mating_intent_until_tick": a.mating_intent_until_tick,
+            "parents": list(parent_names),
+            "parent_ids": list(parent_ids),
+            "parent_0": parent_ids[0],
+            "parent_1": parent_ids[1],
+            "parent_name_0": parent_names[0],
+            "parent_name_1": parent_names[1],
+            "ancestors": ancestors,
+            "ancestors_count": len(ancestors),
+            "founder": parent_ids == (None, None),
+            "mate_cooldown_until_tick": a.mate_cooldown_until_tick,
+            "last_move_tick": a.last_move_tick,
+            "last_pos": a.last_pos,
+            "stats": asdict(a.stats),
+            "net": a.net.to_dict(),
+            "receptor_activations": getattr(a, 'receptor_activations', {}),
+            "astrocyte_activity": getattr(a, 'astrocyte_activity', 0.0),
+            "vision_range": a.vision_range,
+            "smell_radius": a.smell_radius,
+            "heading": a.heading,
+            "clan_id": a.clan_id,
+            "rounds_survived": getattr(a, 'rounds_survived', 0),
+            "body_temperature": a.body_temperature,
+            "circadian_phase": a.circadian_phase,
+            "is_resting": a.is_resting,
+            "proprioceptron_rock_hits": a.proprioceptron.total_rock_hits if hasattr(a, 'proprioceptron') else 0,
+            "proprioceptron_forced_turns": a.proprioceptron.forced_turn_count if hasattr(a, 'proprioceptron') else 0,
+            "proprioceptron_brain_warnings": a.proprioceptron.brain_warning_count if hasattr(a, 'proprioceptron') else 0,
+            "proprioceptron_brain_turns": a.proprioceptron.brain_avoidance_turn_count if hasattr(a, 'proprioceptron') else 0,
+            "proprioceptron_successful_streak": a.proprioceptron.successful_move_streak if hasattr(a, 'proprioceptron') else 0,
+            "proprioceptron_last_move_result": a.proprioceptron.last_move_result if hasattr(a, 'proprioceptron') else 0,
+            "consecutive_successful_moves": a._consecutive_successful_moves,
+            "brain_movement_weight": getattr(a, 'brain_movement_weight', 0.5),
+            "temperature_tolerance_cold": getattr(a, 'temperature_tolerance_cold', 35.5),
+            "temperature_tolerance_hot": getattr(a, 'temperature_tolerance_hot', 38.5),
+            "resting_metabolism_multiplier": getattr(a, 'resting_metabolism_multiplier', 0.3),
+            # v5.0: Multi-Sphere brain
+            "has_multisphere": getattr(a, 'brain', None) is not None,
+            "brain_topology": getattr(a, 'brain_topology', 'sensory_association_motor'),
+            "brain": save_multisphere_to_dict(a.brain) if getattr(a, 'brain', None) is not None else None,
+            # v4.5: Voice / Song / Hearing genome + last-singing state
+            "voice": a.voice.to_dict() if a.voice is not None else None,
+            "last_new_food_tick": int(a.last_new_food_tick),
+            "last_sing_level": int(a.last_sing_level),
+            "known_food_ids": list(a.known_food_ids),
+        }
+
+    def _archive_nxer(a: NxEr):
+        nxer_archive[a.id] = _serialize_nxer(a)
+
+    def _archive_all_nxers():
+        for a in nxers.values():
+            _archive_nxer(a)
+    
+    def spawn_child(A: NxEr, B: NxEr, near_pos: Tuple[int, int]) -> Optional[NxEr]:
+        """Creates a new NxEr from two parents.
+        
+        v5.0: When both parents have multi-sphere brains, uses InheritanceMultiSphere
+        to breed sphere-by-sphere. Otherwise falls back to single-net Inheritance.
+        """
+        nonlocal births_count
+        
+        if len(nxers) >= MaxNxErs: return None
+        child_id = config._next_nxer_id
+        config._next_nxer_id += 1
+        
+        # v5.0: Multi-sphere inheritance when both parents have brains
+        child_brain = None
+        if getattr(A, 'brain', None) is not None and getattr(B, 'brain', None) is not None:
+            try:
+                child_brain = InheritanceMultiSphere(A, B)
+                # Motor sphere's network is the primary net for backward compat
+                if child_brain and 'motor' in child_brain.spheres:
+                    child_net = child_brain.spheres['motor'].network
+                else:
+                    child_net = Inheritance(A, B)
+                    child_brain = None
+            except Exception:
+                child_net = Inheritance(A, B)
+                child_brain = None
+        else:
+            child_net = Inheritance(A, B)
+            # Try to wrap in multi-sphere if possible
+            if getattr(A, 'brain', None) is not None or getattr(B, 'brain', None) is not None:
+                try:
+                    child_brain = build_brain(child_net.params)  # v179 dispatcher
+                    if 'motor' in child_brain.spheres:
+                        child_brain.spheres['motor'].network = child_net
+                        child_net = child_brain.spheres['motor'].network
+                except Exception:
+                    child_brain = None
+        
+        # Terrain inheritance logic
+        A_land_specialist = A.can_land and not A.can_sea
+        A_sea_specialist = A.can_sea and not A.can_land
+        B_land_specialist = B.can_land and not B.can_sea
+        B_sea_specialist = B.can_sea and not B.can_land
+        terrain_A = world.terrain(A.pos)
+        terrain_B = world.terrain(B.pos)
+        is_seashore_mating = (A_land_specialist and B_sea_specialist and terrain_A == T_LAND and terrain_B == T_SEA) or \
+                            (A_sea_specialist and B_land_specialist and terrain_A == T_SEA and terrain_B == T_LAND)
+        if is_seashore_mating: 
+            can_land, can_sea = True, True
+        else:
+            if A_land_specialist and B_land_specialist: can_land, can_sea = True, False
+            elif A_sea_specialist and B_sea_specialist: can_land, can_sea = False, True
+            else:
+                can_land = A.can_land or B.can_land
+                can_sea = A.can_sea or B.can_sea
+        if not (can_land or can_sea): can_land = True
+        
+        is_male_child = random.random() < 0.5
+        
+        # Build full ancestor list from both parents
+        child_ancestors = []
+        child_ancestors.append(A.name)
+        child_ancestors.append(B.name)
+        child_ancestors.extend(A.ancestors)
+        child_ancestors.extend(B.ancestors)
+        child_ancestors = list(dict.fromkeys(child_ancestors))  # Remove duplicates, preserve order (parents first)
+        
+        # Clan merging: Create new clan from both parent clans
+        new_clan_id = config._next_clan_id
+        config._next_clan_id += 1
+        
+        old_clan_a = A.clan_id
+        old_clan_b = B.clan_id
+        
+        # Collect all members from both clans
+        all_members = set()
+        merged_from = []
+        
+        if old_clan_a is not None and old_clan_a in config._clan_history:
+            all_members.update(config._clan_history[old_clan_a]['members'])
+            merged_from.append(old_clan_a)
+            config._clan_history[old_clan_a]['active'] = False
+            
+        if old_clan_b is not None and old_clan_b in config._clan_history and old_clan_b != old_clan_a:
+            all_members.update(config._clan_history[old_clan_b]['members'])
+            merged_from.append(old_clan_b)
+            config._clan_history[old_clan_b]['active'] = False
+        
+        child_name = _get_next_global_name()  # Get name early so we can use it
+        all_members.add(child_name)  # Use name instead of ID
+        
+        # Create new clan
+        config._clan_history[new_clan_id] = {
+            'members': all_members,
+            'merged_from': merged_from,
+            'created_at_round': config._current_round,
+            'active': True
+        }
+        
+        # Update all members of both old clans to new clan
+        for member_id in all_members:
+            if member_id in nxers and nxers[member_id].alive:
+                nxers[member_id].clan_id = new_clan_id
+        
+        vision = A.vision_range if random.random() < 0.5 else B.vision_range
+        smell = A.smell_radius if random.random() < 0.5 else B.smell_radius
+        heading = random.randint(0, 7)
+        
+        child = NxEr(
+            id=child_id,
+            name=child_name,
+            color=_rand_color(list(RESERVED_COLORS) + [a.color for a in nxers.values()]),
+            pos=near_pos,
+            can_land=can_land,
+            can_sea=can_sea,
+            net=child_net,
+            food=0.0,
+            is_male=is_male_child,
+            ticks_per_action=max(1, int(GlobalTimeSteps / max(1, child_net.params.simulation_steps))),
+            stats=NxErStats(),
+            visited=set(),
+            parents=(A.name, B.name),
+            parent_ids=(A.id, B.id),
+            ancestors=child_ancestors,
+            rounds_survived=0,
+            mate_cooldown_until_tick=0,
+            last_move_tick=step_tick,
+            last_pos=near_pos,
+            vision_range=vision,
+            smell_radius=smell,
+            heading=heading,
+            clan_id=new_clan_id,
+            # NEW v3.0
+            body_temperature=child_net.params.temperature_baseline if hasattr(child_net.params, 'temperature_baseline') else 37.0,
+            circadian_phase=global_circadian_phase,
+            is_resting=False,
+            proprioceptron=Proprioceptron(),
+            # NEW v5.0: Multi-Sphere brain inheritance
+            brain=child_brain,
+            brain_topology=getattr(A, 'brain_topology', 'sensory_association_motor'),
+        )
+        
+        # v4.0: Apply inherited metabolic preferences
+        inherited_meta = getattr(child_net, '_inherited_metadata', {})
+        if inherited_meta:
+            child.temperature_tolerance_cold = inherited_meta.get('temperature_tolerance_cold', 35.5)
+            child.temperature_tolerance_hot = inherited_meta.get('temperature_tolerance_hot', 38.5)
+            child.resting_metabolism_multiplier = inherited_meta.get('resting_metabolism_multiplier', 0.3)
+        else:
+            # v3.3: Fallback — ensure attributes exist even without inheritance
+            child.temperature_tolerance_cold = 35.5
+            child.temperature_tolerance_hot = 38.5
+            child.resting_metabolism_multiplier = 0.3
+        # v3.3: Individual temperature baseline for children
+        child._temp_baseline_individual = child.body_temperature + random.uniform(-TEMP_BASELINE_VARIANCE, TEMP_BASELINE_VARIANCE)
+
+        # v4.5: VOICE INHERITANCE
+        # 1) Attach the inherited voice genome (produced by genetics.Inheritance)
+        voice_dict = inherited_meta.get('voice_dict') if inherited_meta else None
+        child.voice = Voice.from_dict(voice_dict) if voice_dict else Voice()
+        # 2) Mating-driven tone exchange: each parent learns one tone from the other.
+        #    This is done AT the birth site so the parents' lifelong repertoire
+        #    grows each successful mating — children then draw from a slowly-
+        #    enriching gene pool.
+        if getattr(A.net.params, 'voice_mate_tone_exchange', True):
+            try:
+                exchange_tone_on_mate(A.voice, B.voice)
+            except Exception:
+                pass
+        # 3) Child's last_inputs / last_outputs must be 10 / 7 for v4.5
+        child.last_inputs = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        child.last_outputs = (0, 0, 0, 0, 0, 0, 0)
+        
+        transfer = min(5.0, min(A.food / 2, B.food / 2))
+        A.food -= transfer
+        B.food -= transfer
+        child.food += transfer * 8
+        max_limit = float(StartFood) * 1.5 
+        child.food = min(transfer * 8, max_limit)     
+        child.pos = find_free(allow_sea=can_sea, allow_land=can_land, near=near_pos, search_radius=3) or near_pos
+        nxers[child.id] = child
+        occupied.add(child.pos)
+        _archive_nxer(child)
+        A.stats.mates_performed += 1
+        B.stats.mates_performed += 1
+        births_count += 1
+        child.stats.fitness_score = (A.stats.fitness_score + B.stats.fitness_score) / 2
+
+        get_data_logger().log_nxer_event(
+            step_tick,
+            'born',
+            child.id,
+            {
+                'name': child.name,
+                'founder': False,
+                'parent_0': A.id,
+                'parent_1': B.id,
+                'parent_name_0': A.name,
+                'parent_name_1': B.name,
+                'ancestors_count': len(child.ancestors),
+                'clan_id': new_clan_id,
+            }
+        )
+        # v145 — Heritability tracking (M10). Locks in the parent-fitness
+        # baseline at the moment of conception so we can later correlate
+        # parent fitness with child fitness. Falls through silently if the
+        # research-probes module is unavailable.
+        try:
+            get_data_logger().register_birth_for_heritability(
+                child,
+                float(A.stats.fitness_score) if A.stats else 0.0,
+                float(B.stats.fitness_score) if B.stats else 0.0,
+            )
+        except Exception:
+            pass
+        
+        # Paper Claim: Norepinephrine activated somewhat by the birth of offspring per se
+        _neuromod_boost(A.net.neuromodulators, 'norepinephrine', 0.15, A.net.params)
+        _neuromod_boost(B.net.neuromodulators, 'norepinephrine', 0.15, B.net.params)
+        
+        return child
+        
+    for i in range(StartingNxErs):
+        a = make_nxer()
+        nxers[a.id] = a
+        occupied.add(a.pos)
+        _archive_nxer(a)
+        get_data_logger().log_nxer_event(
+            0,
+            'born',
+            a.id,
+            {
+                'name': a.name,
+                'founder': True,
+                'parent_0': None,
+                'parent_1': None,
+                'parent_name_0': None,
+                'parent_name_1': None,
+                'ancestors_count': 0,
+                'clan_id': a.clan_id,
+            }
+        )
+    
+    # CHANGE in V2.0: Start unpaused if auto_start is True
+    running = True
+    paused = not auto_start
+    
+    step_tick = 0
+    boot_random_until = 5 * GlobalTimeSteps
+    game_over = False
+    game_over_start_time = None
+    user_declined_restart = False
+    
+    # Time tracking for Limit Mode
+    game_start_real_time = time.time()
+    round_start_real_time = time.time()
+
+    def push_effect(kind: str, pos: Tuple[int, int]): effects.append({'kind': kind, 'pos': pos, 'start': step_tick})
+    
+    # --- Save/Load Functions ---
+    def save_nxer_to_file(a: NxEr, save_name: str = None, auto_save: bool = False):
+        """Save an NxEr's state to JSON.
+        
+        v167 (v4.75) — `auto_save` parameter added. When True, bypasses
+        the tkinter file dialog and saves directly to cwd with the given
+        `save_name`. Without this fix the menu "Save Best NxErs" button
+        and the end-of-game champion auto-save both opened a dialog per
+        champion (6 dialogs in sequence), blocking subsequent rounds of
+        play. Auto-save callers (programmatic saves with a pre-chosen
+        filename) should pass auto_save=True. Manual user-driven saves
+        (clicking "Save NxEr" on a specific selected NxEr) leave
+        auto_save=False so the dialog opens and lets the user choose
+        location/name.
+        
+        Args:
+          a: the NxEr to serialise
+          save_name: filename or initial default for the dialog
+          auto_save: if True, skip dialog entirely and write directly
+                     to ./{save_name} (resolved via _safe_path)
+        """
+        if config._session_id is None:
+            config._session_id = _generate_session_id()
+        default = save_name or f"{config._session_id}_nxer_{a.name}_{_now_str()}.json"
+        # v167 — auto_save bypasses the dialog so multi-round flows don't stall
+        if auto_save:
+            path = _safe_path(default)
+        else:
+            path = _pick_save_file(default)
+        if not path: return
+        data = {"meta": {"created": _now_str(), "type": "NxEr", "session_id": config._session_id, "game_id": config._game_id}, "nxer": _serialize_nxer(a)}
+        if get_data_logger().log_level >= 2:
+            data["nxer"]["network_detailed"] = _extract_detailed_network_state(a.net)
+        with open(path, "w") as f: json.dump(data, f)
+        print(f"[SAVE NxEr] {path}")
+    
+    def load_nxer_from_file(spawn_near: Tuple[int, int] = None):
+        path = _pick_open_file()
+        if not path: return
+        with open(path, "r") as f: data = json.load(f)
+        nd = data.get("nxer", data)
+        net = _rebuild_net_from_dict(nd["net"])
+        pos0 = tuple(nd.get("pos", (world.N // 2, world.N // 2)))
+        if spawn_near is not None: pos0 = spawn_near
+        pos = find_free(allow_sea=True, allow_land=True, near=pos0, search_radius=6) or wrap_pos(pos0)
+        base_name = str(nd.get("name", f"N{len(nxers)}"))
+        name = base_name; counter = 1
+        alive_names = {a.name for a in nxers.values() if a.alive}
+        while name in alive_names: name = f"{base_name}{counter}"; counter += 1
+        a = NxEr(id=(max(nxers.keys()) + 1) if nxers else 0, name=name, color=tuple(nd.get("color", (200, 200, 200))), pos=pos, can_land=nd["can_land"], can_sea=nd["can_sea"], 
+        net=net, food=float(StartFood), is_male=bool(nd.get("is_male", random.random() < 0.5)), alive=True, born_ts=time.time(), died_ts=None, last_inputs=tuple((list(nd.get("last_inputs", [0]*10)) + [0]*10)[:10]), last_outputs=tuple((list(nd.get("last_outputs", [0]*7)) + [0]*7)[:7]), ticks_per_action=int(nd.get("ticks_per_action", 1)), tick_accum=int(nd.get("tick_accum", 0)), harvesting=nd["harvesting"], mating_with=nd["mating_with"], mating_end_tick=nd["mating_end_tick"], stats=NxErStats(**nd.get("stats", {})), visited=set(map(tuple, nd.get("visited", []))), dopamine_boost_ticks=int(nd.get("dopamine_boost_ticks", 0)), _last_O4=int(nd.get("_last_O4", 0)), mating_intent_until_tick=int(nd.get("mating_intent_until_tick", 0)), parents=tuple(nd.get("parents", [None, None])), parent_ids=tuple(nd.get("parent_ids", [nd.get("parent_0"), nd.get("parent_1")])) if (nd.get("parent_ids") is not None or nd.get("parent_0") is not None or nd.get("parent_1") is not None) else (None, None), ancestors=list(nd.get("ancestors", [])), rounds_survived=int(nd.get("rounds_survived", 0)), mate_cooldown_until_tick=int(nd.get("mate_cooldown_until_tick", 0)), last_move_tick=int(nd.get("last_move_tick", step_tick)), last_pos=tuple(nd.get("last_pos", pos)),
+                 vision_range=nd.get("vision_range", 5), smell_radius=nd.get("smell_radius", 3), heading=nd.get("heading", 0), clan_id=nd.get("clan_id", None))
+        a.tick_accum = 0; a.harvesting = None; a.mating_with = None; a.mating_end_tick = None; a.mating_intent_until_tick = 0; a.mate_cooldown_until_tick = 0
+        # v4.5: Restore voice genome (or generate a fresh one if the save predates v4.5)
+        a.voice = Voice.from_dict(nd.get("voice")) if nd.get("voice") else Voice()
+        a.last_new_food_tick = int(nd.get("last_new_food_tick", -9999))
+        a.last_sing_level = int(nd.get("last_sing_level", 0))
+        a.known_food_ids = set(nd.get("known_food_ids", []) or [])
+        nxers[a.id] = a
+        if get_data_logger().log_level >= 2 and "network_detailed" in nd:
+            _apply_detailed_network_state(a.net, nd["network_detailed"])
+        occupied.add(a.pos)
+        _archive_nxer(a)
+        print(f"[LOAD NxEr] spawned {a.name} at {a.pos}")
+        # Neuraxon v2.0: Restore per-NxEr v2.0 state
+        a.receptor_activations = nd.get('receptor_activations', {})
+        a.astrocyte_activity = nd.get('astrocyte_activity', 0.0)
+        # v5.0: Restore multi-sphere brain if present
+        if nd.get('has_multisphere') and nd.get('brain'):
+            try:
+                a.brain = load_multisphere_from_dict(nd['brain'], rebuild_net_fn=_rebuild_net_from_dict)
+                a.brain_topology = nd.get('brain_topology', 'sensory_association_motor')
+                # Re-point net to motor sphere for backward compat
+                if a.brain and 'motor' in a.brain.spheres:
+                    a.net = a.brain.spheres['motor'].network
+            except Exception as e:
+                print(f"[LOAD NxEr] Failed to restore multi-sphere brain: {e}")
+                a.brain = None
+        get_data_logger().log_nxer_event(step_tick, 'loaded', a.id, {'name': a.name, 'from_file': path})
+    
+    def save_nxvizer_to_file(a: NxEr, save_name: str = None):
+        default = save_name or f"nxvizer_{a.name}_{_now_str()}.json"
+        path = _pick_save_file(default)
+        if not path: return
+        params = a.net.params
+        data = {"network_name": params.network_name, "num_input_neurons": params.num_input_neurons, "num_hidden_neurons": params.num_hidden_neurons, "num_output_neurons": params.num_output_neurons, "connection_probability": params.connection_probability, "membrane_time_constant": params.membrane_time_constant, "firing_threshold_excitatory": params.firing_threshold_excitatory, "firing_threshold_inhibitory": params.firing_threshold_inhibitory, "adaptation_rate": params.adaptation_rate, "spontaneous_firing_rate": params.spontaneous_firing_rate, "neuron_health_decay": params.neuron_health_decay, "tau_fast": params.tau_fast, "w_fast_init_min": params.w_fast_init_min, "w_fast_init_max": params.w_fast_init_max, "tau_slow": params.tau_slow, "w_slow_init_min": params.w_slow_init_min, "w_slow_init_max": params.w_slow_init_max, "tau_meta": params.tau_meta, "w_meta_init_min": params.w_meta_init_min, "w_meta_init_max": params.w_meta_init_max, "learning_rate": params.learning_rate, "stdp_window": params.stdp_window, "synapse_integrity_threshold": params.synapse_integrity_threshold, "synapse_formation_prob": params.synapse_formation_prob, "synapse_death_prob": params.synapse_death_prob, "neuron_death_threshold": params.neuron_death_threshold, "dopamine_baseline": params.dopamine_baseline, "serotonin_baseline": params.serotonin_baseline, "acetylcholine_baseline": params.acetylcholine_baseline, "norepinephrine_baseline": params.norepinephrine_baseline, "neuromod_decay_rate": params.neuromod_decay_rate, "reuptake_vmax_ne": params.reuptake_vmax_ne, "reuptake_vmax_da": params.reuptake_vmax_da, "reuptake_vmax_5ht": params.reuptake_vmax_5ht, "reuptake_vmax_ach": params.reuptake_vmax_ach, "reuptake_km": params.reuptake_km, "autoreceptor_strength": params.autoreceptor_strength, "dt": params.dt, "simulation_steps": params.simulation_steps}
+        with open(path, "w") as f: json.dump(data, f, indent=2)
+        print(f"[SAVE NxVizer] {path}")
+        
+    def load_nxvizer_from_file(spawn_near: Tuple[int, int] = None):
+        path = _pick_open_file()
+        if not path: return
+        with open(path, "r") as f: data = json.load(f)
+        params = NetworkParameters(network_name=data.get("network_name", "Neuraxon NxEr"), num_input_neurons=data.get("num_input_neurons", 10), num_hidden_neurons=data.get("num_hidden_neurons", 10), num_output_neurons=data.get("num_output_neurons", 7), connection_probability=data.get("connection_probability", 0.15), membrane_time_constant=data.get("membrane_time_constant", 20.0), firing_threshold_excitatory=data.get("firing_threshold_excitatory", 0.9), firing_threshold_inhibitory=data.get("firing_threshold_inhibitory", -0.9), adaptation_rate=data.get("adaptation_rate", 0.05), spontaneous_firing_rate=data.get("spontaneous_firing_rate", 0.02), neuron_health_decay=data.get("neuron_health_decay", 0.001), tau_fast=data.get("tau_fast", 5.0), w_fast_init_min=data.get("w_fast_init_min", -1.0), w_fast_init_max=data.get("w_fast_init_max", 1.0), tau_slow=data.get("tau_slow", 50.0), w_slow_init_min=data.get("w_slow_init_min", -0.5), w_slow_init_max=data.get("w_slow_init_max", 0.5), tau_meta=data.get("tau_meta", 1000.0), w_meta_init_min=data.get("w_meta_init_min", -0.3), w_meta_init_max=data.get("w_meta_init_max", 0.3), learning_rate=data.get("learning_rate", 0.01), stdp_window=data.get("stdp_window", 20.0), synapse_integrity_threshold=data.get("synapse_integrity_threshold", 0.1), synapse_formation_prob=data.get("synapse_formation_prob", 0.02), synapse_death_prob=data.get("synapse_death_prob", 0.01), neuron_death_threshold=data.get("neuron_death_threshold", 0.1), dopamine_baseline=data.get("dopamine_baseline", 0.12), serotonin_baseline=data.get("serotonin_baseline", 0.12), acetylcholine_baseline=data.get("acetylcholine_baseline", 0.12), norepinephrine_baseline=data.get("norepinephrine_baseline", 0.12), neuromod_decay_rate=data.get("neuromod_decay_rate", 0.1), reuptake_vmax_ne=data.get("reuptake_vmax_ne", 0.08), reuptake_vmax_da=data.get("reuptake_vmax_da", 0.05), reuptake_vmax_5ht=data.get("reuptake_vmax_5ht", 0.03), reuptake_vmax_ach=data.get("reuptake_vmax_ach", 0.10), reuptake_km=data.get("reuptake_km", 0.5), autoreceptor_strength=data.get("autoreceptor_strength", 1.0), dt=data.get("dt", 1.0), simulation_steps=data.get("simulation_steps", 30))
+        net = NeuraxonNetwork(params)
+        pos0 = spawn_near or (world.N // 2, world.N // 2)
+        pos = find_free(allow_sea=True, allow_land=True, near=pos0, search_radius=6) or wrap_pos(pos0)
+        terrain_choice = random.random()
+        if terrain_choice < 0.33: can_land, can_sea = True, False
+        elif terrain_choice < 0.66: can_land, can_sea = False, True
+        else: can_land, can_sea = True, True
+        base_name = "NxVizer"; name = base_name; counter = 1
+        alive_names = {a.name for a in nxers.values() if a.alive}
+        while name in alive_names: name = f"{base_name}{counter}"; counter += 1
+        
+        vision = random.randint(2, 15); smell = random.randint(2, 5); heading = random.randint(0, 7)
+        
+        a = NxEr(id=(max(nxers.keys()) + 1) if nxers else 0, name=name, color=_rand_color(list(used_colors)), pos=pos, can_land=can_land, can_sea=can_sea, net=net, food=float(StartFood), is_male=random.random() < 0.5, alive=True, born_ts=time.time(), died_ts=None, last_inputs=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0), ticks_per_action=max(1, int(GlobalTimeSteps / max(1, params.simulation_steps))), tick_accum=0, harvesting=None, mating_with=None, mating_end_tick=None, stats=NxErStats(), visited=set([pos]), dopamine_boost_ticks=0, _last_O4=0, mating_intent_until_tick=0, parents=(None, None), parent_ids=(None, None), mate_cooldown_until_tick=0, last_move_tick=step_tick, last_pos=pos,
+                 vision_range=vision, smell_radius=smell, heading=heading, clan_id=None)
+        a.voice = Voice()  # v4.5
+        a.last_outputs = (0, 0, 0, 0, 0, 0, 0)
+        used_colors.add(a.color); nxers[a.id] = a; occupied.add(a.pos)
+        _archive_nxer(a)
+        print(f"[LOAD NxVizer] spawned {a.name} at {a.pos}")
+    
+    def _extract_detailed_network_state(net: NeuraxonNetwork) -> dict:
+        """Extract detailed network state for Level 2 logging."""
+        return {
+            'all_neuron_states': [{
+                'id': n.id,
+                'membrane_potential': n.membrane_potential,
+                'trinary_state': n.trinary_state,
+                'adaptation': n.adaptation,
+                'autoreceptor': n.autoreceptor,
+                'health': n.health,
+                'energy_level': n.energy_level,
+                'phase': n.phase,
+                'natural_frequency': n.natural_frequency,
+                'intrinsic_timescale': n.intrinsic_timescale,
+                'fitness_score': n.fitness_score,
+                'state_history': list(n.state_history),
+                'dendritic_branches': [{
+                    'branch_potential': b.branch_potential,
+                    'plateau_potential': b.plateau_potential,
+                    'local_spike_history': list(b.local_spike_history)
+                } for b in n.dendritic_branches]
+            } for n in net.all_neurons],
+            'all_synapse_states': [{
+                'pre_id': s.pre_id,
+                'post_id': s.post_id,
+                'w_fast': s.w_fast,
+                'w_slow': s.w_slow,
+                'w_meta': s.w_meta,
+                'integrity': s.integrity,
+                'pre_trace': s.pre_trace,
+                'post_trace': s.post_trace,
+                'pre_trace_ltd': s.pre_trace_ltd,
+                'learning_rate_mod': s.learning_rate_mod,
+                'associative_strength': s.associative_strength
+            } for s in net.synapses],
+            'neuromodulators': dict(net.neuromodulators),
+            'modulator_grid': net.modulator_grid.tolist(),
+            'oscillator_phase_offsets': list(net.oscillator_phase_offsets),
+            'activation_history': list(net.activation_history),
+            'branching_ratio': net.branching_ratio,
+            'time': net.time,
+            'step_count': net.step_count,
+            'total_energy_consumed': net.total_energy_consumed
+        }
+    
+    def _apply_detailed_network_state(net: NeuraxonNetwork, detailed: dict):
+        """Apply detailed network state from Level 2 save."""
+        if 'all_neuron_states' in detailed:
+            for ns in detailed['all_neuron_states']:
+                if ns['id'] < len(net.all_neurons):
+                    n = net.all_neurons[ns['id']]
+                    n.state_history = deque(ns.get('state_history', []), maxlen=50)
+                    n.autoreceptor = ns.get('autoreceptor', 0.0)
+        
+        if 'modulator_grid' in detailed:
+            net.modulator_grid = np.array(detailed['modulator_grid'])
+        
+        if 'activation_history' in detailed:
+            net.activation_history = deque(detailed['activation_history'], maxlen=1000)
+        
+        net.branching_ratio = detailed.get('branching_ratio', 1.0)
+        
+    def save_state(name=None):
+        if config._session_id is None:
+            config._session_id = _generate_session_id()
+        
+        # Include session ID in filename
+        name = name or f"{config._session_id}_nx_world_save_{_now_str()}.json"
+        
+        _archive_all_nxers()
+
+        data = {
+            "meta": {
+                "created": _now_str(), 
+                "step_tick": step_tick, 
+                "GlobalTimeSteps": GlobalTimeSteps, 
+                "births_count": births_count, 
+                "deaths_count": deaths_count, 
+                "game_index": game_index,
+                "session_id": config._session_id,
+                "game_id": config._game_id,
+                "global_name_counter": config._global_name_counter,
+                "used_names": list(config._used_names),
+                "next_clan_id": config._next_clan_id,
+                "current_round": config._current_round,
+                "next_nxer_id": config._next_nxer_id
+            },
+            "clan_history": {str(k): {
+                'members': list(v['members']),
+                'merged_from': v['merged_from'],
+                'created_at_round': v['created_at_round'],
+                'active': v['active']
+            } for k, v in config._clan_history.items()},
+            "world": {"N": world.N, "grid": world.grid},
+            "nxers": [nxer_archive[k] for k in sorted(nxer_archive)],
+            "foods": [{"id": f.id, "anchor": f.anchor, "pos": f.pos, "alive": f.alive, "respawn_at_tick": f.respawn_at_tick, "remaining": f.remaining, "progress": f.progress} for f in foods.values()],
+            "all_time_best": {k: [{"name": a.name, "is_male": a.is_male, "stats": asdict(a.stats), "net": a.net.to_dict(),
+                "receptor_activations": getattr(a, 'receptor_activations', {}),
+                "astrocyte_activity": getattr(a, 'astrocyte_activity', 0.0), "can_land": a.can_land, "can_sea": a.can_sea, "ancestors": getattr(a, 'ancestors', []), "rounds_survived": getattr(a, 'rounds_survived', 0)} for a in v] for k, v in all_time_best.items()},
+            # NEW v3.0: Save circadian state
+            "circadian_tick": step_tick % circadian_cycle_ticks,
+        }
+        logger = get_data_logger()
+        # v153 (v4.61) — full logs are opt-in. When save_full_logs is False
+        # (default), we skip the heavy logger.to_dict() dump that can be
+        # 100+ MB on long runs. The logger still captures everything in
+        # memory and KeyMetrics + Best NxErs are auto-saved separately.
+        if save_full_logs:
+            data["data_logger"] = logger.to_dict()
+        else:
+            # Include only minimal metadata so load_state can still detect
+            # version compatibility without loading the full history.
+            data["data_logger"] = {
+                "metadata": {
+                    "log_level": logger.log_level,
+                    "version_skipped": "v153 full-log opt-out — KeyMetrics auto-saved instead",
+                }
+            }
+        path = _safe_path(name)
+        with open(path, "w") as f: json.dump(data, f)
+        print(f"[SAVE] {path}{' (full logs included)' if save_full_logs else ' (full logs excluded — opt-in checkbox unchecked)'}")
+    
+    def load_state(path):
+        nonlocal step_tick, nxers, foods, occupied, births_count, deaths_count, world, game_index, all_time_best
+        
+        with open(path, "r") as f: data = json.load(f)
+        
+        step_tick = data["meta"]["step_tick"]
+        births_count = int(data["meta"].get("births_count", 0))
+        deaths_count = int(data["meta"].get("deaths_count", 0))
+        game_index = int(data["meta"].get("game_index", 1))
+        
+        # Restore global tracking variables
+        config._session_id = data["meta"].get("session_id", _generate_session_id())
+        config._game_id = data["meta"].get("game_id", "".join([str(random.randint(0, 9)) for _ in range(9)]))
+        config._global_name_counter = data["meta"].get("global_name_counter", 0)
+        config._used_names = set(data["meta"].get("used_names", []))
+        config._next_clan_id = data["meta"].get("next_clan_id", 1)
+        config._current_round = data["meta"].get("current_round", 1)
+        config._next_nxer_id = data["meta"].get("next_nxer_id", max((n["id"] for n in data["nxers"]), default=0) + 1)
+        
+        # Restore clan history
+        if "clan_history" in data:
+            config._clan_history = {}
+            for k, v in data["clan_history"].items():
+                config._clan_history[int(k)] = {
+                    'members': set(v['members']),
+                    'merged_from': v['merged_from'],
+                    'created_at_round': v['created_at_round'],
+                    'active': v['active']
+                }
+        
+        world.grid = data["world"]["grid"]
+        world.N = len(world.grid)
+        renderer.pan = [world.N * 0.5, world.N * 0.5]
+        renderer.zoom = max(2.0, 800.0 / world.N)
+        
+        # Restore all_time_best with new fields
+        if "all_time_best" in data:
+            all_time_best = {k: [] for k in data["all_time_best"]}
+            for category, champs in data["all_time_best"].items():
+                for champ_data in champs:
+                    net = _rebuild_net_from_dict(champ_data["net"])
+                    champ_nxer = NxEr(
+                        id=-1, 
+                        name=champ_data["name"], 
+                        color=(200, 200, 200), 
+                        pos=(0, 0), 
+                        can_land=champ_data.get("can_land", True), 
+                        can_sea=champ_data.get("can_sea", False), 
+                        net=net, 
+                        food=0, 
+                        is_male=champ_data.get("is_male", random.random() < 0.5), 
+                        stats=NxErStats(**champ_data["stats"]),
+                        ancestors=champ_data.get("ancestors", []),
+                        rounds_survived=champ_data.get("rounds_survived", 0)
+                    )
+                    all_time_best[category].append(champ_nxer)
+        
+        nxers = {}
+        occupied = set()
+        for nd in data["nxers"]:
+            net = _rebuild_net_from_dict(nd["net"])
+            pos_wrapped = wrap_pos(tuple(nd["pos"]))
+            a = NxEr(
+                id=nd["id"], 
+                name=nd["name"], 
+                color=tuple(nd["color"]), 
+                pos=pos_wrapped, 
+                can_land=nd["can_land"], 
+                can_sea=nd["can_sea"], 
+                net=net, 
+                food=float(nd["food"]),
+                is_male=nd.get("is_male", random.random() < 0.5), 
+                alive=nd["alive"], 
+                born_ts=nd["born_ts"], 
+                died_ts=nd["died_ts"],
+                last_inputs=tuple(nd["last_inputs"]), 
+                last_outputs=tuple(nd["last_outputs"]), 
+                ticks_per_action=int(nd["ticks_per_action"]), 
+                tick_accum=int(nd["tick_accum"]), 
+                harvesting=nd["harvesting"], 
+                mating_with=nd["mating_with"], 
+                mating_end_tick=nd["mating_end_tick"], 
+                stats=NxErStats(**nd["stats"]), 
+                visited=set(map(tuple, nd.get("visited", []))), 
+                dopamine_boost_ticks=int(nd.get("dopamine_boost_ticks", 0)), 
+                _last_O4=int(nd.get("_last_O4", 0)), 
+                mating_intent_until_tick=int(nd.get("mating_intent_until_tick", 0)), 
+                parents=tuple(nd.get("parents", [None, None])),
+                parent_ids=tuple(nd.get("parent_ids", [nd.get("parent_0"), nd.get("parent_1")])) if (nd.get("parent_ids") is not None or nd.get("parent_0") is not None or nd.get("parent_1") is not None) else (None, None),
+                ancestors=nd.get("ancestors", []),
+                rounds_survived=nd.get("rounds_survived", 0),
+                mate_cooldown_until_tick=int(nd.get("mate_cooldown_until_tick", 0)), 
+                last_move_tick=int(nd.get("last_move_tick", step_tick)), 
+                last_pos=tuple(nd.get("last_pos", pos_wrapped)),
+                vision_range=nd.get("vision_range", 5), 
+                smell_radius=nd.get("smell_radius", 3), 
+                heading=nd.get("heading", 0), 
+                clan_id=nd.get("clan_id", None),
+                # NEW v3.0
+                body_temperature=nd.get("body_temperature", 37.0),
+                circadian_phase=nd.get("circadian_phase", 0.0),
+                is_resting=nd.get("is_resting", False),
+                proprioceptron=Proprioceptron(
+                    total_rock_hits=nd.get("proprioceptron_rock_hits", 0),
+                    forced_turn_count=nd.get("proprioceptron_forced_turns", 0),
+                    brain_warning_count=nd.get("proprioceptron_brain_warnings", 0),
+                    brain_avoidance_turn_count=nd.get("proprioceptron_brain_turns", 0))
+            )
+            # NEW v3.1
+            if hasattr(a, 'proprioceptron'):
+                a.proprioceptron.successful_move_streak = nd.get("proprioceptron_successful_streak", 0)
+                a.proprioceptron.last_move_result = nd.get("proprioceptron_last_move_result", 0)
+            
+            # NEW v3.1 fields
+            a._consecutive_successful_moves = nd.get("consecutive_successful_moves", 0)
+            a.brain_movement_weight = nd.get("brain_movement_weight", 0.5)
+            
+            # Ensure last_inputs and last_outputs have correct length for v4.5 (10/7)
+            last_inputs = nd.get("last_inputs", (0,)*10)
+            if len(last_inputs) < 10:
+                last_inputs = tuple(list(last_inputs) + [0]*(10-len(last_inputs)))
+            a.last_inputs = tuple(last_inputs[:10])
+            
+            last_outputs = nd.get("last_outputs", (0,)*7)
+            if len(last_outputs) < 7:
+                last_outputs = tuple(list(last_outputs) + [0]*(7-len(last_outputs)))
+            a.last_outputs = tuple(last_outputs[:7])
+
+            # v4.5: Restore voice / song state (or create a fresh genome if the save predates v4.5)
+            a.voice = Voice.from_dict(nd.get("voice")) if nd.get("voice") else Voice()
+            a.last_new_food_tick = int(nd.get("last_new_food_tick", -9999))
+            a.last_sing_level = int(nd.get("last_sing_level", 0))
+            a.known_food_ids = set(nd.get("known_food_ids", []) or [])
+            
+            nxers[a.id] = a
+            _archive_nxer(a)
+            if a.alive: occupied.add(a.pos)
+            
+            # v5.0: Restore multi-sphere brain if present
+            if nd.get('has_multisphere') and nd.get('brain'):
+                try:
+                    a.brain = load_multisphere_from_dict(nd['brain'], rebuild_net_fn=_rebuild_net_from_dict)
+                    a.brain_topology = nd.get('brain_topology', 'sensory_association_motor')
+                    if a.brain and 'motor' in a.brain.spheres:
+                        a.net = a.brain.spheres['motor'].network
+                except Exception:
+                    a.brain = None
+        
+        foods = {}
+        for fd in data["foods"]:
+            f = Food(id=fd["id"], anchor=wrap_pos(tuple(fd["anchor"])), pos=wrap_pos(tuple(fd["pos"])), alive=fd["alive"], respawn_at_tick=fd["respawn_at_tick"], remaining=int(fd.get("remaining", 25)), progress={int(k): int(v) for k, v in fd.get("progress", {}).items()})
+            foods[f.id] = f
+        # v4.52 PERF (#StaticFoodSet): resync persistent food_at after load.
+        food_at.clear()
+        for f in foods.values():
+            if f.alive:
+                food_at.add(f.pos)
+        
+        if "data_logger" in data and get_data_logger().log_level >= 2:
+            logger = get_data_logger()
+            saved_level = data["data_logger"].get("metadata", {}).get("log_level", 1)
+            logger.set_level(saved_level)
+            logger.reset()
+            logger.game_metadata['loaded_from'] = path
+            
+    def schedule_respawn(food: Food, cur_tick: int):
+        # v4.52 PERF (#StaticFoodSet): remove food pos from persistent set
+        food_at.discard(food.pos)
+        food.alive = False
+        food.respawn_at_tick = cur_tick + FoodRespan * GlobalTimeSteps
+        food.progress.clear()
+
+    def try_respawns(cur_tick: int):
+        # v4.52 PERF: early-return check uses the persistent set size — avoids
+        # an O(|foods|) comprehension every tick.
+        if len(food_at) >= MaxFood: return
+        for f in foods.values():
+            if not f.alive and f.respawn_at_tick and cur_tick >= f.respawn_at_tick:
+                p = find_free(allow_sea=True, allow_land=True, near=f.anchor, search_radius=6)
+                if p:
+                    # Remove old pos just in case (should already be gone) + add new
+                    food_at.discard(f.pos)
+                    f.pos = p; f.alive = True; f.respawn_at_tick = None; f.remaining = 25; f.progress.clear()
+                    food_at.add(p)
+                if len(food_at) >= MaxFood: break
+                
+    def update_all_time_best():
+        nonlocal all_time_best
+        current_agents = list(nxers.values())
+        if not current_agents: return
+
+        for a in current_agents:
+            energy_status = a.net.get_energy_status()
+            energy_efficiency = energy_status.get('efficiency', 0.0)
+            branching_ratio = energy_status.get('branching_ratio', 1.0)
+            normalized_food = min(a.stats.food_found / 100.0, 1.0)
+            normalized_explored = min(a.stats.explored / 1000.0, 1.0)
+            normalized_time = min(a.stats.time_lived_s / 1000.0, 1.0)
+            normalized_energy = min(a.stats.energy_efficiency / 10.0, 1.0) if a.stats.energy_efficiency else 0.0
+            normalized_sync = min(a.stats.temporal_sync_score / 2.0, 1.0)
+            normalized_mates = min(a.stats.mates_performed / 5.0, 1.0)  # NEW in 2.0
+            
+            a.stats.fitness_score = (
+                normalized_food * 0.25 + 
+                normalized_explored * 0.15 + 
+                normalized_time * 0.20 + 
+                normalized_energy * 0.10 + 
+                normalized_sync * 0.10 +
+                normalized_mates * 0.20  
+            )
+
+        # v4.52 PERF: heapq.nlargest is O(N log 3) ≈ O(N), vs sorted(...) which is O(N log N).
+        # Identical output since ties are broken by Python's stable order in both.
+        categories = {
+            'food_found': heapq.nlargest(3, current_agents, key=lambda a: a.stats.food_found),
+            'food_taken': heapq.nlargest(3, current_agents, key=lambda a: a.stats.food_taken),
+            'explored': heapq.nlargest(3, current_agents, key=lambda a: a.stats.explored),
+            'time_lived_s': heapq.nlargest(3, current_agents, key=lambda a: a.stats.time_lived_s),
+            'mates_performed': heapq.nlargest(3, current_agents, key=lambda a: a.stats.mates_performed),
+            'fitness_score': heapq.nlargest(3, current_agents, key=lambda a: a.stats.fitness_score),
+            'g_factor': heapq.nlargest(3, current_agents, key=lambda a: getattr(a.stats, 'g_factor', 0.0)),  # v180
+        }
+
+        for stat_name, top_champs in categories.items():
+            combined_champs = all_time_best.get(stat_name, []) + top_champs
+            combined_champs.sort(key=lambda a: getattr(a.stats, stat_name), reverse=True)
+            seen_names = set()
+            unique_champs = []
+            for champ in combined_champs:
+                base_name = _strip_leading_digits(champ.name).lstrip('-') or champ.name
+                if base_name not in seen_names:
+                    seen_names.add(base_name)
+                    unique_champs.append(champ)
+            all_time_best[stat_name] = unique_champs[:5]
+            
+    def rankings():
+        all_nxers = list(nxers.values())
+        if not all_nxers: return {}
+        food_found = sorted(all_nxers, key=lambda a: a.stats.food_found, reverse=True)
+        explored = sorted(all_nxers, key=lambda a: a.stats.explored, reverse=True)
+        lived = sorted(all_nxers, key=lambda a: a.stats.time_lived_s, reverse=True)
+        mated = sorted(all_nxers, key=lambda a: a.stats.mates_performed, reverse=True)
+        food_taken = sorted(all_nxers, key=lambda a: a.stats.food_taken, reverse=True)
+        fitness = sorted(all_nxers, key=lambda a: a.stats.fitness_score, reverse=True)
+        fmt = lambda v: f"{v:.1f}" if isinstance(v, float) else str(v)
+        
+        def format_entry(agent, value):
+            has_parents = (
+                hasattr(agent, "parents")
+                and agent.parents is not None
+                and any(p is not None for p in agent.parents)
+            )
+
+            star = "*" if has_parents else ""
+            name = f"{agent.name} [{agent.rounds_survived}{star}]"
+
+            return (
+                f"{name} [Die]" if not agent.alive else name,
+                fmt(value)
+            )
+
+        g_best = sorted(all_nxers, key=lambda a: getattr(a.stats, "g_factor", 0.0), reverse=True)  # v180
+        return {"Food found": [format_entry(a, a.stats.food_found) for a in food_found], "Food taken": [format_entry(a, a.stats.food_taken) for a in food_taken], "World explored": [format_entry(a, a.stats.explored) for a in explored], "Time lived (s)": [format_entry(a, a.stats.time_lived_s) for a in lived], "Mates": [format_entry(a, a.stats.mates_performed) for a in mated], "Fitness": [format_entry(a, a.stats.fitness_score) for a in fitness], "Best g": [format_entry(a, round(getattr(a.stats, "g_factor", 0.0), 3)) for a in g_best]}
+    
+    def _is_parent_child(A: NxEr, B: NxEr) -> bool:
+        """Check if A and B share any ancestry (prevents inbreeding).
+        v4.52 PERF: cache each agent's ancestor set as a frozenset once; ancestry
+        only mutates at mating, so repeated can_mate() calls hit the cache."""
+        # Direct parent check (using names)
+        if A.name in (B.parents or (None, None)) or B.name in (A.parents or (None, None)):
+            return True
+        # Full ancestry check - no mating with ANY ancestor (using names)
+        a_anc = A.ancestors
+        b_anc = B.ancestors
+        if A.name in b_anc or B.name in a_anc:
+            return True
+        # Check if they share common ancestors (siblings/cousins)
+        if a_anc and b_anc:
+            a_set = getattr(A, '_ancestor_set', None)
+            if a_set is None or getattr(A, '_ancestor_set_len', -1) != len(a_anc):
+                a_set = frozenset(a_anc)
+                A._ancestor_set = a_set
+                A._ancestor_set_len = len(a_anc)
+            b_set = getattr(B, '_ancestor_set', None)
+            if b_set is None or getattr(B, '_ancestor_set_len', -1) != len(b_anc):
+                b_set = frozenset(b_anc)
+                B._ancestor_set = b_set
+                B._ancestor_set_len = len(b_anc)
+            if a_set & b_set:
+                return True
+        return False
+
+    def can_mate(A: NxEr, B: NxEr, now_tick: int) -> bool:
+        if A.id == B.id or not A.alive or not B.alive or A.is_male == B.is_male or A.mating_with is not None or B.mating_with is not None or A.food < 5 or B.food < 5 or _is_parent_child(A, B) or now_tick < A.mate_cooldown_until_tick or now_tick < B.mate_cooldown_until_tick: return False
+        return True
+        
+    def champions_from_last_game() -> List[NxEr]:
+        all_agents = list(nxers.values())
+        if not all_agents: return []
+        # v4.52 PERF: nlargest instead of full sort (we only need top 3 per category).
+        by_food = heapq.nlargest(3, all_agents, key=lambda a: a.stats.food_found)
+        by_expl = heapq.nlargest(3, all_agents, key=lambda a: a.stats.explored)
+        by_lived = heapq.nlargest(3, all_agents, key=lambda a: a.stats.time_lived_s)
+        by_fitness = heapq.nlargest(3, all_agents, key=lambda a: a.stats.fitness_score)
+        potential_champs = []
+        for category_champs in all_time_best.values(): potential_champs.extend(category_champs)
+        potential_champs.extend(by_food); potential_champs.extend(by_expl); potential_champs.extend(by_lived); potential_champs.extend(by_fitness)
+        seen_names = set()
+        unique_champs = []
+        for a in potential_champs:
+            base_name_with_hyphen = _strip_leading_digits(a.name)
+            base_name = base_name_with_hyphen.lstrip('-') or a.name
+            if base_name not in seen_names:
+                seen_names.add(base_name)
+                unique_champs.append(a)
+        return unique_champs[:9]
+    
+    def restart_game_with_champions():
+        nonlocal world, nxers, foods, occupied, births_count, deaths_count, effects, game_index, used_colors, _wN
+        
+        _archive_all_nxers()
+        update_all_time_best()
+        champs = champions_from_last_game()
+        
+        get_data_logger().reset()
+        
+        game_index += 1
+        config._current_round = game_index
+        config._game_id = "nxon2_" + "".join([str(random.randint(0, 9)) for _ in range(9)])
+        effects.clear()
+        births_count = 0
+        deaths_count = 0
+        used_colors = set(RESERVED_COLORS)
+        
+        world = World(NxWorldSize, NxWorldSea, NxWorldRocks, rnd_seed=None)
+        # v4.52 PERF (#inline): refresh cached world-size local used by the
+        # inlined wrap modulo on hot-path raycasts.
+        _wN = world.N
+        renderer.world = world
+        renderer.pan = [world.N * 0.5, world.N * 0.5]
+        renderer.zoom = max(2.0, 800.0 / world.N)
+        nxers = {}
+        occupied = set()
+        place_initial_food(min(MaxFood, max(30, MaxFood // 2)))
+        
+        for a in champs:
+            # Keep the same name - NO round prefix
+            new_name = a.name  # Name stays the same across rounds
+            
+            net_copy = _rebuild_net_from_dict(a.net.to_dict())
+            # v5.0: Carry over multi-sphere brain for champions
+            brain_copy = None
+            if getattr(a, 'brain', None) is not None:
+                try:
+                    brain_dict = save_multisphere_to_dict(a.brain)
+                    brain_copy = load_multisphere_from_dict(brain_dict, rebuild_net_fn=_rebuild_net_from_dict)
+                    # Re-point net_copy to motor sphere's network
+                    if brain_copy and 'motor' in brain_copy.spheres:
+                        net_copy = brain_copy.spheres['motor'].network
+                except Exception:
+                    brain_copy = None
+            
+            allow_land, allow_sea = a.can_land, a.can_sea
+            pos = find_free(allow_sea=allow_sea, allow_land=allow_land) or (random.randrange(world.N), random.randrange(world.N))
+            
+            vision = a.vision_range
+            smell = a.smell_radius
+            heading = random.randint(0, 7)
+            
+            # Create new clan for champion
+            clan_id = config._next_clan_id
+            config._next_clan_id += 1
+            config._clan_history[clan_id] = {
+                'members': {new_name},
+                'merged_from': [],
+                'created_at_round': config._current_round,
+                'active': True
+            }
+            
+            carryover_ancestors = [a.name]
+            carryover_ancestors.extend(getattr(a, 'ancestors', []) or [])
+            carryover_ancestors = list(dict.fromkeys(carryover_ancestors))
+
+            nx = NxEr(
+                id=config._next_nxer_id, 
+                name=new_name, 
+                color=_rand_color(list(used_colors)), 
+                pos=pos, 
+                can_land=allow_land, 
+                can_sea=allow_sea, 
+                net=net_copy, 
+                food=float(StartFood * 1.1), 
+                is_male=a.is_male, 
+                ticks_per_action=max(1, int(GlobalTimeSteps / max(1, net_copy.params.simulation_steps))), 
+                stats=NxErStats(), 
+                visited=set([pos]), 
+                parents=(a.name, None),
+                parent_ids=(a.id, None),
+                ancestors=carryover_ancestors,
+                rounds_survived=a.rounds_survived + 1 if hasattr(a, 'rounds_survived') else 1,
+                mate_cooldown_until_tick=0, 
+                last_move_tick=0, 
+                last_pos=pos,
+                vision_range=vision, 
+                smell_radius=smell, 
+                heading=heading, 
+                clan_id=clan_id,
+                # v5.0: Multi-sphere brain carryover
+                brain=brain_copy,
+                brain_topology=getattr(a, 'brain_topology', 'sensory_association_motor'),
+            )
+            # v4.0: Inherit metabolic preferences from parent
+            if hasattr(a, 'temperature_tolerance_cold'):
+                nx.temperature_tolerance_cold = a.temperature_tolerance_cold * random.uniform(0.98, 1.02)
+            if hasattr(a, 'temperature_tolerance_hot'):
+                nx.temperature_tolerance_hot = a.temperature_tolerance_hot * random.uniform(0.98, 1.02)
+            if hasattr(a, 'resting_metabolism_multiplier'):
+                nx.resting_metabolism_multiplier = a.resting_metabolism_multiplier * random.uniform(0.95, 1.05)
+            used_colors.add(nx.color)
+            config._next_nxer_id += 1
+            nxers[nx.id] = nx
+            occupied.add(nx.pos)
+            _archive_nxer(nx)
+            get_data_logger().log_nxer_event(
+                step_tick,
+                'born',
+                nx.id,
+                {
+                    'name': nx.name,
+                    'founder': False,
+                    'parent_0': a.id,
+                    'parent_1': None,
+                    'parent_name_0': a.name,
+                    'parent_name_1': None,
+                    'ancestors_count': len(nx.ancestors),
+                    'clan_id': clan_id,
+                    'carryover': True,
+                }
+            )
+        
+        # Fill remaining slots with new NxErs
+        while len(nxers) < StartingNxErs:
+            a = make_nxer()
+            nxers[a.id] = a
+            occupied.add(a.pos)
+            _archive_nxer(a)
+            get_data_logger().log_nxer_event(
+                step_tick,
+                'born',
+                a.id,
+                {
+                    'name': a.name,
+                    'founder': True,
+                    'parent_0': None,
+                    'parent_1': None,
+                    'parent_name_0': None,
+                    'parent_name_1': None,
+                    'ancestors_count': 0,
+                    'clan_id': a.clan_id,
+                }
+            )
+        
+        print(f"[RESTART] Game #{game_index} started with {len(champs)} champions and {len(nxers) - len(champs)} new NxErs.")
+
+    def get_heading_from_move(dx: int, dy: int, current: int) -> int:
+        if dx == 0 and dy == 0: return current
+        if dx == -1 and dy == -1: return 0 # NW
+        if dx == 0 and dy == -1: return 1  # N
+        if dx == 1 and dy == -1: return 2  # NE
+        if dx == 1 and dy == 0: return 3   # E
+        if dx == 1 and dy == 1: return 4   # SE
+        if dx == 0 and dy == 1: return 5   # S
+        if dx == -1 and dy == 1: return 6  # SW
+        if dx == -1 and dy == 0: return 7  # W
+        return current
+
+    FIXED_DT = 1.0 / GlobalTimeSteps
+    # v155 (v4.63) — these constants are now driven by the architecture
+    # JSON if present (architectures/default.json by default). Falls
+    # back to the v153/v151 baseline values.
+    from architecture import get_param
+    METABOLIC_RAMP_PER_SEC = float(get_param('biology', 'metabolic_ramp_per_sec', 10.0))
+    MAX_ATROPHY = float(get_param('biology', 'max_atrophy', 5.0))
+    METABOLIC_ABS_CAP_MULTIPLE = float(get_param('biology', 'metabolic_rate_abs_cap_multiple', 20.0))
+    IDLE_EXPLORE_SEC = float(get_param('biology', 'idle_explore_seconds', 1.0))
+    EXPLORE_PROBABILITY = float(get_param('biology', 'explore_probability', 0.50))
+    accumulator = 0.0
+    data_logger = get_data_logger()
+
+    # v4.52 PERF (#24): HEADLESS MODE. When running in time-limited test mode
+    # with auto-save, the game is almost always being driven as a research
+    # batch — nobody is watching the pygame window. We still need pygame
+    # initialised (rendering subsystems power Renderer's font/surface objects
+    # and the window has to exist for pygame to not crash on some OSes) but
+    # we can skip:
+    #   • the frame-rate cap (renderer.tick(60) blocks for ~16 ms/frame)
+    #   • the full draw_world() call
+    #   • per-frame HUD rebuilds (rankings() and best_scores)
+    #   • pygame.event.get() pumping (no UI interaction is expected)
+    # The simulation still advances deterministically via step_tick.
+    _HEADLESS = (limit_minutes is not None)
+
+    # v4.52 PERF (#HUD-cache): rankings() sorts the full NxEr population across
+    # six categories; best_scores recomputes six maxes; draw_world() iterates
+    # nxers multiple times internally. All of it is presentation-layer work
+    # and changes only when stats, population, or selection change.
+    # We cache the payload and invalidate it on a coarse cadence:
+    #   • while PAUSED:  invalidate every frame (cheap — user may interact)
+    #   • while RUNNING: invalidate every N frames OR on selection change
+    # _HUD_REFRESH_FRAMES picks an N that keeps the HUD feeling live at 60fps
+    # without paying sort cost every frame.
+    _HUD_REFRESH_FRAMES = 6          # ~10 Hz at 60fps — imperceptible lag
+    _hud_cache = {
+        'rankings': {},
+        'best_scores': {},
+        'frame_idx': 0,
+        'last_step_tick': -1,
+        'last_selected': None,
+        'last_alive_count': -1,
+    }
+    _frame_counter = 0
+    
+    try:
+        while running:
+            # v4.52 PERF (#24 Headless): skip the 60fps-capped clock tick when
+            # running in test-mode. We still need some time delta for the
+            # simulation accumulator, so we just advance a full step worth of
+            # virtual time each iteration — the inner `while accumulator >=
+            # FIXED_DT` loop will consume it.
+            if _HEADLESS:
+                frame_dt = FIXED_DT
+            else:
+                frame_dt = renderer.tick(60)
+            accumulator += frame_dt
+            _frame_counter += 1
+
+            # --- TEST MODE CHECK ---
+            if limit_minutes is not None:
+                elapsed_minutes = (time.time() - game_start_real_time) / 60.0
+                if elapsed_minutes >= limit_minutes:
+                    print(f"[TEST MODE] Time limit reached ({limit_minutes} mins). Saving and stopping.")
+                    if auto_save and auto_save_prefix: save_state(f"{auto_save_prefix}.json")
+                    running = False
+                    continue
+
+            # v4.52 PERF (#24 Headless): in headless mode we still need to
+            # drain pygame's event queue occasionally (some OSes consider
+            # un-polled windows "hung") but we skip the interactive handlers.
+            if _HEADLESS:
+                if (_frame_counter % 60) == 0:
+                    try:
+                        pygame.event.pump()
+                    except Exception:
+                        pass
+                events_iter = ()   # empty — skip the handler block below
+            else:
+                events_iter = pygame.event.get()
+
+            for ev in events_iter:
+                if ev.type == pygame.QUIT: running = False
+                # v146 (v4.54): When the metrics dashboard is visible, give it
+                # first crack at events. It consumes L (close), ESC (close),
+                # K (save key-metrics file), and clicks on its buttons. If it
+                # returns True, the event is "eaten" and we don't fall through
+                # to the normal key handler — that prevents L from instantly
+                # toggling state twice and prevents a click on the dashboard
+                # from selecting an NxEr underneath.
+                if (renderer.metrics_dashboard is not None
+                    and renderer.metrics_dashboard.visible):
+                    consumed = renderer.metrics_dashboard.handle_event(
+                        ev, get_data_logger(), config._game_id)
+                    if consumed:
+                        continue
+                if ev.type == pygame.KEYDOWN:
+                    if ev.key == pygame.K_ESCAPE: running = False
+                    elif ev.key == pygame.K_SPACE:
+                        if not game_over: paused = not paused; renderer.clear_detail() if not paused else None
+                    elif ev.key == pygame.K_s:
+                        was_paused = paused; paused = True; save_state(); paused = was_paused
+                    elif ev.key == pygame.K_l:
+                        # v146 (v4.54): L now opens the realtime metrics dashboard.
+                        # The previous L=load-saved-game was moved to the O key
+                        # ("Open"), and the on-screen LOAD button still works.
+                        if renderer.metrics_dashboard is not None:
+                            renderer.metrics_dashboard.toggle()
+                            print(f"[DASHBOARD] {'OPEN' if renderer.metrics_dashboard.visible else 'CLOSED'}")
+                    elif ev.key == pygame.K_o:
+                        # v146 (v4.54): O = "Open saved game" (was L in v145).
+                        candidates = sorted([p for p in os.listdir(os.getcwd()) if p.startswith("nx_world_save_") and p.endswith(".json") and not p.endswith("_log.json")])
+                        if candidates: paused = True; load_state(candidates[-1]); paused = False; renderer.clear_detail()
+                    elif ev.key == pygame.K_v:
+                        renderer.visual_mode = not renderer.visual_mode
+                        print(f"[VISUAL MODE] {'ON' if renderer.visual_mode else 'OFF'}")
+                    elif ev.key == pygame.K_m:
+                        # v4.5: Toggle NxEr singing audio. OFF by default; audible
+                        # only when zoomed in (see ui/audio.py thresholds).
+                        new_state = audio_engine.toggle()
+                        print(f"[AUDIO] NxEr singing {'ON' if new_state else 'OFF'}")
+                    # v157 (v4.65) — CHAMPION TRACKING HOTKEYS
+                    # ========================================
+                    # Number keys 1-6 select the current top champion in each
+                    # ranking category. Works whether running or paused, so
+                    # users can flip between champions as they evolve in real
+                    # time. The selection drives the detail panel + the gold
+                    # ring around the NxEr (already drawn by the renderer).
+                    elif ev.key in (pygame.K_1, pygame.K_2, pygame.K_3,
+                                     pygame.K_4, pygame.K_5, pygame.K_6,
+                                     pygame.K_7):
+                        # Map number key → ranking category key (sort attribute)
+                        key_to_attr = {
+                            pygame.K_1: 'fitness_score',     # 1: Fitness
+                            pygame.K_2: 'food_found',        # 2: Food Found
+                            pygame.K_3: 'food_taken',        # 3: Food Stolen
+                            pygame.K_4: 'mates_performed',   # 4: Mates
+                            pygame.K_5: 'explored',          # 5: World Explored
+                            pygame.K_6: 'time_lived_s',      # 6: Time Lived
+                            pygame.K_7: 'g_factor',          # 7: Best g (v180)
+                        }
+                        attr = key_to_attr[ev.key]
+                        alive_nxers = [a for a in nxers.values() if a.alive]
+                        if alive_nxers:
+                            champ = max(alive_nxers, key=lambda a: getattr(a.stats, attr, 0))
+                            renderer.selected_nxer_id = champ.id
+                            label = {'fitness_score': 'Fitness',
+                                     'food_found': 'Food Found',
+                                     'food_taken': 'Food Stolen',
+                                     'mates_performed': 'Mates',
+                                     'explored': 'World Explored',
+                                     'time_lived_s': 'Time Lived',
+                                     'g_factor': 'Best g'}[attr]
+                            value = getattr(champ.stats, attr, 0)
+                            print(f"[CHAMPION] {label}: {champ.name} = "
+                                  f"{value:.2f}" if isinstance(value, float)
+                                  else f"[CHAMPION] {label}: {champ.name} = {value}")
+                    # v157 — F toggles "follow selected NxEr": camera auto-pans
+                    # to keep the selected agent centred each frame. Released
+                    # by selecting another NxEr or pressing F again. Useful
+                    # for watching a champion move around the world while
+                    # the simulation runs.
+                    elif ev.key == pygame.K_f:
+                        renderer.follow_selected = not getattr(
+                            renderer, 'follow_selected', False)
+                        print(f"[FOLLOW] {'ON' if renderer.follow_selected else 'OFF'}"
+                              + (f" (tracking NxEr id={renderer.selected_nxer_id})"
+                                 if renderer.follow_selected and renderer.selected_nxer_id is not None
+                                 else ""))
+                elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                    btn = renderer.button_clicked(ev.pos)
+                    if btn == "playpause":
+                        if not game_over: paused = not paused; renderer.clear_detail() if not paused else None
+                    elif btn == "save":
+                        update_all_time_best()
+                        was_paused = paused; paused = True; save_state(); paused = was_paused
+                    elif btn == "load":
+                        candidates = sorted([p for p in os.listdir(os.getcwd()) if p.startswith("nx_world_save_") and p.endswith(".json") and not p.endswith("_log.json")])
+                        if candidates: paused = True; load_state(candidates[-1]); paused = False; renderer.clear_detail()
+                    elif btn == "save_best":
+                        # v153 (v4.61) — prefix Best NxEr files with game_id so
+                        # they're traceable to the run that produced them. The
+                        # filename pattern is `nxon2_XXXXXXXXX__BestFoodFound.json`
+                        # (double underscore matches the KeyMetrics convention).
+                        file_mapping = {'food_found': 'BestFoodFound.json',
+                                        'food_taken': 'BestFoodTaken.json',
+                                        'explored': 'BestWorldExplorer.json',
+                                        'time_lived_s': 'BestTimeLived.json',
+                                        'mates_performed': 'BestMates.json',
+                                        'fitness_score': 'BestFitness.json'}
+                        update_all_time_best()
+                        gid_prefix = (config._game_id or "unknown")
+                        for category, champs in all_time_best.items():
+                            if category not in file_mapping: continue
+                            filename = f"{gid_prefix}__{file_mapping[category]}"
+                            for champ in champs[:1]:
+                                save_nxer_to_file(champ, save_name=filename, auto_save=True)  # v167 — no dialog
+                        print(f"[SAVE BEST] Saved champions with game prefix '{gid_prefix}'")
+                    elif btn == "exit":
+                        if limit_minutes is not None:
+                            pygame.quit()
+                            sys.exit(0)
+                        running = False
+                    elif btn == "restart_yes" and game_over:
+                        game_over = False; paused = False; restart_game_with_champions(); step_tick = 0; accumulator = 0.0
+                        renderer.clear_detail(); game_over_start_time = None; user_declined_restart = False
+                    elif btn == "restart_no" and game_over:
+                        user_declined_restart = True; running = False
+                    else:
+                        dbtn = renderer.detail_button_clicked(ev.pos)
+                        if dbtn and renderer.selected_nxer_id is not None and renderer.selected_nxer_id in nxers:
+                            a = nxers[renderer.selected_nxer_id]
+                            if dbtn == "save_nxer": save_nxer_to_file(a, save_name=a.name)
+                            elif dbtn == "load_nxer": load_nxer_from_file(spawn_near=a.pos)
+                            elif dbtn == "save_nxvizer": save_nxvizer_to_file(a)
+                            elif dbtn == "load_nxvizer": load_nxvizer_from_file(spawn_near=a.pos)
+                        # v157 (v4.65) — CHAMPION TRACKING
+                        # ================================
+                        # Previously ranking clicks only worked when paused
+                        # (`elif paused and not game_over:`). Users couldn't
+                        # select / follow champions in real time without first
+                        # pausing the game — defeating the whole point of
+                        # watching them evolve. v157 splits the click handling:
+                        #
+                        #   1. Ranking clicks → always work (running or paused)
+                        #   2. World clicks   → only work when paused (otherwise
+                        #      clicks at random screen positions during play
+                        #      would accidentally select random NxErs)
+                        elif not game_over:
+                            clicked_name = renderer.ranking_clicked(ev.pos)
+                            if clicked_name:
+                                for a in nxers.values():
+                                    if a.name == clicked_name:
+                                        renderer.selected_nxer_id = a.id
+                                        break
+                            elif paused and renderer.visual_mode:
+                                # World-click selection only while paused
+                                mx, my = ev.pos
+                                best_id, best_d = None, 1e9
+                                for a in nxers.values():
+                                    if not a.alive: continue
+                                    sx, sy = renderer.world_to_screen(a.pos[0], a.pos[1])
+                                    d2 = (sx - mx) ** 2 + (sy - my) ** 2
+                                    if d2 < best_d: best_d = d2; best_id = a.id
+                                if best_id is not None and best_d <= (14 * 14): renderer.selected_nxer_id = best_id
+                                else: renderer.clear_detail()
+                renderer.event_zoom_rotate_pan(ev)
+            
+            if game_over and game_over_start_time is not None and not user_declined_restart:                
+                if time.time() - game_over_start_time > 10: # Auto-restart after 10 sec                 
+                    # FIX: Update Hall of Fame statistics BEFORE saving so the file includes this round's champions
+                    update_all_time_best()
+                    
+                    if save_on_round_end:
+                        # 1. Autosave the round
+                        timestamp = _now_str().replace(":", "-")
+                        filename = f"{config._session_id}_{config._game_id}_{game_index}_Completed_{timestamp}.json"
+                        save_state(filename)
+                        print(f"[SAVING ROUND] {game_index} saved as {filename}")
+                        
+                    # --- MAX ROUNDS CHECK ---
+                    if max_rounds is not None and game_index >= max_rounds:
+                        print(f"Max rounds ({max_rounds}) reached. Stopping game.")
+                        running = False
+                        continue
+                                        
+                    game_over = False; paused = False; restart_game_with_champions(); step_tick = 0; accumulator = 0.0
+                    renderer.clear_detail(); game_over_start_time = None; user_declined_restart = False
+                    
+                    # Reset the round timer for the new round
+                    round_start_real_time = time.time()
+                    
+            renderer.handle_input(frame_dt)
+            
+            steps_to_process = 0
+            if not paused and not game_over:
+                while accumulator >= FIXED_DT:
+                    steps_to_process += 1
+                    accumulator -= FIXED_DT
+                    if steps_to_process >= 10:
+                        accumulator = 0.0
+                        break
+            
+            # v148 (v4.56) — propagate pause state to the logger so it
+            # short-circuits log_tick (skipping the metrics worker enqueue
+            # and the duplicate-tick logging at line 3244 below). Without
+            # this, paused frames flood the time-series with stale samples
+            # — observed in game_id 105866379 as 500/764 samples sharing
+            # the same tick value.
+            data_logger.paused = bool(paused or game_over)
+            
+            for _ in range(steps_to_process):
+                step_tick += 1
+                # v4.1: Throttle detailed logging — Level 2 analytics every 10 ticks
+                data_logger.log_tick(step_tick, nxers, full_analytics=(step_tick % 10 == 0))
+                # --- A. Update Game World State & Agent Vitals ---
+                effects[:] = [ef for ef in effects if (step_tick - ef['start']) < GlobalTimeSteps]
+                
+                # =========================================================
+                # CIRCADIAN SYSTEM UPDATE (NEW v3.0)
+                # v4.52 PERF (#LUT): Replaced math.sin/cos/cos calls with
+                # precomputed look-up-table indexing. Identical output values
+                # (up to float round-off) as compute_circadian_phase /
+                # get_circadian_modulation / get_circadian_metabolic_multiplier.
+                # Savings: ~5 trig ops + 1 dict build per tick → 2 array indexes.
+                # =========================================================
+                if circadian_enabled:
+                    _i_circ = step_tick % circadian_cycle_ticks
+                    global_circadian_phase = _circ_phases[_i_circ]
+                    # Unpack directly — avoids dict allocation/iteration.
+                    _circ_da_add  = _circ_day_mod[_i_circ] * 0.02
+                    _circ_5ht_add = _circ_night_mod[_i_circ] * 0.03
+                    _circ_ne_add  = _circ_day_mod[_i_circ] * 0.015
+                    _circ_ach_add = _circ_day_mod[_i_circ] * 0.012
+                    # Keep the dict form for downstream code that iterates it.
+                    circadian_mods = {
+                        'dopamine': _circ_da_add,
+                        'serotonin': _circ_5ht_add,
+                        'norepinephrine': _circ_ne_add,
+                        'acetylcholine': _circ_ach_add,
+                    }
+                    metabolic_circadian_mult = _circ_metab_mult[_i_circ]
+                    is_night = global_circadian_phase >= 0.5
+                else:
+                    global_circadian_phase = 0.0
+                    circadian_mods = {'dopamine': 0, 'serotonin': 0, 'norepinephrine': 0, 'acetylcholine': 0}
+                    metabolic_circadian_mult = 1.0
+                    is_night = False
+                
+                # v4.1: Rebuild spatial grid once per tick (O(N)) — enables O(1) neighbor counting
+                _agent_grid.clear()
+                for a in nxers.values():
+                    if a.alive:
+                        _agent_grid.insert(a.id, a.pos)
+                
+                def count_nearby_nxers(pos, radius=2):
+                    """Count NxErs within a given radius — O(1) via spatial grid."""
+                    return _agent_grid.count_nearby(pos, radius)
+                
+                for a in nxers.values():
+                    if not a.alive: continue
+                    a.stats.time_lived_s += FIXED_DT
+                    
+                    # UPDATED: Metabolic Calculation
+                    # 1. Calculate idle seconds
+                    idle_seconds = max(0.0, (step_tick - a.last_move_tick) / GlobalTimeSteps)
+                    # 2. Calculate Atrophy Factor (1.0 = Base, +1000% per second idle)
+                    # v151: capped at MAX_ATROPHY to break the death spiral
+                    atrophy_factor = min(MAX_ATROPHY,
+                                          1.0 + METABOLIC_RAMP_PER_SEC * idle_seconds)
+                    # 3. Apply consumption                    
+                    a.food -= 0.01 * FIXED_DT * atrophy_factor
+                    
+                    # =========================================================
+                    # CIRCADIAN EFFECTS ON NEUROMODULATORS (NEW v3.0)
+                    # =========================================================
+                    if circadian_enabled:
+                        a.circadian_phase = global_circadian_phase
+                        
+                        # Apply circadian modulation to neuromodulators
+                        for mod, mod_val in circadian_mods.items():
+                            # v109 FIX: Use additive modulation with autoreceptor gating,
+                            # NOT target-chasing. Target-chasing accumulates when already above
+                            # baseline because target > current > baseline creates upward pressure.
+                            # Additive injection with autoreceptor feedback self-limits.
+                            _neuromod_boost(a.net.neuromodulators, mod, mod_val * FIXED_DT, a.net.params)
+                        
+                        # v4.0: Resting-circadian coupling — STRONGER
+                        # Results-97: day_night vs resting r=0.00024 — completely broken
+                        # Root cause: rest_prob * 0.05 per tick too weak, day wake-up too aggressive
+                        # FIX: Higher per-tick probability, deterministic night-rest threshold
+                        rest_tendency = getattr(a.net.params, 'circadian_rest_tendency', 0.8)
+                        food_ok = a.food > StartFood * 0.25
+                        if is_night and food_ok:
+                            night_depth = math.sin(math.pi * (global_circadian_phase - 0.5) * 2) if global_circadian_phase >= 0.5 else 0.0
+                            rest_prob = rest_tendency * max(0, night_depth)
+                            # v4.0: Much higher per-tick probability (0.05→0.20)
+                            # AND deterministic rest at deep night (night_depth > 0.7)
+                            if night_depth > 0.7 or random.random() < rest_prob * 0.20:
+                                a.is_resting = True
+                        elif is_night and not food_ok:
+                            # Night but hungry: stay awake to forage
+                            a.is_resting = False
+                        elif not is_night and not getattr(a, '_brain_wants_rest', False):
+                            # Day: gradual wake-up (slower than v3.3's 0.1 → 0.04)
+                            if random.random() < 0.04:
+                                a.is_resting = False
+                        
+                        # Resting reduces metabolism and activity
+                        if a.is_resting:
+                            a.food -= 0.005 * FIXED_DT  # Reduced consumption while resting
+                        
+                        # Apply circadian metabolic multiplier
+                        circadian_food_mod = 0.01 * FIXED_DT * (metabolic_circadian_mult - 1.0)
+                        a.food -= circadian_food_mod
+                    
+                    # NEW v2.28: Behavioral Modulation Scenarios (Consolidation)
+                    # "This made me feel good" (Stability/Satiety) -> serotonin increases
+                    current_serotonin = a.net.neuromodulators.get('serotonin', 0.12)
+                    current_ach = a.net.neuromodulators.get('acetylcholine', 0.12)
+                    
+                    if a.food > StartFood * 0.6:
+                        # Consolidation scenario: 5-HT and ACh increase.
+                        _neuromod_boost(a.net.neuromodulators, 'serotonin', 0.002, a.net.params)
+                        #a.net.neuromodulators['acetylcholine'] = min(2.0, current_ach + 0.001) +    # ACh should be novelty/attention-driven, not tonically increased by satiety (prevents ceiling saturation).
+                    # "This was very risky, difficult, or bad for us" (Starvation risk) -> serotonin decreases
+                    elif a.food < StartFood * 0.25:
+                        a.net.neuromodulators['serotonin'] = max(0.0, current_serotonin * 0.99)
+                        
+                    
+                    if a.food <= 0 and a.alive:
+                        a.alive = False; a.died_ts = time.time(); deaths_count += 1
+                        data_logger.log_nxer_event(step_tick, 'died', a.id, {'cause': 'starvation', 'name': a.name}); data_logger.register_death_for_survivability(a.id)
+                        data_logger.update_nxer_stats(a)
+                        _archive_nxer(a)
+                        if a.pos in occupied: occupied.discard(a.pos)
+                        push_effect('skull', a.pos)
+                for a in nxers.values():
+                    if not a.alive: continue
+                    if a.mating_with is not None and step_tick >= (a.mating_end_tick or 0):
+                        a.mating_with = None; a.mating_end_tick = None
+                        a.mate_cooldown_until_tick = max(a.mate_cooldown_until_tick, step_tick + mate_cooldown_ticks)
+
+                # --- B. Gather and Execute Network Updates (Sequential Optimization) ---
+                # v4.1: Use spatial grid for occupant lookups (already rebuilt above)
+                occupant_at = _agent_grid._pos_to_id
+                # v4.52 PERF (#StaticFoodSet): `food_at` is maintained
+                # incrementally by place_initial_food / schedule_respawn /
+                # try_respawns and by the food-eaten path below. No per-tick
+                # rebuild from `foods.values()`. Behavior-neutral.
+                
+                # Track which NxErs ate food this tick for temperature
+                ate_food_this_tick = set()
+
+                for a in nxers.values():
+                    if not a.alive or a.mating_with is not None: continue
+                    
+                    # Paper Claim: If Norepinephrine is high, it could increase movement speed
+                    # We modulate ticks_per_action (lower = faster) based on NE level
+                    ne_level = a.net.neuromodulators.get('norepinephrine', 0.12)
+                    base_speed = max(1, int(GlobalTimeSteps / max(1, a.net.params.simulation_steps)))
+                    # Apply speed boost if NE is elevated (> 0.25)
+                    speed_modifier = max(0.4, 1.0 - (ne_level * 0.5)) if ne_level > 0.25 else 1.0
+                    a.ticks_per_action = max(1, int(base_speed * speed_modifier))
+                    
+                    # =========================================================
+                    # TEMPERATURE UPDATE (NEW v3.0)
+                    # =========================================================
+                    if getattr(a.net.params, 'temperature_enabled', True):
+                        nearby_count = count_nearby_nxers(a.pos)
+                        just_moved = (step_tick - a.last_move_tick) < 2
+                        just_ate = a.id in ate_food_this_tick
+                        
+                        a.body_temperature = update_body_temperature(
+                            a, a.net.params, step_tick,
+                            global_circadian_phase,
+                            nearby_count,
+                            just_ate,
+                            just_moved
+                        )
+                        
+                        # Apply temperature effects to neural dynamics
+                        temp_effects = get_temperature_neural_effects(
+                            a.body_temperature,
+                            a.net.params.temperature_baseline
+                        )
+                        
+                        # Modulate spontaneous firing based on temperature
+                        for neuron in a.net.all_neurons:
+                            if neuron.is_active:
+                                base_spont = neuron.spontaneous_firing_rate
+                                neuron.spontaneous_firing_rate = base_spont * temp_effects['spontaneous_mod']
+                        
+                        # Temperature affects resting behavior
+                        if a.body_temperature < TEMP_MIN + 1.0:
+                            a.is_resting = False  # Too cold to rest, need to move
+                    
+                    a.tick_accum += 1
+                    if a.tick_accum >= a.ticks_per_action:
+                        a.tick_accum = 0
+                                                
+                        if step_tick < boot_random_until:
+                            # UPDATED v4.5: 10 inputs (adds Song channel)
+                            inputs = [random.choice([-1, 0, 1]) for _ in range(10)]
+                        else:
+                            # [DOPAMINE UPDATE] Disappointment Dynamics
+                            # Paper Claim: "It has to decrease when expectations fail (I look for food but don't find it)"
+                            # Check previous inputs: Index 4 (Sight) or 5 (Smell) == 1 means Food was expected.
+                            was_expecting_food = (a.last_inputs[4] == 1 or a.last_inputs[5] == 1)
+                            # We approximate "didn't find" by checking if food level didn't increase significantly 
+                            # (accounting for metabolic decay). Storing _prev_food allows this delta check.
+                            if was_expecting_food and getattr(a, '_prev_food', 0) >= a.food:
+                                a.net.neuromodulators['dopamine'] = max(0.0, a.net.neuromodulators.get('dopamine', 0.12) - 0.05)
+                            
+                            # [BEHAVIORAL SCENARIOS] Risk, Hyperactivity, Danger
+                            da_level = a.net.neuromodulators.get('dopamine', 0.12)
+                            ser_level = a.net.neuromodulators.get('serotonin', 0.12)
+                            ach_level = a.net.neuromodulators.get('acetylcholine', 0.12)
+                            ne_level = a.net.neuromodulators.get('norepinephrine', 0.12)
+                            
+                            # NEW v3.0: Rest mode reduces activity outputs
+                            if a.is_resting:
+                                # Reduce dopamine during rest (less reward-seeking)
+                                a.net.neuromodulators['dopamine'] = max(0.05, da_level * 0.9)
+                                ser_base = getattr(a.net.params, 'serotonin_baseline', 0.12)
+                                # v110 FIX: Tighter ceiling (1.5× baseline, was 2.0×) and
+                                # reduced boost (0.015, was 0.03). Even with v108's ceiling
+                                # check, 2.0× baseline = 0.24 for 5-HT — still too permissive.
+                                # BIOINSPIRED: Serotonergic raphe neurons reduce firing during
+                                # NREM sleep (McGinty & Harper 1976). The small residual 5-HT
+                                # release during rest should be modest, not a saturation pump.
+                                if ser_level < ser_base * 1.5:
+                                    _neuromod_boost(a.net.neuromodulators, 'serotonin', 0.015, a.net.params)
+
+                            # Hyperactivity scenario*: High DA but low ACh.
+                            is_hyperactive = (da_level > 0.6 and ach_level < 0.3)
+                            
+                            # Risk-taking: High DA, low serotonin -> increased risk-taking
+                            if (da_level > 0.6 and ser_level < 0.4) or is_hyperactive:
+                                # Hyperactivity triggers randomness more often
+                                chance = 0.25 if is_hyperactive else 0.10
+                                if random.random() < chance:
+                                    a.heading = random.randint(0, 7)
+                            
+                            # Danger scenario*: All low (implied by bad health/food) or NA high.
+                            # Survival mode: NA increases, ACh increases for focus. , removed or ne_level > 0.7 
+                            if (a.food < StartFood * 0.2 or a.net.all_neurons[0].health < 0.3): 
+                                _neuromod_boost(a.net.neuromodulators, 'norepinephrine', 0.05, a.net.params)
+                                #a.net.neuromodulators['acetylcholine'] = min(2.0, ach_level + 0.02) # ACh decoupled from threat-arousal for this test (should be novelty/attention-driven, not yoked to NE).
+                            
+                            # 4. Hunger — v135 FIX (M1): TRINARY with 3 states (was only 2).
+                            # OLD: hunger_val = 0 (full) or -1 (food < 20% of StartFood)
+                            #   Problem 1: only 2 states, never +1 → M1 hungry mask (in3 > 0.3) always empty
+                            #   Problem 2: threshold at 20% meant brain only saw hunger near death
+                            # NEW: 3 trinary states matching all other input channels:
+                            #   +1 = hungry  (food < 40% of StartFood — need to find food)
+                            #    0 = normal  (food 40-75% — default)
+                            #   -1 = satiated (food > 75% — no urgency)
+                            # BIOINSPIRED: Hypothalamic hunger signals have graded thresholds,
+                            # not a single starvation alarm.
+                            if a.food < (StartFood * 0.40):
+                                hunger_val = 1    # hungry — brain should seek food
+                            elif a.food > (StartFood * 0.75):
+                                hunger_val = -1   # satiated — can afford to explore/mate
+                            else:
+                                hunger_val = 0    # normal — default
+                            
+                            # 5. Sight (Line of sight in heading)
+                            # v4.52 PERF: cache ax,ay,world_n locals; use occupant_at.get()
+                            # once instead of "in" + "[...]" (two dict lookups per step).
+                            sight_val = 0
+                            seen_neighbors_count = 0
+                            seen_different_clan = False
+                            vx, vy = DIR_OFFSETS[a.heading]
+                            found_obj = False
+                            ax, ay = a.pos
+                            _wn = world.N
+                            _terrain = world.terrain
+                            for dist in range(1, a.vision_range + 1):
+                                tx = (ax + vx * dist) % _wn
+                                ty = (ay + vy * dist) % _wn
+                                t_type = _terrain((tx, ty))
+                                if t_type == T_ROCK: break
+                                if (tx, ty) in food_at:
+                                    sight_val = 1; found_obj = True;
+                                    # [DOPAMINE UPDATE] Anticipation (Visual Food Cue)
+                                    # Paper Claim: "Dopamine – triggered by... visual food cues"
+                                    _neuromod_boost(a.net.neuromodulators, 'dopamine', 0.02, a.net.params)
+                                    break
+                                other_id = occupant_at.get((tx, ty))
+                                if other_id is not None:
+                                    other_a = nxers[other_id]
+                                    seen_neighbors_count += 1
+                                    if a.clan_id is not None and other_a.clan_id is not None and a.clan_id != other_a.clan_id:
+                                        seen_different_clan = True
+                                    sight_val = 0 if (other_a.clan_id is not None and other_a.clan_id == a.clan_id) else -1
+                                    found_obj = True;
+                                    # [DOPAMINE UPDATE] Anticipation (Possible Mating)
+                                    if a.is_male != other_a.is_male and can_mate(a, other_a, step_tick):
+                                        _neuromod_boost(a.net.neuromodulators, 'dopamine', 0.02, a.net.params)
+                                    break
+                            if not found_obj: sight_val = 0
+                            
+                            # Paper Claim: NE activated by high population density and proximity to members of different clans
+                            ne_boost = 0.0
+                            if seen_neighbors_count >= 3: ne_boost += 0.05
+                            if seen_different_clan: ne_boost += 0.10 # "Surprise/Threat"
+                            if ne_boost > 0:
+                                _neuromod_boost(a.net.neuromodulators, 'norepinephrine', ne_boost, a.net.params)
+                            
+                            # 6. Smell (Square Radius)
+                            # v4.52 PERF: use cached offset tuple (no per-tick inner-range rebuild);
+                            # cache ax,ay locals; short-circuit once both flags set (food + nxer).
+                            smell_val = 0
+                            found_food_smell = False; found_nxer_smell = False
+                            ax, ay = a.pos
+                            _wn = world.N
+                            for dx, dy in _smell_offsets(a.smell_radius):
+                                sx = (ax + dx) % _wn
+                                sy = (ay + dy) % _wn
+                                if not found_food_smell and (sx, sy) in food_at:
+                                    found_food_smell = True
+                                if not found_nxer_smell and (sx, sy) in occupant_at:
+                                    found_nxer_smell = True
+                                if found_food_smell and found_nxer_smell:
+                                    break
+                            if found_food_smell: 
+                                smell_val = 1
+                                # [DOPAMINE UPDATE] Anticipation (Olfactory Food Cue)
+                                # Paper Claim: "Dopamine – triggered by olfactory... food cues"
+                                _neuromod_boost(a.net.neuromodulators, 'dopamine', 0.02, a.net.params)
+                            elif found_nxer_smell: smell_val = 0
+                            else: smell_val = 0
+
+                            # =========================================================
+                            # INPUT 6: DAY/NIGHT SIGNAL (NEW v3.1)
+                            # =========================================================
+                            # BIOINSPIRED: Circadian input to brain allows learned day/night behaviors
+                            # Trinary: -1=night (rest period), 0=transition (dawn/dusk), 1=day (active period)
+                            daynight_val = 0
+                            if circadian_enabled:
+                                phase = global_circadian_phase
+                                if 0.0 <= phase < 0.15 or 0.85 <= phase < 1.0:
+                                    daynight_val = 0  # Dawn/dusk transition
+                                elif 0.15 <= phase < 0.5:
+                                    daynight_val = 1  # Day - active period
+                                else:  # 0.5 <= phase < 0.85
+                                    daynight_val = -1  # Night - rest period
+                            
+                            # =========================================================
+                            # INPUT 7: TEMPERATURE SIGNAL (NEW v3.1)
+                            # =========================================================
+                            # BIOINSPIRED: Internal temperature affects behavior and metabolism
+                            # Trinary: -1=cold/hypothermic, 0=normal, 1=hot/hyperthermic
+                            temp_val = 0
+                            current_temp = a.body_temperature
+                            cold_thresh = getattr(a.net.params, 'temp_cold_threshold', 35.5)
+                            hot_thresh = getattr(a.net.params, 'temp_hot_threshold', 38.5)
+                            # v4.0: Use inherited individual thresholds if available
+                            cold_thresh = getattr(a, 'temperature_tolerance_cold', 
+                                getattr(a.net.params, 'temp_cold_threshold', 35.5))
+                            hot_thresh = getattr(a, 'temperature_tolerance_hot',
+                                getattr(a.net.params, 'temp_hot_threshold', 38.5))
+                            if current_temp < cold_thresh:
+                                temp_val = -1  # Hypothermic - need to move/seek warmth
+                            elif current_temp > hot_thresh:
+                                temp_val = 1   # Hyperthermic - need to rest/cool down
+                            else:
+                                temp_val = 0   # Normal temperature
+                            
+                            # =========================================================
+                            # INPUT 8: PROPRIOCEPTION SIGNAL (NEW v3.1)
+                            # =========================================================
+                            # BIOINSPIRED: Proprioception must reach the brain BEFORE
+                            # the reflex layer overrides behaviour. Use both collision
+                            # history and a one-step lookahead of the current heading.
+                            proprio_val = 0
+                            prop = getattr(a, 'proprioceptron', None)
+                            a._proprio_warning_active = False
+                            a._proprio_warning_source = None
+                            a._proprio_warning_heading = getattr(a, 'heading', 0)
+                            if prop is not None:
+                                clear_threshold = getattr(a.net.params, 'proprioceptron_clear_path_threshold', 5)
+                                force_threshold = getattr(a.net.params, 'proprioceptron_force_turn_threshold', 3)
+                                heading_to_check = getattr(a, 'heading', 0)
+                                history_warning = prop.should_warn_brain(heading_to_check, force_threshold)
+                                lookahead_warning = _heading_would_be_blocked(a, heading_to_check)
+
+                                if history_warning or lookahead_warning:
+                                    proprio_val = -1
+                                    a._proprio_warning_active = True
+                                    a._proprio_warning_heading = heading_to_check
+                                    if history_warning and lookahead_warning:
+                                        a._proprio_warning_source = 'history+lookahead'
+                                    elif history_warning:
+                                        a._proprio_warning_source = 'history'
+                                    else:
+                                        a._proprio_warning_source = 'lookahead'
+
+                                    if prop.register_brain_warning(step_tick):
+                                        data_logger.log_nxer_event(
+                                            step_tick,
+                                            'proprioceptron_brain_warning',
+                                            a.id,
+                                            {
+                                                'heading': heading_to_check,
+                                                'source': a._proprio_warning_source,
+                                                'consecutive_blocked': prop.consecutive_blocked,
+                                                'rock_hits_same_heading': sum(1 for h in prop.rock_hit_history if h == heading_to_check)
+                                            }
+                                        )
+                                elif prop.consecutive_blocked == 0 and len(prop.rock_hit_history) == 0:
+                                    if hasattr(a, '_consecutive_successful_moves'):
+                                        if a._consecutive_successful_moves >= clear_threshold:
+                                            proprio_val = 1
+                                    else:
+                                        a._consecutive_successful_moves = 0
+                                else:
+                                    proprio_val = 0
+                            
+                            # =========================================================
+                            # INPUT 9: SONG / HEARING (NEW v4.5)
+                            # =========================================================
+                            # BIOINSPIRED: Auditory cortex integrates the pitched
+                            # vocalisations of nearby conspecifics and classifies
+                            # them as consonant (likely in-group) or dissonant
+                            # (novel / out-group warning).
+                            #
+                            # Compute cost: O(cells_in_hearing_radius). We use the
+                            # spatial grid to enumerate neighbours and cap the
+                            # listener list to voice_max_listeners so this stays
+                            # bounded as the population grows.
+                            song_val = 0
+                            if getattr(a.net.params, 'voice_enabled', True) and a.voice is not None:
+                                hear_r = int(getattr(a.net.params, 'voice_hearing_radius', 4))
+                                max_listeners = int(getattr(a.net.params, 'voice_max_listeners', 6))
+                                nearby_voices = []
+                                # The spatial grid buckets are cell_size-wide; we just
+                                # enumerate the cells overlapping the hearing square.
+                                cs = _agent_grid.cell_size
+                                cx0 = (a.pos[0] - hear_r) // cs
+                                cx1 = (a.pos[0] + hear_r) // cs
+                                cy0 = (a.pos[1] - hear_r) // cs
+                                cy1 = (a.pos[1] + hear_r) // cs
+                                for cx in range(cx0, cx1 + 1):
+                                    for cy in range(cy0, cy1 + 1):
+                                        bucket = _agent_grid.grid.get((cx, cy))
+                                        if not bucket:
+                                            continue
+                                        for nid in bucket:
+                                            if nid == a.id:
+                                                continue
+                                            other = nxers.get(nid)
+                                            if other is None or not other.alive:
+                                                continue
+                                            # Only HEARD singers count — the brain
+                                            # perceives sung voices, not silent ones.
+                                            if getattr(other, 'last_sing_level', 0) < 1:
+                                                continue
+                                            ov = getattr(other, 'voice', None)
+                                            if ov is None:
+                                                continue
+                                            # Manhattan-ish square distance check
+                                            if abs(other.pos[0] - a.pos[0]) > hear_r:
+                                                continue
+                                            if abs(other.pos[1] - a.pos[1]) > hear_r:
+                                                continue
+                                            nearby_voices.append(ov)
+                                            if len(nearby_voices) >= max_listeners:
+                                                break
+                                        if len(nearby_voices) >= max_listeners:
+                                            break
+                                    if len(nearby_voices) >= max_listeners:
+                                        break
+                                if nearby_voices:
+                                    song_val = song_classification(a.voice, nearby_voices)
+                                    # Choir serotonin boost: harmonic chorus of
+                                    # several same-clan neighbours stabilises mood.
+                                    if song_val == 1:
+                                        choir_thresh = int(getattr(a.net.params, 'voice_choir_nearby_threshold', 3))
+                                        if len(nearby_voices) >= choir_thresh:
+                                            _neuromod_boost(
+                                                a.net.neuromodulators,
+                                                'serotonin',
+                                                float(getattr(a.net.params, 'voice_choir_serotonin_boost', 0.02)),
+                                                a.net.params,
+                                            )
+
+                            # Combine with physical inputs from previous step (UPDATED v4.5: 10 inputs)
+                            inputs = list(a.last_inputs)
+                            if len(inputs) < 10: inputs = list(inputs) + [0]*(10-len(inputs))
+                            inputs[3] = hunger_val
+                            inputs[4] = sight_val
+                            inputs[5] = smell_val
+                            inputs[6] = daynight_val
+                            inputs[7] = temp_val
+                            inputs[8] = proprio_val
+                            inputs[9] = song_val
+                        
+                        a.last_inputs = tuple(inputs)
+                        # [DOPAMINE UPDATE] Store current food for next tick's disappointment check
+                        a._prev_food = a.food
+                        
+                        # Apply Metabolic Ramp directly to the live object
+                        # v4.0: Resting NxErs have reduced metabolism (BIOINSPIRED: energy conservation)
+                        idle_seconds = max(0.0, (step_tick - a.last_move_tick) / GlobalTimeSteps)
+                        if a.is_resting:
+                            # Resting: reduced metabolic rate, no idle penalty
+                            resting_mult = getattr(a, 'resting_metabolism_multiplier', RESTING_METABOLISM_MULT)
+                            a.net.params.metabolic_rate *= resting_mult
+                        else:
+                            # v153 (v4.61) F-1 FIX — CAP THE METABOLIC_RATE RATCHET
+                            # ----------------------------------------------------
+                            # The v152 investigation found this multiplicative
+                            # ramp was UNBOUNDED and metabolic_rate is never
+                            # reset. With idle_seconds growing each tick, the
+                            # factor `1 + 10*idle` compounds exponentially:
+                            # after 5s idle in a sustained-idle period,
+                            # metabolic_rate had grown by 5^5 = 3125× and
+                            # never decayed. This was a separate death-spiral
+                            # from the food-consumption one v151 fixed.
+                            #
+                            # Fix: cap the per-tick multiplier at the same
+                            # MAX_ATROPHY=5.0 used for food drain (v151) and
+                            # CAP THE ABSOLUTE metabolic_rate at a sane bound.
+                            # This prevents runaway compounding without
+                            # changing the short-term incentive structure.
+                            atrophy_mult = min(MAX_ATROPHY,
+                                                1.0 + METABOLIC_RAMP_PER_SEC * idle_seconds)
+                            a.net.params.metabolic_rate *= atrophy_mult
+                            # Absolute ceiling — never let metabolic_rate
+                            # exceed 20× its initial value (init is 0.6-1.2,
+                            # so ceiling is 12.0-24.0 max).
+                            mr_initial = getattr(a, '_initial_metabolic_rate', None)
+                            if mr_initial is None:
+                                # First tick — record baseline
+                                a._initial_metabolic_rate = a.net.params.metabolic_rate
+                                mr_initial = a._initial_metabolic_rate
+                            mr_cap = mr_initial * METABOLIC_ABS_CAP_MULTIPLE
+                            if a.net.params.metabolic_rate > mr_cap:
+                                a.net.params.metabolic_rate = mr_cap
+                        
+                        if a.dopamine_boost_ticks > 0:
+                            # v110 FIX (M18): Use _neuromod_boost with autoreceptor gating
+                            # instead of hard floor at DA=0.9, 5-HT=0.6.
+                            # PROBLEM: max(current, 0.9) set DA to AT LEAST 0.9 every tick
+                            # during reward, completely overriding all decay mechanics.
+                            # With ~5-10 boost ticks per food event and frequent food finds,
+                            # this alone kept DA pinned near ceiling permanently.
+                            # BIOINSPIRED: Reward triggers a phasic DA burst (Schultz 1997)
+                            # that is autoreceptor-limited, not a sustained concentration floor.
+                            # v113 FIX (M25): 0.15→0.06. Phasic reward burst, not
+                            # sustained elevation. With dopamine_boost_ticks (~5-10),
+                            # total per-food DA = 0.06×7 = 0.42 (was 0.15×7 = 1.05).
+                            _neuromod_boost(a.net.neuromodulators, 'dopamine', 0.06, a.net.params)
+                            _neuromod_boost(a.net.neuromodulators, 'serotonin', 0.08, a.net.params)
+                            a.dopamine_boost_ticks -= 1
+                        
+                        # --- SIMULATION EXECUTION (Directly on object) ---
+                        # v5.0: Multi-Sphere pipeline (Paper §8)
+                        # When brain is a NeuraxonMultiSphere:
+                        #   1. Route environmental inputs to sensory sphere
+                        #   2. brain.simulate_step() propagates through all spheres
+                        #   3. Read behavioral outputs from motor sphere
+                        steps_to_sim = max(1, a.net.params.simulation_steps // GlobalTimeSteps)
+                        
+                        if getattr(a, 'brain', None) is not None:
+                            # Multi-sphere mode
+                            sensory_sphere = a.brain.spheres.get('sensory')
+                            if sensory_sphere:
+                                sensory_input_ids = sensory_sphere.interface.sensory_input_ids
+                                ext_inputs = {}
+                                for i, nid in enumerate(sensory_input_ids):
+                                    if i < len(a.last_inputs):
+                                        ext_inputs[nid] = float(a.last_inputs[i])
+                                # Also inject proprioception/urgency to motor sphere directly
+                                motor_sphere = a.brain.spheres.get('motor')
+                                motor_ext = {}
+                                if motor_sphere:
+                                    motor_sensory_ids = motor_sphere.interface.sensory_input_ids
+                                    # Motor sphere gets direct proprioception (input 8) and hunger (input 3)
+                                    for j, nid in enumerate(motor_sensory_ids):
+                                        if j == 0 and len(a.last_inputs) > 8:
+                                            motor_ext[nid] = float(a.last_inputs[8])  # proprioception
+                                        elif j == 1 and len(a.last_inputs) > 3:
+                                            motor_ext[nid] = float(a.last_inputs[3])  # hunger
+                                
+                                external_by_sphere = {'sensory': ext_inputs}
+                                if motor_ext:
+                                    external_by_sphere['motor'] = motor_ext
+                                
+                                # Propagate global neuromodulators from primary net
+                                for mod in a.brain.global_neuromodulators:
+                                    a.brain.global_neuromodulators[mod] = a.net.neuromodulators.get(mod, 0.12)
+                                
+                                for _ in range(steps_to_sim):
+                                    a.net.current_game_tick = step_tick
+                                    a.brain.simulate_step(external_by_sphere)
+                            else:
+                                # Fallback: sensory sphere missing, use single-net
+                                # v4.52 PERF: convert tuple→list ONCE (was per-substep allocation).
+                                _li = list(a.last_inputs)
+                                for _ in range(steps_to_sim):
+                                    a.net.current_game_tick = step_tick
+                                    a.net.set_input_states(_li)
+                                    a.net.simulate_step()
+                        else:
+                            # Single-net mode (backward compat)
+                            # v4.52 PERF: convert tuple→list ONCE (was per-substep allocation).
+                            _li = list(a.last_inputs)
+                            for _ in range(steps_to_sim):
+                                a.net.current_game_tick = step_tick
+                                a.net.set_input_states(_li)
+                                a.net.simulate_step()
+
+                        # === NEURAXON v2.0: Snapshot receptor activations for behavior modulation ===
+                        if hasattr(a.net, 'receptor_activations'):
+                            a.receptor_activations = dict(a.net.receptor_activations)
+                        if hasattr(a.net, 'neuromod_system'):
+                            # v4.52 PERF: single-pass accumulator instead of two full scans
+                            # (original: sum-gen once, then len(list-comp) once).
+                            _astro_sum = 0.0
+                            _astro_n = 0
+                            for _n in a.net.all_neurons:
+                                if _n.is_active:
+                                    _astro_sum += getattr(_n, 'astrocyte_state', 0.0)
+                                    _astro_n += 1
+                            a.astrocyte_activity = _astro_sum / max(1, _astro_n)
+                        
+                        # Capture results directly
+                        outs = a.net.get_output_states()
+                        energy_status = a.net.get_energy_status()
+
+                        # --- C. Apply Network Outputs ---
+                        if energy_status:
+                            a.stats.energy_efficiency = energy_status.get('efficiency', a.stats.energy_efficiency)                        
+                            a.stats.temporal_sync_score = energy_status.get('temporal_sync', a.stats.temporal_sync_score)
+                            normalized_food = min(a.stats.food_found / 100.0, 1.0)
+                            normalized_explored = min(a.stats.explored / 1000.0, 1.0)
+                            normalized_time = min(a.stats.time_lived_s / 1000.0, 1.0)
+                            normalized_energy = min(a.stats.energy_efficiency / 10.0, 1.0) if a.stats.energy_efficiency else 0.0
+                            normalized_sync = min(a.stats.temporal_sync_score / 2.0, 1.0)
+                            a.stats.fitness_score = normalized_food * 0.3 + normalized_explored * 0.2 + normalized_time * 0.2 + normalized_energy * 0.15 + normalized_sync * 0.15
+                            if energy_status.get('efficiency', 0) > 0.5:
+                                data_logger.log_plasticity_event(step_tick, 'activity', -1, a.id, energy_status.get('efficiency', 0))
+                        
+                        # UPDATED v4.5: 7 outputs (adds Sing)
+                        o = (outs + [0, 0, 0, 0, 0, 0, 0])[:7]
+                        a.last_outputs = tuple(o)
+                        data_logger.log_io_pattern(step_tick, a.id, a.last_inputs, tuple(a.last_outputs))
+                        O1, O2, O3, O4, O5, O6, O7 = o
+
+                        # =========================================================
+                        # OUTPUT 6 (O7): SING CONTROL  (NEW v4.5)
+                        # =========================================================
+                        # BIOINSPIRED: The motor cortex gates phonation. The brain
+                        # chooses whether to sing (+1 full voice), hum (0 low amp),
+                        # or stay silent (-1). Metabolic gating: starving agents
+                        # cannot spare the energy to sing — singing is suppressed
+                        # below voice_sing_food_threshold * StartFood.
+                        sing_food_thresh = float(getattr(a.net.params, 'voice_sing_food_threshold', 0.20)) * float(StartFood)
+                        if a.food < sing_food_thresh:
+                            a.last_sing_level = -1       # silent when weak
+                        else:
+                            # +1 clamped: never go above full voice, but allow hum (0) or silent (-1)
+                            a.last_sing_level = int(max(-1, min(1, O7)))
+                        
+                        # =========================================================
+                        # OUTPUT 6: RESTING CONTROL (NEW v3.1)
+                        # =========================================================
+                        # BIOINSPIRED: Brain can control rest/wake state
+                        # -1 = force active (override circadian rest tendency)
+                        #  0 = normal (follow circadian/instinct)
+                        #  1 = rest (enter rest mode if conditions allow)
+                        rest_override_thresh = getattr(a.net.params, 'brain_rest_override_threshold', 0.3)
+                        if O6 == 1:
+                            # v3.3: Track brain rest intent for circadian coupling
+                            a._brain_wants_rest = True
+                            # Brain wants to rest - allow if food is adequate
+                            if a.food > StartFood * rest_override_thresh:
+                                a.is_resting = True
+                                # Resting elevates serotonin (consolidation/sleep)
+                                _neuromod_boost(a.net.neuromodulators, 'serotonin', 0.02, a.net.params)
+                        elif O6 == -1:
+                            # v3.3: Clear brain rest flag
+                            a._brain_wants_rest = False
+                            # Brain forces active state - override any rest tendency
+                            a.is_resting = False
+                            # Waking increases norepinephrine (alertness)
+                            _neuromod_boost(a.net.neuromodulators, 'norepinephrine', 0.01, a.net.params)
+                        else:
+                            # v3.3: O6==0 — don't override, but clear brain flag
+                            a._brain_wants_rest = False
+                        # O6 == 0: Follow normal circadian/instinct behavior (no override)
+                        
+                        # Temperature affects movement urgency (BIOINSPIRED: thermoregulation)
+                        temp_movement_mod = 1.0
+                        if a.body_temperature < getattr(a.net.params, 'temp_cold_threshold', 35.5):
+                            # Cold NxErs are more likely to move (generate heat)
+                            temp_movement_mod = 1.0 + getattr(a.net.params, 'temp_movement_bonus', 0.15)
+                            if a.is_resting:
+                                # Too cold to rest
+                                a.is_resting = False
+                        elif a.body_temperature > getattr(a.net.params, 'temp_hot_threshold', 38.5):
+                            # Hot NxErs prefer to rest (reduce heat generation)
+                            temp_movement_mod = 0.7
+                            if O6 != -1:  # Unless brain forces active
+                                a.is_resting = True
+                        
+                        dx = -O1; dy = -O2
+                        pre_motor_heading = getattr(a, 'heading', 0)
+                        warned_heading = getattr(a, '_proprio_warning_heading', pre_motor_heading)
+                        # Apply temperature-based movement modification
+                        if abs(dx) > 0: dx = int(dx * temp_movement_mod) if temp_movement_mod > 1 else dx
+                        if abs(dy) > 0: dy = int(dy * temp_movement_mod) if temp_movement_mod > 1 else dy
+
+                        # =========================================================
+                        # v4.5: VOICE-DRIVEN CLAN COHESION (cheap, probabilistic)
+                        # =========================================================
+                        # Same-tone neighbours pull each other. If the brain's
+                        # motor output is weak (dx == dy == 0) and there is a
+                        # highly tone-similar singer nearby, nudge the heading
+                        # toward that neighbour. Cost: at most a handful of
+                        # similarity calls per tick (capped below).
+                        if (
+                            getattr(a.net.params, 'voice_enabled', True)
+                            and a.voice is not None
+                            and (dx == 0 and dy == 0)
+                        ):
+                            affinity_weight = float(getattr(a.net.params, 'voice_clan_affinity_weight', 0.35))
+                            best_sim = 0.0
+                            best_dir = None
+                            # Only look at the nearby_voices we already gathered
+                            # for the Song input. If we didn't gather them (brain
+                            # boot phase), we skip silently.
+                            candidates = locals().get('nearby_voices', []) if 'nearby_voices' in dir() else []
+                            # We need positions too — a quick rescan of grid
+                            # neighbours (capped by voice_max_listeners).
+                            cs_b = _agent_grid.cell_size
+                            hr_b = int(getattr(a.net.params, 'voice_hearing_radius', 4))
+                            checked = 0
+                            max_check = int(getattr(a.net.params, 'voice_max_listeners', 6))
+                            for dbx in range(-1, 2):
+                                for dby in range(-1, 2):
+                                    if dbx == 0 and dby == 0: continue
+                                    # sample a point in that direction within hearing radius
+                                    sx = a.pos[0] + dbx * hr_b
+                                    sy = a.pos[1] + dby * hr_b
+                                    bucket = _agent_grid.grid.get((sx // cs_b, sy // cs_b))
+                                    if not bucket: continue
+                                    for nid in bucket:
+                                        if nid == a.id: continue
+                                        ob = nxers.get(nid)
+                                        if ob is None or not ob.alive: continue
+                                        if getattr(ob, 'last_sing_level', 0) < 1: continue
+                                        ov = getattr(ob, 'voice', None)
+                                        if ov is None: continue
+                                        sim = tone_similarity(a.voice.voice_tones, ov.voice_tones)
+                                        if sim > best_sim:
+                                            best_sim = sim
+                                            best_dir = (dbx, dby)
+                                        checked += 1
+                                        if checked >= max_check: break
+                                    if checked >= max_check: break
+                                if checked >= max_check: break
+                            # If we found a pleasantly-singing neighbour and our
+                            # own motor drive is idle, we take a probabilistic
+                            # step toward them weighted by affinity × similarity.
+                            if best_dir is not None and random.random() < affinity_weight * best_sim:
+                                dx, dy = best_dir
+
+                        chosen_heading = get_heading_from_move(dx, dy, pre_motor_heading)
+                        a.heading = chosen_heading
+                        a._pending_move = (dx, dy, O3, O4, O5)
+                        
+                        # =========================================================
+                        # PROPRIOCEPTRON: BRAIN-MOVEMENT INTEGRATION (NEW v3.0)
+                        # =========================================================
+                        # The warning must exist BEFORE the forward pass. At this stage we
+                        # only observe whether the brain used that warning to change course,
+                        # and then fall back to a reflexive forced turn if still needed.
+                        prop = getattr(a, 'proprioceptron', None)
+                        if prop is not None:
+                            brain_heading = a.heading
+                            force_threshold = getattr(a.net.params, 'proprioceptron_force_turn_threshold', 3)
+
+                            if getattr(a, '_proprio_warning_active', False) and (dx != 0 or dy != 0) and brain_heading != warned_heading:
+                                prop.register_brain_avoidance_turn()
+                                data_logger.log_nxer_event(
+                                    step_tick,
+                                    'proprioceptron_brain_turn',
+                                    a.id,
+                                    {
+                                        'old_heading': warned_heading,
+                                        'new_heading': brain_heading,
+                                        'source': getattr(a, '_proprio_warning_source', 'unknown')
+                                    }
+                                )
+                            
+                            if prop.should_force_turn(brain_heading, force_threshold):
+                                # Override with proprioceptron suggestion
+                                new_heading = prop.get_suggested_heading(brain_heading)
+                                a.heading = new_heading
+                                prop.forced_turn_count += 1
+                                
+                                # Recalculate movement based on new heading
+                                vx, vy = DIR_OFFSETS.get(new_heading, (0, 0))
+                                move_magnitude = max(abs(dx), abs(dy), 1)
+                                dx = vx * move_magnitude
+                                dy = vy * move_magnitude
+                                a._pending_move = (dx, dy, O3, O4, O5)
+                                
+                                # Log the forced turn for debugging
+                                data_logger.log_nxer_event(step_tick, 'proprioceptron_forced_turn', a.id, 
+                                    {'old_heading': brain_heading, 'new_heading': new_heading})
+
+                # v4.1: Merged proprioception tracking + resting temperature into single pass
+                for a in nxers.values():
+                    if not a.alive: continue
+                    if not hasattr(a, '_consecutive_successful_moves'):
+                        a._consecutive_successful_moves = 0
+                    if a.is_resting:
+                        temp_drop = getattr(a.net.params, 'resting_temp_drop_rate', 0.1) * FIXED_DT
+                        a.body_temperature = max(35.0, a.body_temperature - temp_drop)
+
+                # --- D. Resolve Agent Interactions ---
+                intents = []; move_target = {}
+                for a in nxers.values():
+                    if not a.alive: continue
+                    # Skip movement attempts if resting (UPDATED v3.1: Resting behavior now brain-influenced)
+                    # v4.0: Resting still consumes food but at reduced rate
+                    rest_skip_chance = 0.8
+                    if a.is_resting:
+                        # Check if brain is forcing active
+                        if len(a.last_outputs) > 5 and a.last_outputs[5] == -1:
+                            rest_skip_chance = 0.0  # Brain overrides rest
+                    if a.is_resting and random.random() < rest_skip_chance:
+                        resting_mult = getattr(a, 'resting_metabolism_multiplier', RESTING_METABOLISM_MULT)
+                        a.food -= 0.005 * resting_mult  # Minimal food consumption while resting
+                        if a.food <= 0:
+                            a.is_resting = False  # Force wake if starving
+                        continue
+                    pm = getattr(a, "_pending_move", None)
+                    # UPDATED v4.5: Standard input now 10 values (adds Song channel)
+                    terrain_val = 0 if world.terrain(a.pos) in (T_LAND, T_SEA) else -1
+                    std_input = (0, 0, terrain_val, 0, 0, 0, 0, 0, 0, 0)
+                    if pm is None: a.last_inputs = std_input; continue
+                    
+                    dx, dy, O3, O4, O5 = pm; delattr(a, "_pending_move")
+                    
+                    # Output 5: Give Food
+                    if O5 >= 0 and a.food > StartFood:
+                        for ndx in range(-1, 2):
+                            for ndy in range(-1, 2):
+                                if ndx==0 and ndy==0: continue
+                                tx, ty = wrap_pos((a.pos[0]+ndx, a.pos[1]+ndy))
+                                if (tx, ty) in occupant_at:
+                                    rec = nxers[occupant_at[(tx, ty)]]
+                                    if a.clan_id is not None and rec.clan_id == a.clan_id:
+                                        if rec.food < StartFood:
+                                            amt = 5.0 if O5 == 1 else 2.0
+                                            if a.food > amt:
+                                                a.food -= amt
+                                                rec.food += amt
+                    
+                    # v152 (v4.60) FIX 1 — IDLE EXPLORATION (CORRECT WIRING)
+                    # =========================================================
+                    # CRITICAL BUG IN v151 (sample run nxon2_300373934):
+                    # The v151 idle-exploration safety net was wired INSIDE
+                    # the `if dx == 0 and dy == 0:` block. The data showed
+                    # exploration_trigger_rate = 0.0 for ALL 100 samples —
+                    # the safety net NEVER fired. Why: networks weren't
+                    # outputting (0,0); they were locked into CONSTANT
+                    # non-zero outputs that hit blocked targets (rocks,
+                    # edges, occupied cells), failing repeatedly.
+                    # pop_mean_idle_seconds reached 14.07s with no rescue.
+                    #
+                    # Fix: trigger exploration based on idle_seconds ALONE,
+                    # regardless of motor output. If an NxEr has been idle
+                    # for ≥ IDLE_EXPLORE_SEC (a clear sign their network's
+                    # current output isn't producing actual movement —
+                    # whether (0,0) or blocked), with EXPLORE_PROB
+                    # probability per tick, override (dx, dy) with a
+                    # random direction. This guarantees the safety net
+                    # engages whenever needed.
+                    #
+                    # Tuning vs v151 (which never fired):
+                    #   IDLE_EXPLORE_SEC: 2.0 → 1.0  (fires sooner)
+                    #   EXPLORE_PROB:     0.20 → 0.50 (fires harder)
+                    # Net effect: an NxEr that's been blocked for 1 sec
+                    # has 50% chance per tick to attempt a random direction.
+                    # Within ~3-4 ticks of crossing the threshold they
+                    # WILL move, breaking the deadlock.
+                    # v155: IDLE_EXPLORE_SEC and EXPLORE_PROBABILITY are
+                    # loaded from architecture JSON at startup. See
+                    # block at line ~1860.
+                    idle_sec_pre = (step_tick - a.last_move_tick) / GlobalTimeSteps
+                    if (idle_sec_pre >= IDLE_EXPLORE_SEC
+                            and random.random() < EXPLORE_PROBABILITY):
+                        # Override the network's motor output with a random
+                        # direction. This may also override a perfectly
+                        # good output, but the population effect is rare:
+                        # only NxErs that have ALREADY failed to move for
+                        # >= 1 second hit this path. Healthy NxErs reset
+                        # last_move_tick on every successful move and
+                        # never enter this branch.
+                        choices = [(-1,0),(1,0),(0,-1),(0,1),
+                                   (-1,-1),(-1,1),(1,-1),(1,1)]
+                        dx, dy = random.choice(choices)
+                        try:
+                            data_logger._exploration_trigger_pending += 1
+                        except Exception:
+                            pass
+                    
+                    if dx == 0 and dy == 0:
+                        # v152 — Fall-through: motor output was neutral
+                        # AND idle wasn't long enough to trigger exploration.
+                        # The NxEr stays put this tick. Atrophy still
+                        # tracks idle_seconds, so they'll hit the
+                        # exploration threshold within 1 second and
+                        # break out then.
+                        a.last_inputs = std_input; continue
+                    tx, ty = wrap_pos((a.pos[0] + dx, a.pos[1] + dy))
+                    intents.append((a.id, (tx, ty), O3, O4)); move_target[a.id] = (tx, ty)
+
+                by_pos: Dict[Tuple[int, int], List[Tuple[int, int, int]]] = {}
+                for aid, tgt, O3, O4 in intents: by_pos.setdefault(tgt, []).append((aid, O3, O4))
+                
+                valid_intents = []
+                for tgt, lst in by_pos.items():
+                    tt = world.terrain(tgt)
+                    if tt == T_ROCK:
+                        for (aid, _, _) in lst:
+                            nxer = nxers[aid]
+                            prev = list(nxer.last_inputs)
+                            # UPDATED v3.1: Ensure list is correct length
+                            if len(prev) < 10: prev = list(prev) + [0]*(10-len(prev))
+                            prev[0], prev[1], prev[2] = -1, 0, -1  # Blocked, rock, rock terrain
+                            prev[8] = -1  # Proprioception: blocked
+                            # v4.0: Update proprioceptron for blocked movement
+                            prop = getattr(nxer, 'proprioceptron', None)
+                            if prop:
+                                prop.record_rock_hit(nxer.heading)
+                                nxer._consecutive_successful_moves = 0
+                            nxer.last_inputs = tuple(prev)
+                            # Track consecutive blocks
+                            if hasattr(nxer, '_consecutive_successful_moves'):
+                                nxer._consecutive_successful_moves = 0
+                            
+                            # =========================================================
+                            # v107 FIX (M02): DOPAMINE PUNISHMENT ON COLLISION
+                            # =========================================================
+                            # BIOINSPIRED: Hitting a rock = negative prediction error.
+                            # The agent expected to move but was blocked → DA dip.
+                            # Paper: "Dopamine – triggered by... prediction errors"
+                            # This creates the error signal STDP needs to learn
+                            # input_8 (blocked) → change output_0/1 (new direction)
+                            da_punishment = getattr(nxer.net.params, 'collision_da_punishment', 0.15)
+                            ne_startle = getattr(nxer.net.params, 'collision_ne_boost', 0.08)
+                            nd = nxer.net.neuromodulators
+                            nd['dopamine'] = max(0.01, nd.get('dopamine', 0.12) - da_punishment)
+                            # NE startle response — alerting signal
+                            _neuromod_boost(nd, 'norepinephrine', ne_startle, nxer.net.params)
+                            
+                            # =========================================================
+                            # PROPRIOCEPTRON: RECORD ROCK HIT (NEW v3.0)
+                            # =========================================================
+                            prop = getattr(nxer, 'proprioceptron', None)
+                            if prop is not None:
+                                memory_size = getattr(nxer.net.params, 'proprioceptron_rock_memory', 5)
+                                prop.record_rock_hit(nxer.heading, memory_size)
+                        continue
+                    for (aid, O3, O4) in lst:
+                        a = nxers[aid]
+                        origin_terrain = world.terrain(a.pos)
+                        is_seashore_crossing = (origin_terrain == T_LAND and tt == T_SEA) or (origin_terrain == T_SEA and tt == T_LAND)
+                        if not is_seashore_crossing:
+                            if tt == T_LAND and not a.can_land: 
+                                prev = list(a.last_inputs)
+                                if len(prev) < 10: prev = list(prev) + [0]*(10-len(prev))
+                                prev[0:3] = [-1, 0, 1]; a.last_inputs = tuple(prev)
+                                continue
+                            if tt == T_SEA and not a.can_sea: 
+                                prev = list(a.last_inputs)
+                                if len(prev) < 10: prev = list(prev) + [0]*(10-len(prev))
+                                prev[0:3] = [-1, 0, 0]; a.last_inputs = tuple(prev)
+                                continue
+                        valid_intents.append((tgt, aid, O3, O4, tt))
+
+                # Handle Head-on Swaps
+                handled_swap = set()
+                for aid, tgt, O3, O4 in intents:
+                    if aid in handled_swap: continue
+                    occ = occupant_at.get(tgt)
+                    if occ is None: continue
+                    A = nxers[aid]; B = nxers[occ]
+                    if A.id == B.id: continue
+                    
+                    prevA = list(A.last_inputs)
+                    if len(prevA) < 10: prevA = list(prevA) + [0]*(10-len(prevA))
+                    prevA[0:3] = [-1, 1, (1 if world.terrain(tgt)==T_LAND else 0)]
+                    A.last_inputs = tuple(prevA)
+                    prevB = list(B.last_inputs)
+                    if len(prevB) < 10: prevB = list(prevB) + [0]*(10-len(prevB))
+                    prevB[0:3] = [-1, 1, (1 if world.terrain(A.pos)==T_LAND else 0)]
+                    B.last_inputs = tuple(prevB)
+                    
+                    # NEW v2.27: Serotonin Behavioral Modulation
+                    ser_A = A.net.neuromodulators.get('serotonin', 0.12)
+                    ser_B = B.net.neuromodulators.get('serotonin', 0.12)
+                    
+                    # High Serotonin increases mating probability (Maintenance/Stability)
+                    mating_boost_A = 0.05 if ser_A > 0.6 else 0.0
+                    mating_boost_B = 0.05 if ser_B > 0.6 else 0.0
+
+                    if O4 == 1 or random.random() < (0.03 + mating_boost_A): 
+                        A.mating_intent_until_tick = step_tick + 6 * GlobalTimeSteps
+                    if getattr(B, "_last_O4", 0) == 1 or random.random() < (0.03 + mating_boost_B): 
+                        B.mating_intent_until_tick = step_tick + 3 * GlobalTimeSteps
+                    if (A.mating_intent_until_tick > step_tick and B.mating_intent_until_tick > step_tick and can_mate(A, B, step_tick)):
+                        A.mating_with = B.id; B.mating_with = A.id; dur = max(A.net.params.simulation_steps, B.net.params.simulation_steps)
+                        A.mating_end_tick = step_tick + dur; B.mating_end_tick = step_tick + dur; A.food -= 1; B.food -= 1
+                        push_effect('heart', A.pos); spawn_child(A, B, A.pos)
+                        data_logger.log_nxer_event(step_tick, 'mating', A.id, {'partner': B.id})
+                    
+                    # Stealing Logic (Family Check)
+                    same_clan = (A.clan_id is not None and B.clan_id is not None and A.clan_id == B.clan_id)
+                    
+                    # [DOPAMINE UPDATE] Novelty / Interaction with other clans
+                    # Paper Claim: "Higher levels favor... interaction with other clans."
+                    # If Dopamine is high (Novelty Seeking), suppress the hostile stealing logic for different clans
+                    is_novelty_seeking = (A.net.neuromodulators.get('dopamine', 0.12) > 0.7)
+                    
+                    if not same_clan and not is_novelty_seeking:
+                        # NEW v2.27: Impulse vs Serenity
+                        # "With low serotonin... increases probability of stealing"
+                        # "With high serotonin, I don't steal"
+                        impulse_to_steal = 0.4 if ser_A < 0.3 else 0.0
+                        is_serene = (ser_A > 0.6 and A.food > 5.0)
+                        
+                        if not is_serene:
+                            if (O4 == -1 or O3 == -1 or (A.food < 2 and B.food > 3 and random.random() < (0.3 + impulse_to_steal))) and B.food > 0:
+                                data_logger.log_nxer_event(step_tick, 'stealing_attempt', A.id, {'target': B.id, 'serotonin': ser_A})
+                                B.food -= 1; A.food += 1; A.stats.food_taken += 1
+                                # Stealing is risky/conflict -> serotonin drop
+                                A.net.neuromodulators['serotonin'] = max(0.0, ser_A * 0.98)
+                                
+                                # Stress scenario*: High DA (Reward), very high NA (Stress).
+                                A.net.neuromodulators['dopamine'] = min(2.0, A.net.neuromodulators.get('dopamine', 0.12) + 0.04)
+                                A.net.neuromodulators['norepinephrine'] = min(2.0, A.net.neuromodulators.get('norepinephrine', 0.12) + 0.2)
+                            
+                    A._last_O4 = O4; handled_swap.add(aid); handled_swap.add(occ)
+
+                # Move Resolutions
+                winners = []; tgt_map: Dict[Tuple[int, int], List[Tuple[int, int, int, int]]] = {}
+                for tgt, aid, O3, O4, tt in valid_intents: tgt_map.setdefault(tgt, []).append((aid, O3, O4, tt))
+                
+                for tgt, lst in tgt_map.items():
+                    fid = -1
+                    for f in foods.values():
+                        if f.alive and f.pos == tgt: fid = f.id; break
+                    
+                    if fid != -1:
+                        f = foods[fid]
+                        for (aid, O3, O4, tt) in lst:
+                            a = nxers[aid]
+                            prev = list(a.last_inputs)
+                            if len(prev) < 10: prev = list(prev) + [0]*(10-len(prev))
+                            # v4.0: FIX - Input 0 = 1 only when food found, 0 for normal success
+                            prev[0] = 1  # Food found = +1
+                            prev[1] = 0  # No encounter (food, not NxEr)
+                            prev[2] = 0 if tt in (T_LAND, T_SEA) else -1  # Terrain constraint
+                            # v4.0: Update proprioceptron for food success
+                            prop = getattr(a, 'proprioceptron', None)
+                            if prop:
+                                prop.record_successful_move(a.heading)
+                                a._consecutive_successful_moves = prop.successful_move_streak
+                            a.last_inputs = tuple(prev)
+                            if f.remaining > 0:
+                                f.progress[aid] = f.progress.get(aid, 0) + 1
+                                f.remaining -= 1; a.food += 1.0; a.stats.food_found += 1.0
+                                a.food -= 0.1
+                                ate_food_this_tick.add(aid)  # Track for temperature
+
+                                # v4.5: First-time food discovery → trigger discovery pitch spike
+                                if not hasattr(a, 'known_food_ids') or a.known_food_ids is None:
+                                    a.known_food_ids = set()
+                                if f.id not in a.known_food_ids:
+                                    a.known_food_ids.add(f.id)
+                                    a.last_new_food_tick = step_tick  # used by audio pitch_shift
+                                                                
+                                # [DOPAMINE UPDATE] Surprise vs Expectation
+                                # Paper Claim: "strongly by unexpected positive surprise"
+                                # Check if we saw (4) or smelled (5) food in last inputs
+                                expected = (a.last_inputs[4] == 1 or a.last_inputs[5] == 1)
+                                surprise_multiplier = 2.0 if not expected else 1.0
+                                base_reward = a.net.params.dopamine_reward_magnitude
+                                
+                                a.net.neuromodulators['dopamine'] = min(
+                                    2.0,
+                                    a.net.neuromodulators['dopamine'] + (base_reward * surprise_multiplier)
+                                )
+                                
+                                # v117 FIX: successful reward should shift the system toward DA-led exploitation
+                                # rather than co-elevating ACh into a chronic exploratory state.
+                                ach_now = a.net.neuromodulators.get('acetylcholine', 0.12)
+                                ach_floor = getattr(a.net.params, 'acetylcholine_baseline', 0.12) * 0.75
+                                a.net.neuromodulators['acetylcholine'] = max(
+                                    ach_floor,
+                                    ach_now - (0.02 * surprise_multiplier)
+                                )
+                                
+                                # Paper Claim: NE activated by proximity to food after a rise in dopamine
+                                if a.net.neuromodulators['dopamine'] > 0.3:
+                                    a.net.neuromodulators['norepinephrine'] = min(2.0, a.net.neuromodulators.get('norepinephrine', 0.12) + 0.1)
+                                
+                                if a.food <= 0 and a.alive:
+                                    a.alive = False; a.died_ts = time.time(); deaths_count += 1
+                                    data_logger.log_nxer_event(step_tick, 'died', a.id, {'cause': 'harvesting_exhaustion', 'name': a.name}); data_logger.register_death_for_survivability(a.id)
+                                    data_logger.update_nxer_stats(a)
+                                    _archive_nxer(a)
+                                    if a.pos in occupied: occupied.discard(a.pos)
+                                    push_effect('skull', a.pos)
+                        if f.remaining <= 0:
+                            winner_id = None
+                            if f.progress:
+                                max_prog = max(f.progress.values())
+                                candidates = [k for k, v in f.progress.items() if v == max_prog]
+                                winner_id = random.choice(candidates)
+                            wnx = nxers.get(winner_id) if winner_id is not None else None
+                            if wnx and wnx.alive:
+                                if wnx.pos in occupied: occupied.discard(wnx.pos)
+                                wnx.pos = f.pos
+                                occupied.add(wnx.pos); wnx.visited.add(wnx.pos); wnx.stats.explored = len(wnx.visited)
+                            schedule_respawn(f, step_tick)
+                        continue
+
+                    occ = occupant_at.get(tgt)
+                    if occ is not None:
+                        for (aid, O3, O4, tt) in lst:
+                            if aid in handled_swap: continue 
+                            a = nxers[aid]; b = nxers.get(occ)
+                            if not b: continue
+                            prev = list(a.last_inputs)
+                            if len(prev) < 10: prev = list(prev) + [0]*(10-len(prev))
+                            prev[0:3] = [-1, 1, (1 if tt == T_LAND else 0)]; a.last_inputs = tuple(prev)
+                            if not b.alive or a.id == b.id: continue
+                            if (a.mating_intent_until_tick > step_tick and b.mating_intent_until_tick > step_tick and can_mate(a, b, step_tick)):
+                                a.mating_with = b.id; b.mating_with = a.id
+                                dur = max(a.net.params.simulation_steps, b.net.params.simulation_steps)
+                                a.mating_end_tick = step_tick + dur; b.mating_end_tick = step_tick + dur
+                                a.food -= 1; b.food -= 1; push_effect('heart', tgt); spawn_child(a, b, tgt)
+                                data_logger.log_nxer_event(step_tick, 'mating', a.id, {'partner': b.id})
+                            same_clan = (a.clan_id is not None and b.clan_id is not None and a.clan_id == b.clan_id)
+                            if not same_clan:
+                                ser_a = a.net.neuromodulators.get('serotonin', 0.12)
+                                impulse_to_steal = 0.4 if ser_a < 0.3 else 0.0
+                                is_serene = (ser_a > 0.6 and a.food > 5.0)
+                                
+                                if not is_serene:
+                                    if (O4 == -1 or O3 == -1 or (a.food < 2 and b.food > 3 and random.random() < (0.3 + impulse_to_steal))) and b.food > 0:
+                                        data_logger.log_nxer_event(step_tick, 'stealing_attempt', a.id, {'target': b.id, 'serotonin': ser_a})
+                                        b.food -= 1; a.food += 1; a.stats.food_taken += 1
+                                        a.net.neuromodulators['serotonin'] = max(0.0, ser_a * 0.98)
+                                        
+                            a._last_O4 = O4
+                        continue
+                    
+                    contenders = lst[:]
+                    want = contenders
+                    if len(want) > 1:
+                        # Paper Claim: NE activated by competition with others for food or offspring
+                        # Multiple agents wanting the same tile implies direct competition
+                        for (aid_comp, _, _, _) in want:
+                             nxers[aid_comp].net.neuromodulators['norepinephrine'] = min(2.0, nxers[aid_comp].net.neuromodulators.get('norepinephrine', 0.12) + 0.2)
+                        
+                        for (aid, O3, O4, tt) in want:
+                            giver = nxers[aid]
+                            if O3 == 1 and giver.food > 1.0:
+                                slowest = max(want, key=lambda it: nxers[it[0]].ticks_per_action)[0]
+                                if slowest != aid:
+                                    giver.food -= 1.0; nxers[slowest].food += 1.0
+                        want.sort(key=lambda it: nxers[it[0]].ticks_per_action)
+                        top = [w for w in want if nxers[w[0]].ticks_per_action == nxers[want[0][0]].ticks_per_action]
+                        winner = random.choice(top)
+                        winners.append((winner[0], tgt, winner[3]))
+                        for (aid, O3, O4, tt) in want:
+                            if aid == winner[0]: continue
+                            a = nxers[aid]
+                            prev = list(a.last_inputs)
+                            if len(prev) < 10: prev = list(prev) + [0]*(10-len(prev))
+                            prev[0:3] = [-1, 1, (1 if tt == T_LAND else 0)]; a.last_inputs = tuple(prev)
+                            a._last_O4 = O4
+                    elif want:
+                        (aid, O3, O4, tt) = want[0]
+                        winners.append((aid, tgt, tt))
+                        nxers[aid]._last_O4 = O4
+
+                for (aid, tgt, tt) in winners:
+                    a = nxers.get(aid)
+                    if not a or not a.alive: continue
+                    if tgt in occupied:
+                        prev = list(a.last_inputs); prev[0:3] = [-1, 1, (1 if tt == T_LAND else 0)]; a.last_inputs = tuple(prev)
+                    else:
+                        if a.pos in occupied: occupied.discard(a.pos)
+                        if a.pos != tgt:
+                            a.last_move_tick = step_tick; a.last_pos = a.pos
+                            
+                            # =========================================================
+                            # PROPRIOCEPTRON: RECORD SUCCESS (NEW v3.0)
+                            # =========================================================
+                            prop = getattr(a, 'proprioceptron', None)
+                            if prop is not None:
+                                prop.record_successful_move(a.heading)
+                        a.pos = tgt
+                        occupied.add(a.pos); a.visited.add(a.pos); a.stats.explored = len(a.visited)
+                        
+                        # Track successful moves for proprioception
+                        if hasattr(a, '_consecutive_successful_moves'):
+                            a._consecutive_successful_moves += 1
+                        else:
+                            a._consecutive_successful_moves = 1
+                        
+                        # Record successful move in proprioceptron
+                        prop = getattr(a, 'proprioceptron', None)
+                        if prop is not None:
+                            prop.record_successful_move(a.heading)
+                            # Update proprioception input to reflect clear path
+                            prev = list(a.last_inputs)
+                            if len(prev) >= 10:
+                                prev[8] = 1 if a._consecutive_successful_moves >= 3 else 0
+                                a.last_inputs = tuple(prev)
+                        
+                        # Movement succeeded: Update last_inputs to reflect successful movement
+                        terrain_here = world.terrain(a.pos)
+                        # v4.0: FIX - Input 0 = 0 for successful move (not blocked, not food)
+                        # Previously this was being overwritten incorrectly
+                        prev = list(a.last_inputs)
+                        if len(prev) < 10: prev = list(prev) + [0]*(10-len(prev))
+                        prev[0] = 0  # Normal successful move = 0 (not blocked=-1, not food=+1)
+                        prev[1] = 0  # Empty cell encountered
+                        prev[2] = 0 if terrain_here in (T_LAND, T_SEA) else -1  # Terrain constraint
+                        # v4.0: Update proprioceptron for movement success
+                        prop = getattr(a, 'proprioceptron', None)
+                        if prop:
+                            prop.record_successful_move(a.heading)
+                            a._consecutive_successful_moves = prop.successful_move_streak
+                        a.last_inputs = tuple(prev)
+                        a.food -= 0.1
+                        if a.food <= 0 and a.alive:
+                            a.alive = False; a.died_ts = time.time(); deaths_count += 1
+                            data_logger.log_nxer_event(step_tick, 'died', a.id, {'cause': 'movement_exhaustion', 'name': a.name}); data_logger.register_death_for_survivability(a.id)
+                            data_logger.update_nxer_stats(a)
+                            _archive_nxer(a)
+                            if a.pos in occupied: occupied.discard(a.pos)
+                            push_effect('skull', a.pos)
+                
+                # --- Temperature updates from activity (v3.1) ---
+                winners_set = {aid for (aid, _, _) in winners}
+                for a in nxers.values():
+                    if not a.alive: continue
+                    aid = a.id
+                    if aid in ate_food_this_tick:
+                        # Eating generates heat (thermogenic effect)
+                        # v4.0: Increased heat gain from food (thermogenesis)
+                        food_gain = getattr(a.net.params, 'temp_food_gain_v32', 0.7)
+                        a.body_temperature = min(41.0, a.body_temperature + food_gain)
+                    elif a.is_resting:
+                        # Resting: temperature drops toward baseline minus circadian offset
+                        # Already handled above, skip additional activity gain
+                        pass
+                    elif aid in winners_set:
+                        # Movement generates heat
+                        # v4.0: Increased heat gain from movement
+                        activity_gain = getattr(a.net.params, 'temp_activity_gain_v32', 0.5)
+                        a.body_temperature = min(41.0, a.body_temperature + activity_gain)
+                    
+                    # v4.0: Apply temperature decay (slower rate for better dynamics)
+                    decay_rate = getattr(a.net.params, 'temp_decay_rate_v32', 0.015)
+                    baseline = 37.0 + random.uniform(-0.2, 0.2)  # Small individual variance
+                    current_temp = a.body_temperature
+                    if current_temp > baseline:
+                        a.body_temperature = max(baseline, current_temp - decay_rate)
+                    elif current_temp < baseline:
+                        a.body_temperature = min(baseline, current_temp + decay_rate * 0.5)  # Slower warm-up
+                
+                try_respawns(step_tick)
+
+            alive_count = sum(1 for a in nxers.values() if a.alive)
+            
+            # =========================================================
+            # LOG CIRCADIAN/TEMPERATURE METRICS (NEW v3.0)
+            # =========================================================
+            if alive_count > 0:
+                data_logger.log_tick(step_tick, nxers)
+                # Log global circadian state
+                if circadian_enabled and step_tick % 100 == 0:
+                    phase_str = "day" if not is_night_phase(global_circadian_phase) else "night"
+                    data_logger.log_nxer_event(step_tick, 'circadian_state', -1, 
+                        {'phase': global_circadian_phase, 'state': phase_str})
+            
+            # --- TEST MODE AUTO-SAVE on DEATH ---
+            if alive_count == 0 and auto_save and auto_save_prefix and limit_minutes is not None:
+                print("[TEST MODE] All NxErs died. Saving and stopping.")
+                save_state(f"{auto_save_prefix}.json")
+                running = False
+                continue
+
+            # --- ROUND TIME LIMIT CHECK ---
+            if round_time_limit is not None and not game_over:
+                elapsed_round_mins = (time.time() - round_start_real_time) / 60.0
+                if elapsed_round_mins >= round_time_limit:
+                    print(f"Round time limit reached ({round_time_limit} mins). Ending round early.")
+                    paused = True; game_over = True; game_over_start_time = time.time(); user_declined_restart = False
+
+            if alive_count == 0 and not game_over:
+                paused = True; game_over = True; game_over_start_time = time.time(); user_declined_restart = False
+
+            # v4.52 PERF (#HUD-cache + #24 Headless):
+            #   • Skip all HUD work + draw_world entirely when headless.
+            #   • Otherwise, recompute the rankings/best_scores payload only
+            #     when the sim tick, population, or selection has changed AND
+            #     at most every _HUD_REFRESH_FRAMES frames while running.
+            #     When paused, refresh every frame so interactions feel live.
+            if not _HEADLESS:
+                _sel_now = renderer.selected_nxer_id
+                _stale = (
+                    paused
+                    or (_frame_counter - _hud_cache['frame_idx']) >= _HUD_REFRESH_FRAMES
+                    or step_tick != _hud_cache['last_step_tick']
+                    or alive_count != _hud_cache['last_alive_count']
+                    or _sel_now != _hud_cache['last_selected']
+                )
+                if _stale:
+                    best_scores = {}
+                    title_to_stat = {"Food found": "food_found", "Food taken": "food_taken", "World explored": "explored", "Time lived (s)": "time_lived_s", "Mates": "mates_performed", "Fitness": "fitness_score", "Best g": "g_factor"}  # v180
+                    for title, stat_name in title_to_stat.items():
+                        all_candidates = list(nxers.values())
+                        if stat_name in all_time_best: all_candidates.extend(all_time_best[stat_name])
+                        if not all_candidates: best_scores[title] = 0
+                        else: best_scores[title] = max(getattr(a.stats, stat_name) for a in all_candidates)
+                    _hud_cache['best_scores'] = best_scores
+                    _hud_cache['rankings']    = rankings()
+                    _hud_cache['frame_idx']   = _frame_counter
+                    _hud_cache['last_step_tick']   = step_tick
+                    _hud_cache['last_alive_count'] = alive_count
+                    _hud_cache['last_selected']    = _sel_now
+                else:
+                    best_scores = _hud_cache['best_scores']
+                renderer.draw_world(
+                    foods, nxers, _hud_cache['rankings'], alive_count,
+                    deaths_count, births_count, paused, effects, step_tick,
+                    GlobalTimeSteps, game_over, game_index, best_scores,
+                )
+
+            # =================================================================
+            # v4.5: PER-FRAME AUDIO UPDATE
+            # =================================================================
+            # v4.52 PERF (#24 Headless): in test/batch mode there is no one
+            # listening; short-circuit both branches to zero cost.
+            if _HEADLESS:
+                pass
+            elif audio_engine.is_enabled() and renderer.visual_mode and renderer.zoom >= config.NetworkParameters().audio_min_zoom:
+                # Build a screen-space list of currently-singing NxErs, capped to
+                # the AUDIO_MAX_VOICES closest to the camera centre.
+                screen_w, screen_h = renderer.screen.get_size()
+                cx_px, cy_px = screen_w / 2, screen_h / 2
+                singers: List[dict] = []
+                for sa in nxers.values():
+                    if not sa.alive: continue
+                    if getattr(sa, 'last_sing_level', 0) < 1: continue
+                    if getattr(sa, 'voice', None) is None: continue
+                    sx, sy = renderer.world_to_screen(sa.pos[0], sa.pos[1])
+                    # Cheap off-screen cull
+                    if sx < -100 or sx > screen_w + 100 or sy < -100 or sy > screen_h + 100:
+                        continue
+                    d = math.hypot(sx - cx_px, sy - cy_px)
+                    # Food-proportional pitch-up + transient discovery spike
+                    food_shift = food_pitch_shift(sa.food, float(StartFood))
+                    disc_shift = discovery_pitch_spike(step_tick - int(getattr(sa, 'last_new_food_tick', -9999)))
+                    singers.append({
+                        'id': sa.id,
+                        'voice': sa.voice,
+                        'sing_level': int(sa.last_sing_level),
+                        'screen_dist': d,
+                        'zoom': renderer.zoom,
+                        'pitch_shift_semi': float(food_shift + disc_shift),
+                    })
+                # Cap at AUDIO_MAX_VOICES (audio engine does its own sort+truncate,
+                # but truncating here saves it memory before call).
+                singers.sort(key=lambda s: s['screen_dist'])
+                audio_engine.update(singers[:16])
+            elif not audio_engine.is_enabled():
+                # When OFF, one cheap call drains any still-playing channels.
+                audio_engine.stop_all()
+
+            # Update NxEr stats in logger
+            for a in nxers.values():
+                data_logger.update_nxer_stats(a)
+        
+        # --- FORCE FULL SAVE AT END OF GAME ---        
+        if auto_save_prefix:
+            final_save_name = f"{auto_save_prefix}_Final.json"
+            save_state(final_save_name)
+        
+        # --- GENERATE FINAL STATS ---        
+        update_all_time_best()
+        active_agents = [a for a in nxers.values() if a.alive]
+        
+        # v4.5: Aggregate voice / song statistics for the end-of-game JSON
+        voice_summary = {}
+        try:
+            harm_vals = [
+                float(getattr(nx.voice, 'harmonicity', 0.5))
+                for nx in nxers.values()
+                if getattr(nx, 'voice', None) is not None
+            ]
+            tone_hist: Dict[int, int] = {}
+            for nx in nxers.values():
+                v = getattr(nx, 'voice', None)
+                if v is None: continue
+                for t in v.voice_tones:
+                    tone_hist[int(t) % 12] = tone_hist.get(int(t) % 12, 0) + 1
+            clan_harm: Dict[int, List[float]] = {}
+            for nx in nxers.values():
+                if not getattr(nx, 'voice', None): continue
+                cid = nx.clan_id if nx.clan_id is not None else -1
+                clan_harm.setdefault(cid, []).append(float(nx.voice.harmonicity))
+            clan_mean = {str(cid): (sum(h) / len(h) if h else 0.0) for cid, h in clan_harm.items()}
+            voice_summary = {
+                "mean_harmonicity": (sum(harm_vals) / len(harm_vals)) if harm_vals else 0.0,
+                "min_harmonicity": min(harm_vals) if harm_vals else 0.0,
+                "max_harmonicity": max(harm_vals) if harm_vals else 0.0,
+                "nxers_with_voice": len(harm_vals),
+                "tone_histogram_mod12": tone_hist,
+                "per_clan_mean_harmonicity": clan_mean,
+                "audio_toggled_on": bool(audio_engine.is_enabled()),
+            }
+        except Exception:
+            voice_summary = {"error": "voice_summary_failed"}
+
+        game_stats = {
+            "version": "4.5",   # NEW v4.5
+            "total_ticks": step_tick,
+            "total_time_simulated_seconds": step_tick * (1.0 / GlobalTimeSteps) * GlobalTimeSteps, # Approximation
+            "births": births_count,
+            "deaths": deaths_count,
+            "survivors": len(active_agents),
+            "reason_end": "timeout" if limit_minutes and (time.time() - game_start_real_time) / 60.0 >= limit_minutes else "extinction/manual",
+            "hall_of_fame": {},
+            "voice_summary": voice_summary,   # NEW v4.5
+        }
+
+        # Extract serializable data from the internal all_time_best dictionary
+        # We only save the name and score to keep the JSON readable
+        for category, champs in all_time_best.items():
+            game_stats["hall_of_fame"][category] = [
+                {
+                    "name": c.name,
+                    "score": getattr(c.stats, category, 0.0),
+                    "is_male": c.is_male
+                } 
+                for c in champs
+            ]
+            
+        return game_stats
+
+    except Exception as ex:
+        print("Fatal error:", ex)
+        import traceback; traceback.print_exc()
+        return {"error": str(ex), "status": "crashed"}
+    finally:
+        # v4.5: Ensure all singing voices are stopped before pygame shutdown,
+        # otherwise the mixer can leak channels on some platforms.
+        try:
+            audio_engine.stop_all()
+        except Exception:
+            pass
+        # v153 (v4.61) — AUTO-SAVE ON GAME END
+        # ====================================
+        # The KeyMetrics file, Best NxEr champions, and membrane
+        # diagnostics are auto-saved whenever the game ends (clean exit,
+        # ESC, window close, crash). This ensures we never lose run data
+        # because someone forgot to press K.
+        # All files are prefixed with the game_id so they're traceable.
+        # v167 (v4.75) — added flush=True on all auto-save prints and
+        # log absolute working directory + saved paths so the user can
+        # verify where files actually land (the user reported KeyMetrics
+        # "not saved at end of game" — turned out to be cwd confusion
+        # plus pygame-shutdown output buffering).
+        try:
+            gid = config._game_id or "unknown"
+            print(f"[AUTO-SAVE] Starting end-of-game saves in: {os.path.abspath(os.getcwd())}", flush=True)
+            # v155 (v4.63) — BULLETPROOF AUTO-SAVE
+            # =====================================
+            # The previous version called MetricsDashboard(renderer.screen)
+            # which silently failed when pygame was tearing down or
+            # renderer was None. The user observed this as "only snapshot
+            # is saved" when the game ended naturally.
+            #
+            # Fix: call logger.save_key_metrics() directly. No UI,
+            # no pygame surface, no MetricsDashboard. Just iterate the
+            # time_series and write the file. Identical to what the
+            # K-press path writes (mid-game saves and end-of-game saves
+            # produce identical files).
+            try:
+                logger_ref = get_data_logger()
+                n_samples = len(logger_ref.time_series.get('ticks', [])) if hasattr(logger_ref, 'time_series') else 0
+                if n_samples == 0:
+                    print(f"[AUTO-SAVE] KeyMetrics SKIPPED — no samples in time_series. "
+                          f"This means the game ended before the metrics-worker captured any ticks.", flush=True)
+                else:
+                    saved = logger_ref.save_key_metrics(gid)
+                    if saved:
+                        print(f"[AUTO-SAVE] KeyMetrics ({n_samples} samples) -> {saved}", flush=True)
+                    else:
+                        print(f"[AUTO-SAVE] KeyMetrics save returned None despite {n_samples} samples — see preceding error", flush=True)
+            except Exception as exc:
+                import traceback
+                print(f"[AUTO-SAVE] KeyMetrics FAILED: {exc}", flush=True)
+                traceback.print_exc()
+            # 2. Best NxErs with game prefix
+            try:
+                if 'all_time_best' in locals() and 'update_all_time_best' in locals():
+                    update_all_time_best()
+                    file_mapping = {
+                        'food_found': 'BestFoodFound.json',
+                        'food_taken': 'BestFoodTaken.json',
+                        'explored': 'BestWorldExplorer.json',
+                        'time_lived_s': 'BestTimeLived.json',
+                        'mates_performed': 'BestMates.json',
+                        'fitness_score': 'BestFitness.json',
+                    }
+                    saved_count = 0
+                    for category, champs in all_time_best.items():
+                        if category not in file_mapping: continue
+                        filename = f"{gid}__{file_mapping[category]}"
+                        for champ in champs[:1]:
+                            try:
+                                save_nxer_to_file(champ, save_name=filename, auto_save=True)  # v167 — no dialog
+                                saved_count += 1
+                            except Exception:
+                                pass
+                    if saved_count > 0:
+                        print(f"[AUTO-SAVE] {saved_count} Best NxErs with game prefix '{gid}'", flush=True)
+                    else:
+                        print(f"[AUTO-SAVE] Best NxErs: no champions to save (no qualifying NxErs lived through the game)", flush=True)
+            except Exception as exc:
+                import traceback
+                print(f"[AUTO-SAVE] Best NxErs FAILED: {exc}", flush=True)
+                traceback.print_exc()
+            # 3. Membrane diagnostics (v153 H instrumentation)
+            try:
+                saved = get_data_logger().save_membrane_diagnostics(gid)
+                if saved:
+                    print(f"[AUTO-SAVE] Membrane diag -> {saved}", flush=True)
+            except Exception as exc:
+                print(f"[AUTO-SAVE] Membrane diag failed: {exc}", flush=True)
+            # 4. v170 (v4.78) — per-NxEr lifespan log
+            try:
+                logger_ref = get_data_logger()
+                saved = logger_ref.save_lifespan_log(gid)
+                if saved:
+                    surv = logger_ref.survivability
+                    print(f"[AUTO-SAVE] Lifespan log -> {saved}  "
+                          f"(founders alive: {surv.original_alive_count}/{surv.original_total})",
+                          flush=True)
+                else:
+                    print(f"[AUTO-SAVE] Lifespan log: save failed",
+                          flush=True)
+            except Exception as exc:
+                print(f"[AUTO-SAVE] Lifespan log failed: {exc}", flush=True)
+        except Exception as exc:
+            import traceback
+            print(f"[AUTO-SAVE] outer block failed: {exc}", flush=True)
+            traceback.print_exc()
+        # v147 (v4.55) — cleanly join the metrics worker thread.
+        try:
+            data_logger.shutdown()
+        except Exception:
+            pass
+        pygame.quit()
+
+
+def TestMode(games_count: int = 2, max_minutes: int = 1):
+    """
+    Generates random configurations and runs sequential simulations (Test Mode).
+    Saves config + results AFTER the game finishes.
+    """
+    print(f"--- STARTING TEST MODE: {games_count} Games, Max {max_minutes} mins each ---")
+    
+    history_configs = []
+    
+    def generate_unique_config():
+        for _ in range(1000):           
+            params = {
+                 "NxWorldSize": random.randint(20, 150),
+                 "NxWorldSea": random.uniform(0.25, 0.75),   
+                 "NxWorldRocks": random.uniform(0.01, 0.25), 
+                 "StartingNxErs": random.randint(2, 100),
+                 "MaxNxErs": 175,
+                 "MaxFood": random.randint(50, 400),
+                 "FoodRespan": random.randint(100, 500), 
+                 "StartFood": random.randint(50, 400),
+                 "MaxNeurons": random.randint(3, 50), 
+                 "GlobalTimeSteps": random.randint(20, 120), 
+                 "MateCooldownSeconds": random.randint(5, 25), 
+                "limit_minutes": 20,
+                "auto_save": True,
+                "auto_start": True
+            }
+
+            sig = tuple(sorted(params.items()))
+            if sig not in history_configs:
+                history_configs.append(sig)
+                return params
+        return None
+
+    for i in range(1, games_count + 1):
+        config = generate_unique_config()
+        if not config:
+            print("Could not generate unique configuration. Stopping Test Mode.")
+            break
+            
+        rnd_id = "".join([str(random.randint(0, 9)) for _ in range(10)])
+        ts = _now_str().replace(":", "-")
+        base_name = f"TestGame_{i}_{rnd_id}_{ts}"
+        
+        print(f"\n[TEST MODE] Starting Game {i}/{games_count} -> ID: {rnd_id}")
+        
+        # Pass the filename prefix so GameOfLife knows what to name the full save file
+        config["auto_save_prefix"] = base_name
+        
+        game_stats = {}
+        try:
+            # Run the Game and capture the return value (Final Stats)
+            game_stats = GameOfLife(**config)
+        except Exception as e:
+            print(f"[TEST MODE] Game {i} crashed: {e}")
+            game_stats = {"error": str(e), "status": "crashed"}
+            import traceback; traceback.print_exc()
+            
+        # --- SAVE CONFIG + STATS ---
+        config_filename = f"{base_name}_config.json"
+        
+        # Prepare the data object
+        final_report = {
+            "game_id": rnd_id,
+            "timestamp": ts,
+            "configuration": config.copy(),
+            "results": game_stats
+        }
+        
+        # Clean up internal control flags from the saved config for clarity
+        for k in ["limit_minutes", "auto_save", "auto_start", "auto_save_prefix"]:
+            if k in final_report["configuration"]: 
+                del final_report["configuration"][k]
+        
+        with open(_safe_path(config_filename), "w") as f:
+            json.dump(final_report, f, indent=4)
+            
+        print(f"[TEST MODE] Game {i} finished. Config & Stats saved: {config_filename}")
+        
+        # Small delay to allow cleanup before next round
+        time.sleep(1.0)
+
+    print("--- TEST MODE COMPLETE ---")
