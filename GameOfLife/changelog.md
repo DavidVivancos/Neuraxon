@@ -1,5 +1,8 @@
 # Neuraxon Game of Life Researh Version<br>
 CHANGE LOG:<br>
+May 25th 2026:<br>
+Game of Life Research v5.0 / Internal version 185 -> g intelligence factor introduced
+
 May 19th 2026:<br>
 Neuraxon Game of Life — v4.79 / Internal version 171 -> Survival normalization fix, State 0 buffer refractory 
 
