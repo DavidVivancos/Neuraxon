@@ -37,7 +37,12 @@
 
 **Neuraxon Game of Life 5.0 Research Version Mulit Nxon 2.0 (Based on Neuraxon 2.0)  + First g factor introduced:** (https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/5)
 
-**Neuraxon Game of Life 4.5 Lite Demo (Based on Multi Neuraxon 2.0) + First Proto-Language/Audition :** [Neuraxon Game of Life Hugging Face Space](https://huggingface.co/spaces/DavidVivancos/NeuraxonLife)
+**Neuraxon Live -> Nxon GoL Server + Client First Release:** ([https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/5](https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/NxonLive))
+
+Play online at: https://nxon.online/
+
+
+**Neuraxon Game of Life 5.0 Lite Demo (Based on Multi Neuraxon 2.0) + First Proto-Language/Audition :** [Neuraxon Game of Life Hugging Face Space](https://huggingface.co/spaces/DavidVivancos/NeuraxonLife)
 <div align="center">
   <img src="images/NeuraxonGameOfLife4.0-DemoSreenshot.png" alt="Neuraxon Game of Life Visualization" width="90%"/>  
 </div>
