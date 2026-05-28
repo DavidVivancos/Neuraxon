@@ -1,12 +1,12 @@
-# Multi Neuraxon Game of Life 5 — client / server
-
-# Based on the Paper:
-#   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
-#   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
-# https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint  (Neuraxon V2.0 )
-
+** Multi Neuraxon Game of Life 5 — client / server
 
 **Version mngol5-v1.16 / GoL Server V 1.035** — server-managed passwords + nas_best trial-22 architecture (hidden=6, fitness 6.39, build 135 ms).
+
+* Based on the Paper:
+*   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
+*   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
+* https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint  (Neuraxon V2.0 )
+
 
 A 24/7 server that runs one Neuraxon Game-of-Life world forever and
 streams it to many web clients. Built on the proven **v184** neural
