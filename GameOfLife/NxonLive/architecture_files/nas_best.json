@@ -1,0 +1,51 @@
+{
+  "_meta": {
+    "source": "NxonArchNAS:Evolutionary",
+    "trial_id": 120,
+    "sampled_at": "2026-05-27T16:16:24"
+  },
+  "biology": {
+    "metabolic_ramp_per_sec": 14.303553001335723,
+    "max_atrophy": 11.838673719470108,
+    "metabolic_rate_abs_cap_multiple": 60.0,
+    "idle_explore_seconds": 1.7209377998137598,
+    "explore_probability": 0.45221716332939677,
+    "mate_cooldown_seconds": 20,
+    "circadian_cycle_ticks": 1040
+  },
+  "neural": {
+    "num_hidden_neurons_default": 20,
+    "connection_probability": 0.45,
+    "afferent_synapse_strength": 1.6881207738294872,
+    "firing_threshold_excitatory": 0.4,
+    "firing_threshold_inhibitory": -0.49518089376953756,
+    "spontaneous_firing_rate": 0.031321865756042795,
+    "intrinsic_timescale_default": 19.864605806214925,
+    "resting_potential_decay": 0.2633835246046755,
+    "sensorimotor_coupling": 1.0433096614174509,
+    "symmetric_stdp": false,
+    "refractory_period_ticks": 4,
+    "post_spike_mp_reset": 0.19652931589202038,
+    "sphere_topology": "chc6",
+    "cross_sphere_coupling": 1.38901170358434,
+    "cryst_capacity": 1.938187950021704,
+    "free_energy_beta": 1.0210176505467827
+  },
+  "operating_ranges": {
+    "learning_rate": 0.00301337779712465,
+    "plasticity_threshold": 0.6914897508105343,
+    "autoreceptor_coefficient": 0.21696432233374313,
+    "adaptation_tau_ticks": 40.247176594357285,
+    "fitness_g_weight": 0.3792764680337938
+  },
+  "healthy_bands": {},
+  "genetic_lottery": {
+    "intrinsic_timescale_jitter": 1.2409709856301383,
+    "firing_threshold_jitter": 0.0,
+    "mutation_strength": 0.13377706270108455,
+    "metabolic_rate_multiplier_range": [
+      0.6803824233757645,
+      1.303343903201728
+    ]
+  }
+}

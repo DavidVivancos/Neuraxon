@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neuraxon GoL Live — By David Vivancos & Dr. Jose Sanchez for Qubic Science</title>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+<style>
+  :root{--bg:#06070d;--panel:#0e1018e6;--line:#26304a;--accent:#46c7ff;--gold:#ffcf4a}
+  *{box-sizing:border-box;margin:0;padding:0;font-family:ui-monospace,Menlo,Consolas,monospace}
+  body{background:var(--bg);color:#dfe7f5;overflow:hidden}
+  #cv{position:fixed;inset:0;display:block;outline:none}
+  #loader{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#06070d;color:#46c7ff;font-size:15px;z-index:50}
+  .panel{position:fixed;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;backdrop-filter:blur(6px)}
+  #left{top:14px;left:14px;width:312px;max-height:94vh;overflow:auto}
+  #rank{top:14px;right:14px;width:230px;max-height:94vh;overflow:auto}
+  h1{font-size:15px;color:var(--accent);margin-bottom:2px}
+  .sub{font-size:10px;color:#7d88a8;margin-bottom:8px;line-height:1.4}
+  .credits{font-size:9px;line-height:1.35;margin:1px 0;color:#cdd6ea;text-align:center}
+  .credits a,.credits a:visited,.credits a:hover{color:#fff;text-decoration:underline}
+  .sec{font-size:11px;color:var(--gold);margin:10px 0 4px;border-top:1px solid var(--line);padding-top:8px}
+  label{display:block;font-size:10px;color:#9fb0d0;margin:7px 0 1px}
+  select,input,button{width:100%;background:#0a0c14;color:#dfe7f5;border:1px solid var(--line);border-radius:6px;padding:7px;font-size:12px;margin-bottom:3px}
+  button{background:#15324a;cursor:pointer;border-color:#2a5878}
+  button:hover{background:#1d4868}
+  button.gold{background:#3a3210;border-color:#7a6a20;color:var(--gold);font-weight:bold}
+  .row{display:flex;gap:6px}.row>*{flex:1}
+  .rk{font-size:11px;display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #1a2030}
+  .rk .v{color:var(--accent)}
+  .msg{font-size:11px;padding:6px;border-radius:5px;margin:6px 0}
+  .ok{background:#10301a;color:#7fdca0}.err{background:#3a1218;color:#ff8f9f}
+  .stat{font-size:11px;display:flex;justify-content:space-between;padding:1px 0}
+  .stat b{color:var(--accent)}
+  .tabs{display:flex;gap:4px;margin-bottom:8px}
+  .tabs button{font-size:10px;padding:5px}
+  .hide{display:none!important}
+  .sld{display:flex;align-items:center;gap:6px}
+  .sld input[type=range]{flex:1;accent-color:#46c7ff;padding:0;margin:0}
+  .sld .v{font-size:10px;color:var(--accent);min-width:46px;text-align:right}
+  .sw{display:flex;align-items:center;gap:8px;margin:6px 0}
+  .sw input{width:auto}
+  #modal{position:fixed;inset:0;background:#03040acc;display:flex;align-items:center;justify-content:center;z-index:60}
+  #modal .box{background:#0e1018;border:1px solid var(--gold);border-radius:14px;padding:34px 40px;text-align:center;max-width:460px}
+  #modal h2{color:var(--gold);font-size:18px;margin-bottom:6px}
+  #modal .big{font-size:42px;font-weight:bold;letter-spacing:2px;margin:14px 0;color:#fff}
+  #modal .pw{font-size:30px;font-weight:bold;color:var(--accent);background:#0a0c14;padding:10px 18px;border-radius:8px;display:inline-block;margin:8px 0;letter-spacing:3px}
+  #modal .warn{font-size:11px;color:#ff9f6f;margin-top:14px;line-height:1.5}
+  #modal button{margin-top:18px;width:auto;padding:9px 26px}
+  #hint{position:fixed;bottom:10px;left:50%;transform:translateX(-50%);font-size:10px;color:#69748f;background:#08090eb3;padding:5px 12px;border-radius:6px}
+</style>
+</head>
+<body>
+<div id="loader">Initializing 3D world…</div>
+<canvas id="cv"></canvas>
+
+<div class="panel hide" id="left">
+  <h1>🧠 Neuraxon GoL Live — v 1.035</h1>
+  <div class="credits"><strong>By <a href="https://vivancos.com/" target="_blank">David Vivancos</a> & <a href="https://josesanchezgarcia.com/" target="_blank">Jose Sanchez</a></strong></div>
+  <div class="credits"><strong>for <a href="https://qubic.org/" target="_blank">Qubic</a> Science</strong></div>
+  <div class="sub" id="conn">connecting…</div>
+  <div class="tabs">
+    <button onclick="tab('view')">👁 View</button>
+    <button id="btn-reg" onclick="tab('reg')">➕ New NxEr</button>
+    <button onclick="tab('login')">🔑 My NxEr</button>
+  </div>
+
+  <div id="t-view">
+    <div class="sec">World</div>
+    <div class="stat"><span>Tick</span><b id="s-tick">0</b></div>
+    <div class="stat"><span>Alive NxErs</span><b id="s-alive">0</b></div>
+    <div class="stat"><span>g · PC1</span><b id="s-gpc1">—</b></div>
+    <div class="stat"><span>g · manifold</span><b id="s-gman">—</b></div>
+    <div class="stat"><span>g · &#955;1/&#955;2</span><b id="s-glam">—</b></div>
+    <div class="sub" style="margin-top:8px">Anonymous: drag to orbit &middot; wheel to zoom. NxEr details need ownership. No pause/save &mdash; the world runs 24/7.</div>
+  </div>
+
+  <div id="t-reg" class="hide">
+    <div class="sec">Create a new NxEr</div>
+    <div class="sub">Every brain is the <b>CHC g-capable 6-sphere</b> architecture (not selectable &mdash; required for g). Tune it with the sliders below; the server validates every value. The server assigns a unique name <b>and a 4-character password</b> &mdash; shown once after creation so you can save it.</div>
+    <div id="sliders"></div>
+    <button class="gold" onclick="doRegister()">Create NxEr</button>
+    <div id="r-msg"></div>
+  </div>
+
+  <div id="t-login" class="hide">
+    <div class="sec">Access my NxEr</div>
+    <div class="sub">Valid only while your NxEr is alive. If it died, create a new one.</div>
+    <label>NxEr name</label><input id="l-name" maxlength="8" placeholder="e.g. AF">
+    <label>Password</label><input id="l-pw" type="password" maxlength="12">
+    <button class="gold" onclick="doLogin()">Enter</button>
+    <div id="l-msg"></div>
+    <div id="mine" class="hide">
+      <div class="sec">My NxEr: <span id="m-name"></span></div>
+      <div class="row">
+        <button onclick="locate()">🎯 Locate</button>
+        <button onclick="exportNxer()">💾 Save model</button>
+      </div>
+      <div id="m-stats"></div>
+      <div class="sec">My ranks</div>
+      <div id="m-ranks"></div>
+    </div>
+  </div>
+</div>
+
+<div class="panel hide" id="rank">
+  <div class="sec" style="border:0;margin:0;padding:0">🏆 All-time ranking</div>
+  <div id="rk"></div>
+</div>
+
+<div id="modal" class="hide">
+  <div class="box">
+    <h2>✅ Your NxEr is born</h2>
+    <div style="font-size:11px;color:#9fb0d0">Name (assigned by the server)</div>
+    <div class="big" id="md-name">—</div>
+    <div style="font-size:11px;color:#9fb0d0">Password (4 characters, also assigned)</div>
+    <div class="pw" id="md-pw">—</div>
+    <div class="warn">⚠️ Write these down now. The server-generated password is shown only once and works only while this NxEr is alive. If it dies you must create a new one.</div>
+    <button class="gold" onclick="closeModal()">Got it</button>
+  </div>
+</div>
+
+<div id="hint">drag = orbit &middot; wheel = zoom &middot; <span id="sndbtn" style="cursor:pointer;color:#46c7ff;text-decoration:underline" onclick="toggleSound()">🔊 sound: off</span> &middot; 24/7 world</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+const $=id=>document.getElementById(id);
+let WS=null,TOKEN=null,SNAP=null,MY=null,TERRAIN=null,TERR_EPOCH=-1,PARAMS=null;
+let MY_OFFSPRING=new Set();
+window.tab=t=>{for(const k of['view','reg','login'])$('t-'+k).classList.toggle('hide',k!==t);};
+
+const cv=$('cv');
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x06070d);
+scene.fog=new THREE.Fog(0x06070d,400,1600);
+const camera=new THREE.PerspectiveCamera(60,innerWidth/innerHeight,0.1,4000);
+const webgl=new THREE.WebGLRenderer({canvas:cv,antialias:true});
+webgl.setSize(innerWidth,innerHeight);
+webgl.setPixelRatio(Math.min(devicePixelRatio,2));
+webgl.toneMapping=THREE.ACESFilmicToneMapping;
+webgl.toneMappingExposure=1.2;
+const composer=new EffectComposer(webgl);
+composer.addPass(new RenderPass(scene,camera));
+const bloom=new UnrealBloomPass(new THREE.Vector2(innerWidth,innerHeight),0.8,0.45,0.85);
+composer.addPass(bloom);
+const controls=new OrbitControls(camera,cv);
+controls.enableDamping=true;controls.dampingFactor=0.08;controls.enablePan=false;
+// --- Lite lighting rig (ported 1:1 from GameOfLife Renderer3D) ---
+scene.add(new THREE.AmbientLight(0x303040,0.4));
+scene.add(new THREE.HemisphereLight(0xffffff,0x111122,1.0));
+const sun=new THREE.DirectionalLight(0xffffee,4.0);
+sun.position.set(200,50,0);scene.add(sun);
+const nightLight=new THREE.DirectionalLight(0x4455aa,0.08);
+nightLight.position.set(-200,30,0);scene.add(nightLight);
+// visible glowing sun sphere (bloom picks up the emissive disc)
+const sunMesh=new THREE.Mesh(new THREE.SphereGeometry(8,32,32),
+  new THREE.MeshBasicMaterial({color:0xffdd44}));
+sunMesh.position.set(200,50,0);scene.add(sunMesh);
+
+let planetRadius=30,terrainMesh=null,core=null,atmo=null;
+const nxerMeshes=new Map(),foodMeshes=new Map();
+const FX=[];
+const babyTex=makeEmoji('👶');
+const noteTex=makeEmoji('🎵');
+const heartTex=makeEmoji('❤️');
+const skullTex=makeEmoji('💀');
+const eggTex=makeEmoji('🥚');
+
+function makeEmoji(e){
+  const c=document.createElement('canvas');c.width=c.height=64;
+  const x=c.getContext('2d');x.font='48px serif';x.textAlign='center';x.textBaseline='middle';
+  x.fillText(e,32,36);return new THREE.CanvasTexture(c);
+}
+function getSpherePos(x,y,N,r){
+  // EXACT inverse of buildPlanet's vertex->grid mapping, so an
+  // entity at cell (x,y) lands on the same sphere point the terrain
+  // for that cell was painted. Previously these used different
+  // formulas, which is why NxErs appeared to walk over rock / float.
+  let u=(x/N)-0.25; u-=Math.floor(u);            // (gx/N - 0.25) mod 1
+  const phi=Math.PI*2*(1.0-u);
+  const theta=Math.min(Math.PI-1e-3,Math.max(1e-3,(y/N)*Math.PI));
+  return new THREE.Vector3(
+    r*Math.sin(theta)*Math.cos(phi),
+    r*Math.cos(theta),
+    r*Math.sin(theta)*Math.sin(phi));
+}
+function terrAt(x,y){
+  if(!TERRAIN||!TERRAIN.terrain)return '.';
+  const row=TERRAIN.terrain[Math.max(0,Math.min(TERRAIN.size-1,y|0))]||'';
+  return row[Math.max(0,Math.min(TERRAIN.size-1,x|0))]||'.';
+}
+function buildPlanet(){
+  const N=TERRAIN.size;
+  planetRadius=(N*0.8)/2;
+  [core,atmo,terrainMesh].forEach(m=>{if(m){scene.remove(m);m.geometry.dispose();}});
+  core=new THREE.Mesh(new THREE.SphereGeometry(planetRadius,48,48),
+        new THREE.MeshStandardMaterial({color:0x1964c8,roughness:0.2,metalness:0.1}));
+  scene.add(core);
+  atmo=new THREE.Mesh(new THREE.SphereGeometry(planetRadius*1.06,48,48),
+        new THREE.ShaderMaterial({
+          uniforms:{c:{value:new THREE.Color(0x4488ff)}},
+          vertexShader:'varying vec3 n;void main(){n=normalize(normalMatrix*normal);gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
+          fragmentShader:'uniform vec3 c;varying vec3 n;void main(){float i=pow(0.72-dot(n,vec3(0.,0.,1.)),2.0);gl_FragColor=vec4(c,i*0.45);}',
+          side:THREE.BackSide,blending:THREE.AdditiveBlending,transparent:true}));
+  scene.add(atmo);
+  // tessellation scaled to world size so coastlines render crisply
+  // and an NxEr visibly sits on the SAME terrain it is on in the
+  // sim. (Fixed detail 38 made small worlds blocky and big worlds
+  // blurry, so entities looked stranded on the wrong terrain colour.)
+  const _det=Math.max(28,Math.min(96,Math.round(N*0.9)));
+  const geo=new THREE.IcosahedronGeometry(planetRadius,_det);
+  const pos=geo.attributes.position,cnt=pos.count;
+  const col=new THREE.BufferAttribute(new Float32Array(cnt*3),3);
+  const v=new THREE.Vector3(),color=new THREE.Color();
+  for(let i=0;i<cnt;i++){
+    v.fromBufferAttribute(pos,i);
+    const nrm=v.clone().normalize();
+    let phi=Math.atan2(v.z,v.x);if(phi<0)phi+=Math.PI*2;
+    const u=1.0-(phi/(Math.PI*2));
+    const theta=Math.acos(Math.max(-1,Math.min(1,v.y/planetRadius)));
+    const vv=theta/Math.PI;
+    const gx=Math.floor(((u+0.25)%1.0)*N)%N,gy=Math.floor(vv*N)%N;
+    const ch=terrAt(gx,gy);
+    let h=-0.1;
+    if(ch===','){h=0.3;color.setHex(0x28b43c);}
+    else if(ch==='#'){h=1.0;color.setHex(0x6e6e6e);}
+    else{color.setHex(0x1964c8);}
+    v.copy(nrm).multiplyScalar(planetRadius+h);
+    pos.setXYZ(i,v.x,v.y,v.z);
+    col.setXYZ(i,color.r,color.g,color.b);
+  }
+  geo.setAttribute('color',col);geo.computeVertexNormals();
+  terrainMesh=new THREE.Mesh(geo,new THREE.MeshStandardMaterial({vertexColors:true,roughness:0.85}));
+  scene.add(terrainMesh);
+  controls.target.set(0,0,0);
+  controls.minDistance=planetRadius*1.25;
+  controls.maxDistance=planetRadius*5;
+  camera.position.set(0,planetRadius*0.6,planetRadius*2.6);
+  $('loader').classList.add('hide');
+  $('left').classList.remove('hide');$('rank').classList.remove('hide');
+}
+function syncEntities(){
+  if(!SNAP||!TERRAIN)return;
+  const N=TERRAIN.size;
+  const liveIds=new Set(SNAP.nxers.map(n=>n.id));
+  for(const[id,m]of nxerMeshes){if(!liveIds.has(id)){scene.remove(m);nxerMeshes.delete(id);}}
+  for(const a of SNAP.nxers){
+    const ch=terrAt(a.x,a.y);
+    const hOff=ch===','?0.3:ch==='#'?1.0:0.0;
+    const p=getSpherePos(a.x,a.y,N,planetRadius+hOff+0.35);
+    let m=nxerMeshes.get(a.id);
+    const mine=(a.name===MY);
+    if(!m){
+      // Lite NxEr: SphereGeometry(0.35,12,12), server-assigned
+      // rgb() colour (identical on every client + matches Lite),
+      // emissive same colour, + a red energy torus.
+      const base=new THREE.Color(a.c||'rgb(200,200,200)');
+      m=new THREE.Mesh(new THREE.SphereGeometry(0.35,12,12),
+        new THREE.MeshStandardMaterial({color:base.clone(),
+          emissive:base.clone(),emissiveIntensity:0.15,
+          roughness:0.4,metalness:0.3}));
+      const ring=new THREE.Mesh(new THREE.TorusGeometry(0.5,0.04,8,24),
+        new THREE.MeshBasicMaterial({color:0xff3333,transparent:true,opacity:0.8}));
+      ring.rotation.x=Math.PI/2;m.add(ring);m.userData.ring=ring;
+      m.userData.baby=null;m.userData.sing=null;
+      scene.add(m);nxerMeshes.set(a.id,m);
+    }
+    // YOUR NxEr blinks brightly (easy to spot in a crowd)
+    if(mine){
+      const bl=0.5+0.5*Math.sin(performance.now()*0.012);
+      m.material.emissiveIntensity=0.25+1.3*bl;
+      const sc=1.0+0.35*bl;m.scale.set(sc,sc,sc);
+      m.userData.ring.material.color.setHex(0xffe23a);
+      m.userData.ring.material.opacity=0.6+0.4*bl;
+    }else if(m.userData._wasMine){
+      m.material.emissiveIntensity=0.15;m.scale.set(1,1,1);
+    }
+    m.userData._wasMine=mine;
+    // brain still building → translucent pulsing "ghost" so it's
+    // clearly a not-yet-active NxEr (the sim never froze to make it)
+    const building=!!a.b;
+    if(building){
+      const gp=0.35+0.35*Math.sin(performance.now()*0.006);
+      m.material.transparent=true;
+      m.material.opacity=0.25+0.35*gp;
+      if(!mine){m.material.emissiveIntensity=0.05+0.3*gp;
+        const s2=0.8+0.15*gp;m.scale.set(s2,s2,s2);}
+    }else if(m.userData._wasBuilding){
+      m.material.transparent=false;m.material.opacity=1;
+      if(!mine){m.material.emissiveIntensity=0.15;m.scale.set(1,1,1);}
+    }
+    m.userData._wasBuilding=building;
+    // 🎵 over a singing NxEr (server `s` flag)
+    if(a.s&&!m.userData.sing){
+      const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:noteTex,depthTest:false}));
+      sp.scale.set(0.9,0.9,0.9);sp.position.set(0,0.85,0);m.add(sp);m.userData.sing=sp;
+    }else if(!a.s&&m.userData.sing){m.remove(m.userData.sing);m.userData.sing=null;}
+    const isMyChild=MY&&MY_OFFSPRING.has(a.id);
+    if(isMyChild&&!m.userData.baby){
+      const sb=new THREE.Sprite(new THREE.SpriteMaterial({map:babyTex,depthTest:false}));
+      sb.scale.set(0.9,0.9,0.9);sb.position.set(0,-0.85,0);m.add(sb);m.userData.baby=sb;
+    }else if(!isMyChild&&m.userData.baby){m.remove(m.userData.baby);m.userData.baby=null;}
+    m.position.lerp(p,0.35);
+  }
+  const fids=new Set(SNAP.foods.map((_,i)=>i));
+  for(const[id,m]of foodMeshes){if(!fids.has(id)){scene.remove(m);foodMeshes.delete(id);}}
+  SNAP.foods.forEach((f,i)=>{
+    let m=foodMeshes.get(i);
+    if(!m){m=new THREE.Mesh(new THREE.OctahedronGeometry(0.4,0),
+      new THREE.MeshStandardMaterial({color:0xff4444,emissive:0xff2200,
+        emissiveIntensity:0.35,roughness:0.3,metalness:0.5}));
+      m.rotation.set(0.4,0.4,0);     // fixed pose, never animated
+      scene.add(m);foodMeshes.set(i,m);}
+    m.position.copy(getSpherePos(f.x,f.y,N,planetRadius+0.45));
+  });
+  // event emojis (Lite vocabulary): mate=❤️, death=💀, birth=🥚
+  if(SNAP.events&&SNAP.events.length&&SNAP.tick!==FX._lastTick){
+    FX._lastTick=SNAP.tick;
+    const EMO={mate:heartTex,die:skullTex,birth:eggTex,eat:null};
+    for(const e of SNAP.events){
+      const tex=EMO[e.k];if(!tex)continue;
+      const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,
+        depthTest:false,transparent:true}));
+      sp.scale.set(1.4,1.4,1.4);
+      const p=getSpherePos(e.x,e.y,N,planetRadius+1.0);
+      sp.position.copy(p);sp.userData.born=performance.now();
+      sp.userData.dir=p.clone().normalize();
+      scene.add(sp);FX.push(sp);
+    }
+  }
+  const now=performance.now();
+  for(let i=FX.length-1;i>=0;i--){
+    const r=FX[i],age=(now-r.userData.born)/1200;
+    if(age>=1){scene.remove(r);FX.splice(i,1);continue;}
+    if(r.userData.dir)                       // drift outward off planet
+      r.position.addScaledVector(r.userData.dir,0.06);
+    r.material.opacity=1-age;
+    const s=1.4*(1+age*0.4);r.scale.set(s,s,s);
+  }
+}
+addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();
+  webgl.setSize(innerWidth,innerHeight);composer.setSize(innerWidth,innerHeight);
+});
+const _dayCol=new THREE.Color(0x0a1430), _nightCol=new THREE.Color(0x040509);
+function loop(){
+  requestAnimationFrame(loop);
+  controls.update();
+  if(terrainMesh)syncEntities();
+  // day/night cycle from the server tick (same phase the brains sense)
+  if(SNAP){
+    const a=SNAP.tick*0.01;
+    const ph=0.5+0.5*Math.sin(a);                  // 0=night 1=day
+    scene.background.copy(_nightCol).lerp(_dayCol,ph);
+    if(scene.fog)scene.fog.color.copy(scene.background);
+    // orbit the sun around the planet like Lite (visible glowing disc)
+    const R=Math.max(120,planetRadius*4);
+    sun.position.set(Math.cos(a)*R,50,Math.sin(a)*R);
+    sunMesh.position.copy(sun.position);
+    sun.intensity=0.5+3.5*ph;
+    sunMesh.material.color.setHSL(0.13,1.0,0.45+0.2*ph);
+    sunMesh.visible=ph>0.15;
+  }
+  try{ updateSinging(); }   // proximity-mixed per-NxEr singing
+  catch(e){ /* never let audio break rendering */ }
+  composer.render();
+}
+loop();
+
+// ---- proximity-mixed singing (per-NxEr, pentatonic so voices merge)
+// The server flags singing NxErs with `a.s`. Instead of one global
+// drone (which sounded like everything at once), each singing NxEr
+// near the camera gets its OWN oscillator, its gain falls off with
+// distance (so you only hear the ones you've zoomed close to), and
+// every pitch is drawn from an A-minor pentatonic scale so any
+// combination of simultaneous voices is consonant — they merge into
+// a chord instead of a cacophony. A very faint low pad underlies it
+// all for atmosphere.
+// =====================================================================
+// NxEr SINGING — ported from the v5.0 Lite AudioEngine so it sounds
+// like the original: each NxEr has a 6-tone HARMONIC VOICE and, while
+// singing, plays a short arpeggiated MELODY (notes with attack/decay
+// envelopes through a master compressor), not a sustained drone.
+// Audibility is a GLOBAL proximity gate driven by how close the camera
+// is to the planet surface (zoom in to hear), exactly like Lite.
+// =====================================================================
+const MUSICAL_SCALES={
+  major:[0,2,4,5,7,9,11,12,14,16,17,19],
+  minor:[0,2,3,5,7,8,10,12,14,15,17,19],
+  pentatonic:[0,2,4,7,9,12,14,16,19,21,24,26],
+  harmonic:[0,12,19,24,28,31,34,36,38,40,42,43]
+};
+const SCALE_NAMES=Object.keys(MUSICAL_SCALES);
+function semitoneToFreq(root,semi){return root*Math.pow(2,semi/12);}
+// deterministic per-NxEr voice (the original stores/inherits a genome;
+// we derive a STABLE 6-tone harmonic voice from the id with a seeded
+// PRNG so each NxEr sounds distinct and consistent across frames).
+function _mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;
+  let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;
+  return ((t^t>>>14)>>>0)/4294967296;};}
+const _voiceCache={};
+function voiceFor(id){
+  if(_voiceCache[id])return _voiceCache[id];
+  const rnd=_mulberry32(((id|0)*2654435761>>>0)||1);
+  const root=160+rnd()*280;                 // E3..F4
+  const scale=MUSICAL_SCALES[SCALE_NAMES[Math.floor(rnd()*SCALE_NAMES.length)]];
+  const tones=[root]; const used=new Set([0]);
+  while(tones.length<6){
+    const idx=Math.floor(rnd()*scale.length);
+    if(used.has(idx))continue; used.add(idx);
+    tones.push(semitoneToFreq(root,scale[idx]));
+  }
+  tones.sort((a,b)=>a-b);
+  _voiceCache[id]=tones; return tones;
+}
+
+class AudioEngine{
+  constructor(){this.ctx=null;this.masterGain=null;this.enabled=false;
+    this.targetVolume=0;this.maxConcurrent=12;this.activeVoices=0;}
+  init(){
+    if(this.ctx)return;
+    try{
+      const Ctx=window.AudioContext||window.webkitAudioContext; if(!Ctx)return;
+      this.ctx=new Ctx();
+      this.masterGain=this.ctx.createGain(); this.masterGain.gain.value=0;
+      this.compressor=this.ctx.createDynamicsCompressor();
+      this.compressor.threshold.value=-20; this.compressor.knee.value=12;
+      this.compressor.ratio.value=4; this.compressor.attack.value=0.01;
+      this.compressor.release.value=0.25;
+      this.masterGain.connect(this.compressor).connect(this.ctx.destination);
+      this.enabled=true;
+    }catch(e){console.warn('AudioEngine init failed',e);}
+  }
+  resume(){if(this.ctx&&this.ctx.state==='suspended')this.ctx.resume();}
+  setProximity(p){
+    this.targetVolume=Math.max(0,Math.min(1,p));
+    if(!this.masterGain)return;
+    const t=this.ctx.currentTime;
+    this.masterGain.gain.cancelScheduledValues(t);
+    this.masterGain.gain.linearRampToValueAtTime(this.targetVolume*0.35,t+0.2);
+  }
+  playNote(freq,duration=0.4,volume=0.15,when=0,type='sine'){
+    if(!this.enabled||!this.ctx)return;
+    if(this.activeVoices>=this.maxConcurrent)return;
+    this.activeVoices++;
+    const start=this.ctx.currentTime+when;
+    const osc=this.ctx.createOscillator(); const gain=this.ctx.createGain();
+    osc.type=type; osc.frequency.value=freq;
+    gain.gain.setValueAtTime(0.0001,start);
+    gain.gain.exponentialRampToValueAtTime(volume,start+0.04);
+    gain.gain.exponentialRampToValueAtTime(volume*0.6,start+duration*0.6);
+    gain.gain.exponentialRampToValueAtTime(0.0001,start+duration);
+    osc.connect(gain).connect(this.masterGain);
+    osc.start(start); osc.stop(start+duration+0.05);
+    osc.onended=()=>{this.activeVoices=Math.max(0,this.activeVoices-1);};
+  }
+  playMelody(voice,foodBonus=0,baseVolume=0.10){
+    if(!this.enabled||!voice||!voice.length)return;
+    const shift=Math.pow(2,Math.min(6,foodBonus)/12);
+    const noteDur=0.18;
+    voice.forEach((f,i)=>this.playNote(f*shift,noteDur,baseVolume,i*noteDur*0.85));
+  }
+  playChord(voice,duration=0.8,baseVolume=0.06,foodBonus=0){
+    if(!this.enabled||!voice||!voice.length)return;
+    const shift=Math.pow(2,Math.min(6,foodBonus)/12);
+    voice.forEach(f=>this.playNote(f*shift,duration,baseVolume,Math.random()*0.05));
+  }
+}
+const audioEngine=new AudioEngine();
+let _sndOn=false;
+const _lastSang={};            // id -> last melody time (s)
+window.toggleSound=function(){
+  _sndOn=!_sndOn;
+  document.getElementById('sndbtn').textContent='🔊 sound: '+(_sndOn?'on':'off');
+  if(_sndOn){ audioEngine.init(); audioEngine.resume(); }
+  else if(audioEngine.masterGain){ audioEngine.setProximity(0); }
+};
+function updateSinging(){
+  if(!_sndOn||!audioEngine.enabled||!SNAP||!SNAP.nxers)return;
+  // GLOBAL proximity gate from camera distance to the planet surface
+  // (zoom in to hear), matching Lite.
+  const camDist=camera.position.length();
+  const surfaceDist=camDist-planetRadius;
+  const closeT=planetRadius*0.6, farT=planetRadius*2.0;
+  let prox=1.0-(surfaceDist-closeT)/(farT-closeT);
+  prox=Math.max(0,Math.min(1,prox));
+  audioEngine.setProximity(prox);
+  if(prox<=0.05)return;
+  // For singing NxErs near the camera, trigger their melody at most
+  // every ~1.4s so they sing phrases (not a continuous tone).
+  const now=audioEngine.ctx.currentTime;
+  const cam=camera.position;
+  const audible=planetRadius*2.2;
+  let started=0;
+  for(const a of SNAP.nxers){
+    if(!a.s||!a.alive)continue;
+    if(started>=4)break;                       // cap new phrases per frame
+    const m=nxerMeshes.get(a.id); if(!m)continue;
+    if(cam.distanceTo(m.position)>audible)continue;
+    const last=_lastSang[a.id]||0;
+    if(now-last<1.4)continue;
+    _lastSang[a.id]=now+Math.random()*0.3;     // small desync
+    audioEngine.playMelody(voiceFor(a.id),0,0.10);
+    started++;
+  }
+}
+
+async function fetchWorld(retry){
+  const ld=document.getElementById('loader');
+  try{
+    const r=await fetch('/api/world',{cache:'no-store'});
+    if(!r.ok){
+      if(ld)ld.textContent='World fetch failed (HTTP '+r.status+') — retrying…';
+      console.error('[mngol5] /api/world HTTP',r.status);
+      setTimeout(()=>fetchWorld(true),1500); return;
+    }
+    const w=await r.json();
+    if(!w||!w.size){
+      // server world-meta cache not ready yet (first tick) — retry
+      if(ld)ld.textContent='Waiting for world data…';
+      console.warn('[mngol5] /api/world returned empty world, retrying');
+      setTimeout(()=>fetchWorld(true),1000); return;
+    }
+    const fresh=!TERRAIN||TERRAIN.size!==w.size||w.epoch!==TERR_EPOCH;
+    TERRAIN=w;TERR_EPOCH=w.epoch;
+    if(fresh){
+      try{ buildPlanet(); }
+      catch(be){
+        // buildPlanet threw — DON'T leave the user staring at a
+        // blank loader with no clue. Surface it + still reveal the UI.
+        console.error('[mngol5] buildPlanet failed:',be);
+        if(ld)ld.textContent='3D build error: '+(be&&be.message||be)+
+          ' — see console (F12).';
+        $('left').classList.remove('hide');$('rank').classList.remove('hide');
+      }
+    }
+  }catch(e){
+    console.error('[mngol5] fetchWorld error:',e);
+    if(ld)ld.textContent='Connection error: '+(e&&e.message||e)+
+      ' — retrying…';
+    setTimeout(()=>fetchWorld(true),1500);
+  }
+}
+function connect(){
+  const pr=location.protocol==='https:'?'wss':'ws';
+  WS=new WebSocket(pr+'://'+location.host+'/ws');
+  WS.onopen=()=>$('conn').textContent='● live';
+  WS.onclose=()=>{$('conn').textContent='○ reconnecting…';setTimeout(connect,2000);};
+  WS.onmessage=e=>{const m=JSON.parse(e.data);
+    if(m.type==='hello')TOKEN=m.token;
+    else if(m.type==='world'){SNAP=m.data;
+      const ep=SNAP.world&&SNAP.world.epoch;
+      if(ep!=null&&ep!==TERR_EPOCH)fetchWorld();
+      hud();}};
+}
+function hud(){
+  if(!SNAP)return;
+  $('s-tick').textContent=SNAP.tick;$('s-alive').textContent=SNAP.alive;
+  const g=SNAP.g||{};
+  $('s-gpc1').textContent=g.pc1?g.pc1.toFixed(3):'—';
+  $('s-gman').textContent=g.pos_manifold!=null?(g.pos_manifold*100).toFixed(0)+'%':'—';
+  $('s-glam').textContent=g.lambda_ratio?g.lambda_ratio.toFixed(2):'—';
+  const R=SNAP.ranking||{},lbl={food_found:'Food',food_taken:'Stolen',explored:'Explored',time_lived:'Lived',mates_performed:'Mates',fitness:'Fitness',g:'g'};
+  let h='';for(const k in lbl){
+    h+=`<div class="sec" style="margin:8px 0 2px">${lbl[k]}</div>`;
+    const list=R[k]||[];
+    if(list.length===0){
+      h+='<div class="rk" style="color:#6a7088;font-style:italic"><span>no data yet</span><span class="v"></span></div>';
+      continue;
+    }
+    for(const e of list){
+      const me=(MY&&e.name===MY);
+      const st=me?' style="color:#ffd24a;font-weight:bold"':'';
+      const dp=(k==='g')?3:(k==='fitness')?2:1;
+      h+=`<div class="rk"${st}><span>${me?'➤ ':''}${e.name}${e.alive?'':' †'}</span><span class="v">${(+e.value).toFixed(dp)}</span></div>`;
+    }}
+  $('rk').innerHTML=h||'…';
+}
+async function post(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return{s:r.status,j:await r.json().catch(()=>({}))};}
+function note(el,m,ok){$(el).innerHTML=`<div class="msg ${ok?'ok':'err'}">${m}</div>`;}
+
+async function loadParams(){
+  const r=await fetch('/api/params');PARAMS=await r.json();
+  const labels={num_hidden_neurons:'Hidden neurons / sphere',connection_probability:'Connection probability',
+    learning_rate:'Learning rate',spontaneous_firing_rate:'Spontaneous firing',
+    intrinsic_timescale_default:'Intrinsic timescale',firing_threshold_excitatory:'Firing threshold',
+    plasticity_threshold:'Plasticity threshold',afferent_synapse_strength:'Afferent strength',
+    sensory_input_gain:'Sensory gain',adaptation_tau_ticks:'Adaptation τ',
+    resting_potential_decay:'Resting decay',refractory_period_ticks:'Refractory ticks',
+    post_spike_mp_reset:'Post-spike reset',cross_sphere_coupling:'Cross-sphere κ',
+    cryst_capacity:'Crystallised capacity',free_energy_beta:'Free-energy β',symmetric_stdp:'Symmetric STDP'};
+  let h='';
+  for(const p of PARAMS.params){
+    const lab=labels[p.key]||p.key;
+    if(p.type==='bool'){
+      h+=`<div class="sw"><input type="checkbox" id="p-${p.key}" ${p.default?'checked':''}><label style="margin:0">${lab}</label></div>`;
+    }else{
+      const step=p.type==='int'?1:((p.max-p.min)/100);
+      const dec=p.type==='int'?0:3;
+      h+=`<label>${lab}</label><div class="sld">
+        <input type="range" id="p-${p.key}" min="${p.min}" max="${p.max}" step="${step}" value="${p.default}"
+          oninput="document.getElementById('pv-${p.key}').textContent=(+this.value).toFixed(${dec})">
+        <span class="v" id="pv-${p.key}">${(+p.default).toFixed(dec)}</span></div>`;
+    }
+  }
+  $('sliders').innerHTML=h;
+}
+window.doRegister=async function(){
+  if(MY){return note('r-msg','You already have a live NxEr ('+MY+'). It must die before you can create another.',0);}
+  const params={};
+  for(const p of PARAMS.params){
+    const el=$('p-'+p.key);if(!el)continue;
+    params[p.key]=p.type==='bool'?(el.checked?1:0):(+el.value);
+  }
+  const own=localStorage.getItem('nx_owner')||'';
+  const{s,j}=await post('/api/register',{params,owner:own});
+  if(s===409&&j.name){            // already own a live NxEr → reconnect
+    if(j.owner)localStorage.setItem('nx_owner',j.owner);
+    connectAs(j.name);
+    return note('r-msg','You already have a live NxEr: '+j.name+'. Connected to it.',1);
+  }
+  if(s!==200)return note('r-msg',j.error||'failed',0);
+  if(j.owner)localStorage.setItem('nx_owner',j.owner);
+  localStorage.setItem('nx_name',j.name);
+  $('md-name').textContent=j.name;
+  $('md-pw').textContent=j.password||'—';   // server-generated, shown once
+  $('modal').classList.remove('hide');
+  connectAs(j.name);
+  note('r-msg','✅ Created & connected — you are '+j.name+'. The server-generated password is shown above; save it.',1);
+};
+window.closeModal=()=>{
+  $('modal').classList.add('hide');
+  tab('login');                 // jump to the My-NxEr detail screen
+  locate();
+};
+function setRegEnabled(on){
+  const b=document.getElementById('btn-reg');
+  if(b){b.disabled=!on;b.style.opacity=on?'1':'0.4';b.style.cursor=on?'pointer':'not-allowed';}
+  const rb=document.querySelector('#t-reg .gold');
+  if(rb){rb.disabled=!on;rb.style.opacity=on?'1':'0.4';}
+}
+function connectAs(name){
+  MY=name;
+  $('mine').classList.remove('hide');
+  $('m-name').textContent=name;
+  if($('l-name'))$('l-name').value=name;
+  // you're connected — collapse the login form, show only the detail
+  ['l-name','l-pw'].forEach(id=>{const e=$(id);if(e)e.closest('div,label')&&e.style.setProperty('display','none');});
+  document.querySelectorAll('#t-login > label, #t-login > .sub, #t-login > .sec:first-of-type, #t-login > input, #t-login > button.gold')
+    .forEach(el=>{if(!el.closest('#mine'))el.style.display='none';});
+  setRegEnabled(false);            // one live NxEr per session
+  refreshMine();
+  if(window._mineTimer)clearInterval(window._mineTimer);
+  window._mineTimer=setInterval(()=>{if(MY)refreshMine();},3000);
+  let tries=0;const jt=setInterval(()=>{if(locate()||++tries>40)clearInterval(jt);},250);
+}
+function disconnectMe(){            // called when our NxEr dies
+  MY=null;localStorage.removeItem('nx_owner');localStorage.removeItem('nx_name');
+  if(window._mineTimer)clearInterval(window._mineTimer);
+  $('mine').classList.add('hide');
+  document.querySelectorAll('#t-login > label, #t-login > .sub, #t-login > .sec:first-of-type, #t-login > input, #t-login > button.gold')
+    .forEach(el=>{if(!el.closest('#mine'))el.style.display='';});
+  ['l-name','l-pw'].forEach(id=>{const e=$(id);if(e)e.style.display='';});
+  setRegEnabled(true);
+  note('r-msg','Your NxEr died — you can create a new one.',0);
+}
+window.doLogin=async function(){
+  const name=$('l-name').value.trim().toUpperCase(),pw=$('l-pw').value;
+  const{s,j}=await post('/api/login',{name,password:pw,token:TOKEN});
+  if(s!==200)return note('l-msg',(j.error||'failed')+(j.ip_banned?' — IP now banned 24h':''),0);
+  MY=name;note('l-msg','✅ Connected to '+name,1);
+  $('mine').classList.remove('hide');$('m-name').textContent=name;refreshMine();
+  // poll the owner panel on a gentle timer (NOT every WS frame, which
+  // is 10 Hz and would hammer the server). 3 s is plenty for stats.
+  if(window._mineTimer)clearInterval(window._mineTimer);
+  window._mineTimer=setInterval(()=>{if(MY)refreshMine();},3000);
+};
+async function refreshMine(){
+  if(!MY)return;
+  const r=await fetch('/api/mynxer?name='+encodeURIComponent(MY));
+  if(r.status===404){disconnectMe();return;}      // NxEr gone
+  if(!r.ok)return;
+  const v=await r.json(),s=v.stats||{};
+  if(v.alive===false){disconnectMe();return;}     // NxEr died
+  MY_OFFSPRING=new Set((v.offspring_ids)||[]);
+  $('m-stats').innerHTML=
+    (v.brain_building?'<div class="stat" style="color:#ffd24a"><span>🧠 Brain</span><b>building…</b></div>':'')
+    +Object.entries({'Alive':v.alive?'yes':'DIED','Food':v.food,'Energy':v.energy,
+    'Found':s.food_found,'Stolen':s.food_taken,'Explored':s.explored,'Lived':s.time_lived,
+    'Mates':s.mates_performed,'Fitness':s.fitness,'g':s.g,'Brain':(v.brain&&v.brain.topology)||'chc6'})
+    .map(([k,x])=>`<div class="stat"><span>${k}</span><b>${x}</b></div>`).join('');
+  const RK=v.ranks||{}; const top5=!!v.in_top5; let h='';
+  for(const[k,lab]of[['food_found','Food'],['food_taken','Stolen'],['explored','Explored'],['mates_performed','Mates'],['fitness','Fitness'],['g','g']]){
+    const pos=RK[k];
+    const txt=(pos==null)?'—':('#'+pos);
+    const cls=(pos===1)?'style="color:#ffd24a"':(pos&&pos<=5)?'style="color:#7fe0a0"':'';
+    h+=`<div class="stat"><span>${lab}</span><b ${cls}>${txt}</b></div>`;
+  }
+  $('m-ranks').innerHTML=h
+    +(top5?'<div class="stat" style="margin-top:6px;color:#ffd24a"><span>★ on All-time board</span><b></b></div>':'');
+}
+window.locate=function(){
+  if(!SNAP||!MY||!TERRAIN)return;
+  const n=SNAP.nxers.find(a=>a.name===MY);if(!n)return;
+  const p=getSpherePos(n.x,n.y,TERRAIN.size,planetRadius*1.9);
+  camera.position.copy(p);controls.target.set(0,0,0);
+};
+window.exportNxer=async function(){
+  const r=await fetch('/api/export?name='+encodeURIComponent(MY));if(!r.ok)return;
+  const j=await r.json(),b=new Blob([JSON.stringify(j,null,2)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=MY+'_model.json';a.click();
+};
+
+fetchWorld();connect();loadParams();
+
+// Auto-reconnect: if this browser already owns a live NxEr, rejoin it
+// without asking for the password again (session tracking).
+(async()=>{
+  const own=localStorage.getItem('nx_owner');
+  if(!own)return;
+  try{
+    const{s,j}=await post('/api/session',{owner:own});
+    if(s===200&&j.name){connectAs(j.name);
+      note('r-msg','Reconnected to your NxEr '+j.name+'.',1);}
+    else{localStorage.removeItem('nx_owner');localStorage.removeItem('nx_name');}
+  }catch(e){}
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MNGoL5 — Admin Console</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;font-family:ui-monospace,Menlo,Consolas,monospace}
+  body{background:#06070d;color:#dfe7f5;padding:24px;max-width:920px;margin:0 auto}
+  h1{font-size:18px;color:#ff7a59;margin-bottom:4px}
+  .sub{font-size:11px;color:#7d88a8;margin-bottom:18px}
+  .card{background:#0e1018;border:1px solid #26304a;border-radius:10px;padding:16px;margin-bottom:16px}
+  .sec{font-size:12px;color:#ffcf4a;margin-bottom:10px}
+  label{display:block;font-size:11px;color:#9fb0d0;margin:8px 0 2px}
+  input,button{background:#0a0c14;color:#dfe7f5;border:1px solid #26304a;border-radius:6px;padding:8px;font-size:12px}
+  input{width:100%}
+  button{background:#15324a;cursor:pointer;border-color:#2a5878;margin-top:6px}
+  button:hover{background:#1d4868}
+  button.danger{background:#3a1218;border-color:#7a2030;color:#ff8f9f}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  .kv{font-size:11px;display:flex;justify-content:space-between;border-bottom:1px solid #1a2030;padding:3px 0}
+  .kv b{color:#46c7ff}
+  .msg{font-size:11px;padding:6px;border-radius:5px;margin-top:8px}
+  .ok{background:#10301a;color:#7fdca0}.err{background:#3a1218;color:#ff8f9f}
+  .hide{display:none!important}
+  table{width:100%;border-collapse:collapse;font-size:11px}
+  td{padding:4px 6px;border-bottom:1px solid #1a2030}
+  td input{padding:5px}
+</style>
+</head>
+<body>
+<h1>⚙️ Multi Neuraxon GoL 5 — Admin Console</h1>
+<div class="sub">Server settings & live load. Caps apply live; world-shape changes apply on reboot.</div>
+
+<div class="card" id="loginCard">
+  <div class="sec">Admin sign-in</div>
+  <label>User</label><input id="u" value="admin">
+  <label>Password</label><input id="p" type="password">
+  <button onclick="login()">Sign in</button>
+  <div id="lmsg"></div>
+</div>
+
+<div id="app" class="hide">
+  <div class="card">
+    <div class="sec">Live server load</div>
+    <div class="grid" id="load"></div>
+    <div class="grid" id="load2" style="margin-top:10px"></div>
+    <div class="sec" style="margin-top:14px">Machine (htop-style)</div>
+    <div id="machine"></div>
+  </div>
+
+  <div class="card">
+    <div class="sec">Configuration (editable)</div>
+    <table id="cfg"></table>
+    <button onclick="saveCfg()">💾 Apply config</button>
+    <button class="danger" onclick="reboot()">♻️ Reboot world (fresh — names reset)</button>
+    <div id="cmsg"></div>
+  </div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id); let TOK=null, POLL=null;
+async function post(u,b){
+  try{
+    const r=await fetch(u+'?_='+Date.now(),{method:'POST',cache:'no-store',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+    let j={}; try{j=await r.json();}catch(e){}
+    return {s:r.status,j};
+  }catch(e){ return {s:0,j:{error:'network error: '+e.message+' — are you on http:// (not https://)?'}}; }
+}
+async function login(){
+  $('lmsg').innerHTML='<div class="msg">signing in…</div>';
+  const {s,j}=await post('/api/admin/login',{user:$('u').value,password:$('p').value});
+  if(s!==200){ $('lmsg').innerHTML='<div class="msg err">'+(j.error||('failed (HTTP '+s+')'))+'</div>'; return; }
+  TOK=j.token;
+  // verify the token actually works BEFORE hiding the login form
+  const t=await post('/api/admin/load',{token:TOK});
+  if(t.s!==200){ $('lmsg').innerHTML='<div class="msg err">load failed (HTTP '+t.s+'): '+(t.j.error||'')+'</div>'; return; }
+  $('loginCard').classList.add('hide'); $('app').classList.remove('hide');
+  render(t.j);
+  if(POLL) clearInterval(POLL);
+  POLL=setInterval(tick,3000);
+}
+const EDITABLE=['max_food','max_nxers','min_alive','respawn_batch','mate_cooldown_ticks','g_interval_ticks','target_tps','broadcast_hz','snapshot_secs','max_viewers','max_registered_users','max_pw_attempts','ban_hours'];
+function render(j){
+  $('load').innerHTML=[
+    ['Tick',j.tick],['Uptime s',j.uptime_s],['TPS',j.tps],
+    ['Alive',j.alive],['Tracked',j.total_tracked],['Managed',j.managed]
+  ].map(([k,v])=>`<div class="kv"><span>${k}</span><b>${v}</b></div>`).join('');
+  const se=j.sessions||{};
+  $('load2').innerHTML=[
+    ['Viewers',se.viewers+'/'+se.max_viewers],['Registered',se.registered+'/'+se.max_registered],
+    ['Banned IPs',j.banned_ips],['g PC1',(j.g&&j.g.pc1||0).toFixed(3)],
+    ['g manifold',((j.g&&j.g.pos_manifold||0)*100).toFixed(0)+'%'],['g λ1/λ2',(j.g&&j.g.lambda_ratio||1).toFixed(2)]
+  ].map(([k,v])=>`<div class="kv"><span>${k}</span><b>${v}</b></div>`).join('');
+  const mc=j.machine||{};
+  const cpu=mc.cpu_pct||0, mem=mc.mem_pct||0;
+  const bar=(p,c)=>`<div style="background:#0a0c14;border:1px solid #26304a;border-radius:4px;height:14px;overflow:hidden"><div style="height:100%;width:${Math.min(100,p)}%;background:${p>85?'#ff5a6a':p>60?'#ffcf4a':'#46c7ff'}"></div></div>`;
+  $('machine').innerHTML=`
+    <div class="kv"><span>Machine CPU (${mc.ncpu||'?'} cores)</span><b>${cpu}%</b></div>${bar(cpu)}
+    <div class="kv" style="margin-top:8px"><span>Memory ${mc.mem_used_mb||0}/${mc.mem_total_mb||0} MB</span><b>${mem}%</b></div>${bar(mem)}
+    <div class="kv" style="margin-top:8px"><span>Load avg (1/5/15m)</span><b>${(mc.load_avg||[0,0,0]).map(x=>(+x).toFixed(2)).join(' · ')}</b></div>`;
+  if(!$('cfg').dataset.loaded && j.config){
+    $('cfg').innerHTML=EDITABLE.filter(k=>k in j.config).map(k=>
+      `<tr><td>${k}</td><td><input id="cf-${k}" value="${j.config[k]}"></td></tr>`).join('');
+    $('cfg').dataset.loaded='1';
+  }
+}
+async function tick(){
+  const {s,j}=await post('/api/admin/load',{token:TOK});
+  if(s!==200){
+    $('load').innerHTML='<div class="msg err" style="grid-column:1/-1">live load failed (HTTP '+s+'): '+(j.error||'')+' — token may have expired; reload and sign in again.</div>';
+    return;
+  }
+  render(j);
+}
+async function saveCfg(){
+  const patch={}; EDITABLE.forEach(k=>{const e=$('cf-'+k); if(e){const n=+e.value; patch[k]=isNaN(n)?e.value:n;}});
+  const {s,j}=await post('/api/admin/config',{token:TOK,config:patch});
+  $('cmsg').innerHTML=`<div class="msg ${s===200?'ok':'err'}">${s===200?'✅ applied':(j.error||'failed')}</div>`;
+}
+async function reboot(){
+  if(!confirm('Reboot: discard the running world, reset names to A, fresh start. Proceed?')) return;
+  const {s,j}=await post('/api/admin/reboot',{token:TOK});
+  $('cmsg').innerHTML=`<div class="msg ${s===200?'ok':'err'}">${s===200?'✅ world rebooted':(j.error||'failed')}</div>`;
+}
+</script>
+</body>
+</html>
