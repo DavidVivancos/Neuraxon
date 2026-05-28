@@ -1,5 +1,8 @@
 # Neuraxon Game of Life Researh Version<br>
 CHANGE LOG:<br>
+May 28th 2026:<br>
+First Release of Nxon Live = Nxon GoL Server + Client
+
 May 25th 2026:<br>
 Game of Life Research v5.0 / Internal version 185 -> g intelligence factor introduced
 
