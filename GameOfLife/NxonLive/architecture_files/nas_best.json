@@ -1,51 +1,154 @@
 {
   "_meta": {
-    "source": "NxonArchNAS:Evolutionary",
-    "trial_id": 120,
-    "sampled_at": "2026-05-27T16:16:24"
+    "name": "nas_best_t014",
+    "version": "NxonArchNAS v1.1 (v192)",
+    "description": "Architecture found by NAS \u2014 trial 14, fitness 7.7925. Plug-and-play compatible with architectures/default.json: drop this file into architectures/ or load with NEURAXON_ARCH=path/to/this.json python main.py",
+    "source": "NxonArchNAS",
+    "rank": 1,
+    "trial_id": 14,
+    "fitness": 7.792459286713652,
+    "saved_at": "2026-05-30T15:15:23",
+    "notes": [
+      "Sections inherited from default.json:  healthy_bands (unchanged target ranges)",
+      "Sections overridden by NAS:  biology, neural, operating_ranges, genetic_lottery",
+      "Load with NEURAXON_ARCH=path/to/this.json python main.py"
+    ]
   },
   "biology": {
-    "metabolic_ramp_per_sec": 14.303553001335723,
-    "max_atrophy": 11.838673719470108,
-    "metabolic_rate_abs_cap_multiple": 60.0,
-    "idle_explore_seconds": 1.7209377998137598,
-    "explore_probability": 0.45221716332939677,
-    "mate_cooldown_seconds": 20,
-    "circadian_cycle_ticks": 1040
+    "_doc": "Game-world / bio-inspired dynamics. Independent of neural architecture \u2014 change these to study survival pressure without touching the brain.",
+    "metabolic_ramp_per_sec": 13.416717801776903,
+    "_doc_metabolic_ramp_per_sec": "Multiplier added to food drain and metabolic_rate per second of idle. With 1s idle \u2192 factor (1 + 10*1) = 11\u00d7. Capped by max_atrophy.",
+    "max_atrophy": 4.665663303197577,
+    "_doc_max_atrophy": "Hard cap on the atrophy multiplier (v151 fix). 5.0 = max 5\u00d7 normal drain even after extended idle.",
+    "metabolic_rate_abs_cap_multiple": 25.464071904308327,
+    "_doc_metabolic_rate_abs_cap_multiple": "Absolute ceiling on the per-NxEr metabolic_rate, expressed as a multiple of the initial value (v153 F-1).",
+    "start_food_default": 25.0,
+    "food_respawn_default": 400,
+    "food_sources_default": 50,
+    "_doc_food": "Defaults if the user doesn't change them via the menu sliders. The menu still overrides at startup.",
+    "mate_cooldown_seconds": 8,
+    "circadian_cycle_ticks": 536,
+    "idle_explore_seconds": 2.264659032138697,
+    "explore_probability": 0.2483465945946011,
+    "_doc_idle_explore": "v152 idle-exploration safety net. If an NxEr has been idle \u2265 idle_explore_seconds, with explore_probability per tick, override motor output with a random direction."
   },
   "neural": {
-    "num_hidden_neurons_default": 20,
-    "connection_probability": 0.45,
-    "afferent_synapse_strength": 1.6881207738294872,
-    "firing_threshold_excitatory": 0.4,
-    "firing_threshold_inhibitory": -0.49518089376953756,
-    "spontaneous_firing_rate": 0.031321865756042795,
-    "intrinsic_timescale_default": 19.864605806214925,
-    "resting_potential_decay": 0.2633835246046755,
-    "sensorimotor_coupling": 1.0433096614174509,
+    "_doc": "Network architecture (topology + per-neuron parameters). Change these to test different brain configurations.",
+    "num_input_neurons": 10,
+    "num_output_neurons": 7,
+    "num_hidden_neurons_default": 18,
+    "_doc_neuron_counts": "Inputs: 10 sensory channels (movement, encounter, terrain, hunger, sight, smell, daynight, temp, proprio, song). Outputs: 7 motor (MoveX, MoveY, Social, MateIntent, GiveFood, Resting, Sing).",
+    "connection_probability": 0.3581849436897157,
+    "afferent_synapse_strength": 1.447702970033463,
+    "proprioceptive_afferent_gain": 1.8,
+    "sensory_input_gain": 0.9,
+    "firing_threshold_excitatory": 0.41926865521416345,
+    "firing_threshold_inhibitory": -0.577720189100024,
+    "spontaneous_firing_rate": 0.022508104428041433,
+    "intrinsic_timescale_default": 17.14703315026943,
+    "resting_potential_decay": 0.15170859737860257,
+    "sensorimotor_coupling": 1.2604305533202769,
+    "_doc_sensorimotor_coupling": "v164 \u2014 multiplier on input\u2192output direct-edge probability. 0.0 = pre-v164 (uniform random links). 1.0 = 2x more sensory\u2192motor connections. 3.0 = 4x. The fitness component sensory_motor_corr was stuck near zero in 1425 v163 trials because there was no architectural bias for sensory pathways. Boost this and plasticity will amplify the correlations.",
     "symmetric_stdp": false,
+    "_doc_symmetric_stdp": "v169 (v4.77) \u2014 opt-in for MultiNeuraxon2 Bug #3 fix. False (default) preserves v161-v168 asymmetric STDP where state==-1 is invisible to plasticity (only +1-driven correlations strengthen synapses). True enables signed STDP traces + symmetric (-1,-1) \u2192 LTP and (-1,+1) \u2192 LTD branches. Hypothesised to address the input saturation root cause we worked around with sm_corr_peak in v165. NAS will A/B test it.",
     "refractory_period_ticks": 4,
-    "post_spike_mp_reset": 0.19652931589202038,
+    "_doc_refractory_period_ticks": "v171 (v4.79) \u2014 number of ticks a neuron is FORCED to state=0 after each firing event (0\u2192\u00b11 transition). 0 = no refractory (v161-v170 behaviour). The v170 @2400s membrane diagnostics showed only 0.6% of samples at state=0 \u2014 the network had become a bistable +1/-1 oscillator with no rest band. The paper's trinary firing model REQUIRES a meaningful 0 state. This parameter restores it. NAS searches 0-12 ticks; biologically realistic values are 1-5 (~ 1-5 game ticks at 10Hz). The membrane potential continues to evolve during refractory so the neuron can fire again immediately after the buffer expires.",
+    "post_spike_mp_reset": 0.19019051446385582,
+    "_doc_post_spike_mp_reset": "v172 (v4.80) \u2014 after-hyperpolarization (AHP). Fraction by which membrane_potential is pulled toward 0 after each firing event (0\u2192\u00b11). 0.0 = no reset (v171 behaviour). 1.0 = full reset to mp=0. Combined with refractory_period_ticks, restores the paper's intended trinary dynamics: refractory holds state=0 for N ticks while mp drops back to rest band, then state stays at 0 NATURALLY until inputs push mp past threshold again (rather than immediately re-firing). v171 found refract=1 alone only achieved 0.3% state=0 because mp stayed saturated past threshold; this parameter fixes that by snapping mp back to the rest band. NAS searches 0.0-1.0.",
+    "_doc_thresholds": "Membrane firing thresholds (above which trinary_state = +1, below -threshold = -1). The membrane potential is a low-pass filter with intrinsic_timescale ticks. resting_potential_decay multiplies mp by (1-this) each tick before the membrane equation update.",
     "sphere_topology": "chc6",
-    "cross_sphere_coupling": 1.38901170358434,
-    "cryst_capacity": 1.938187950021704,
-    "free_energy_beta": 1.0210176505467827
+    "cross_sphere_coupling": 1.4646884326507514,
+    "cryst_capacity": 1.0458706235265132,
+    "free_energy_beta": 1.1255913894574505
   },
   "operating_ranges": {
-    "learning_rate": 0.00301337779712465,
-    "plasticity_threshold": 0.6914897508105343,
-    "autoreceptor_coefficient": 0.21696432233374313,
-    "adaptation_tau_ticks": 40.247176594357285,
-    "fitness_g_weight": 0.3792764680337938
+    "_doc": "Plasticity / adaptation / brake tunables. Change these to test different learning dynamics.",
+    "learning_rate": 0.002038320004712875,
+    "plasticity_threshold": 0.44070352106872984,
+    "adaptation_tau_ticks": 44.13791802276418,
+    "adaptation_target_excitatory_multiplier": 1.9441164061641276,
+    "adaptation_target_inhibitory_multiplier": 1.3028255391557861,
+    "_doc_adaptation": "v149: adapt builds toward 0.55 \u00d7 multiplier when firing. Tau=20 ticks. Excitatory uses 1.5\u00d7 to bias the brake against +1 dominance.",
+    "autoreceptor_coefficient": 0.2006950250118772,
+    "autoreceptor_tau_ticks": 150.0,
+    "autoreceptor_rate_coeff": 0.35,
+    "_doc_autoreceptor": "Per-neuron autoreceptor that subtracts from theta1_eff (v154 sign back to v152 form \u2014 see CHANGELOG_v154 for context).",
+    "sensory_boost_function": "tanh",
+    "sensory_boost_scale": 1.0,
+    "_doc_sensory_boost": "v152 saturating cap: boosted_external = scale * tanh(scale * external_input). Asymptote = scale. 1.0 keeps strong inputs near threshold; lowering compresses further.",
+    "plasticity_brake_threshold": 0.5,
+    "plasticity_brake_slope": 1.8,
+    "plasticity_brake_floor": 0.1,
+    "_doc_plasticity_brake": "v152: when input_saturation_fraction > brake_threshold, learning_rate_mod is multiplied by max(floor, 1 - slope*(sat-threshold)).",
+    "fitness_g_weight": 1.5
   },
-  "healthy_bands": {},
   "genetic_lottery": {
-    "intrinsic_timescale_jitter": 1.2409709856301383,
-    "firing_threshold_jitter": 0.0,
-    "mutation_strength": 0.13377706270108455,
+    "_doc": "v162 \u2014 per-NxEr trait variation at birth. Each NxEr samples its own value from these ranges, creating the genetic diversity that selection acts on (the missing ingredient that kept M10 heritability at 0 across all 743 v161 NAS trials). Inheritance + mutation at mating carries traits across generations.",
     "metabolic_rate_multiplier_range": [
-      0.6803824233757645,
-      1.303343903201728
+      0.7361000211361448,
+      1.4178804913426044
+    ],
+    "_doc_metabolic_rate_multiplier_range": "At birth each NxEr samples a multiplier uniformly from this range and applies it to its base metabolic_rate. [0.85, 1.15] means \u00b115% variation. Wider = more diversity but also more individuals at survival extremes.",
+    "intrinsic_timescale_jitter": 6.385138595361511,
+    "_doc_intrinsic_timescale_jitter": "At birth each NxEr adds a uniform random value in [-jitter, +jitter] to intrinsic_timescale_default. 0.0 = no per-NxEr variation (all neurons in all NxErs have same timescale).",
+    "firing_threshold_jitter": 0.10862720664409331,
+    "_doc_firing_threshold_jitter": "Same idea for firing_threshold_excitatory / inhibitory. 0.04 = \u00b10.04 around the architecture default of 0.55. 0.0 = no per-NxEr variation.",
+    "mutation_strength": 0.1292657361981326,
+    "_doc_mutation_strength": "When offspring inherit a genetic trait from a parent, the value is perturbed by \u00b1mutation_strength \u00d7 (parent_value). 0.05 = 5% perturbation. 0 = exact copy."
+  },
+  "healthy_bands": {
+    "_doc": "Target ranges shown on the dashboard. NxErs operating in these bands are coloured green.",
+    "M1_excitatory_fraction": [
+      0.18,
+      0.28
+    ],
+    "M2_mean_gate": [
+      0.4,
+      0.85
+    ],
+    "M3_pac_modulation_idx": [
+      0.005,
+      0.1
+    ],
+    "M5_branching_ratio": [
+      0.92,
+      1.1
+    ],
+    "M6_spontaneous_fraction": [
+      0.1,
+      0.45
+    ],
+    "M7_zero_input_mi_ratio": [
+      0.4,
+      1.2
+    ],
+    "M9_transfer_ratio": [
+      0.85,
+      1.3
+    ],
+    "M10_heritability_r": [
+      0.2,
+      1.0
+    ],
+    "sensory_motor_corr": [
+      0.2,
+      1.0
+    ],
+    "pop_mean_idle_seconds": [
+      0.0,
+      1.5
+    ],
+    "input_saturation_fraction": [
+      0.0,
+      0.3
+    ],
+    "input_locked_fraction": [
+      0.0,
+      0.2
+    ],
+    "exploration_trigger_rate": [
+      0.01,
+      0.4
     ]
   }
 }

@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Neuraxon v2.0 Multi-Sphere — Interactive Brain Builder By David Vivancos & Jose Sanchez (2026) for Qubic Science</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#040810;--bg2:#0a1220;--bg3:#101d30;--bg4:#162040;--border:#1a2a4a;--border2:#2a4a7a;--text:#b0c4de;--dim:#4a6080;--bright:#e0ecff;--cyan:#40d0ff;--teal:#00e6b0;--pink:#ff5090;--purple:#b060ff;--gold:#ffc040;--red:#ff3355;--green:#00e060;--font:'DM Sans',sans-serif;--mono:'JetBrains Mono',monospace;}
+*{margin:0;padding:0;box-sizing:border-box;}html,body{width:100%;height:100%;font-family:var(--font);background:var(--bg);color:var(--text);overflow:hidden;user-select:none;}::-webkit-scrollbar{width:5px;}::-webkit-scrollbar-track{background:var(--bg);}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px;}
+#app{width:100%;height:100%;position:relative;}canvas#c3d{display:block;width:100%;height:100%;position:absolute;top:0;left:0;z-index:0;}canvas#c3d.layout-on{outline:2px solid var(--gold);outline-offset:-2px;}
+.hud{position:absolute;z-index:10;pointer-events:none;}.hud>*{pointer-events:auto;}#hud-top{top:10px;left:10px;right:10px;display:flex;align-items:flex-start;gap:10px;pointer-events:none;}
+.glass{background:rgba(6,12,24,0.88);backdrop-filter:blur(14px);border:1px solid rgba(50,100,180,0.15);border-radius:10px;}
+#brand{padding:8px 14px;}#brand h1{font-size:1em;font-weight:700;background:linear-gradient(135deg,var(--cyan),var(--teal));-webkit-background-clip:text;-webkit-text-fill-color:transparent;}#brand .sub{font-size:.62em;color:var(--dim);font-family:var(--mono);}#brand a{-webkit-text-fill-color:inherit;text-decoration:none;color:inherit;}
+#stats{padding:7px 12px;font-family:var(--mono);font-size:9.5px;line-height:1.7;min-width:190px;position:absolute;top:10px;right:322px;z-index:10;pointer-events:auto;}#stats .l{color:var(--dim);}#stats .v{color:var(--bright);font-weight:600;}#stats .c{color:var(--cyan);}
+#toolbar{position:absolute;top:50%;left:10px;transform:translateY(-50%);z-index:10;display:flex;flex-direction:column;gap:5px;}
+.tbtn{width:38px;height:38px;border-radius:9px;border:1px solid var(--border);background:rgba(6,12,24,0.85);backdrop-filter:blur(8px);color:var(--text);font-size:1em;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .12s;position:relative;}.tbtn:hover{border-color:var(--cyan);color:var(--cyan);}.tbtn.on{border-color:var(--cyan);color:var(--cyan);box-shadow:0 0 10px rgba(50,150,255,0.2);}
+.tbtn .tp{position:absolute;left:48px;top:50%;transform:translateY(-50%);background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:3px 8px;font-size:10px;font-family:var(--font);white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s;color:var(--bright);}.tbtn:hover .tp{opacity:1;}
+#panel{position:absolute;top:10px;right:10px;bottom:10px;width:300px;z-index:10;display:flex;flex-direction:column;overflow:hidden;}#panel.collapsed{width:38px;}#panel.collapsed .pbody,#panel.collapsed .tabs{display:none;}
+.ptog{padding:7px 10px;display:flex;align-items:center;gap:6px;cursor:pointer;}.ptog h2{font-size:.78em;font-weight:600;color:var(--bright);flex:1;}.ptog .ar{color:var(--dim);font-size:.65em;}
+.pbody{flex:1;overflow-y:auto;padding:0 10px 10px;}.tabs{display:flex;gap:1px;padding:0 10px;margin-bottom:6px;}
+.tab{flex:1;padding:5px 0;text-align:center;font-size:.68em;font-weight:600;color:var(--dim);background:transparent;border:none;border-bottom:2px solid transparent;cursor:pointer;font-family:var(--font);}.tab.on{color:var(--cyan);border-bottom-color:var(--cyan);}.tab:hover{color:var(--bright);}
+.tc{display:none;}.tc.on{display:block;}.sec{margin-bottom:8px;}.st{font-size:.68em;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px;padding-bottom:3px;border-bottom:1px solid rgba(50,100,180,0.08);}
+.btn{padding:5px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-family:var(--font);font-size:.72em;font-weight:600;cursor:pointer;transition:all .1s;display:inline-flex;align-items:center;gap:3px;}.btn:hover{border-color:var(--cyan);color:var(--cyan);}
+.btn-p{background:linear-gradient(135deg,var(--cyan),var(--teal));color:#000;border:none;}.btn-r{border-color:var(--red);color:var(--red);}.br{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:6px;}
+.sc{background:var(--bg3);border:1px solid var(--border);border-radius:7px;padding:7px 9px;margin-bottom:5px;cursor:pointer;transition:all .1s;}.sc:hover{border-color:var(--border2);}.sc.sel{border-color:var(--cyan);box-shadow:0 0 10px rgba(50,150,255,0.1);}
+.sc .sct{display:flex;align-items:center;gap:5px;margin-bottom:3px;}.sc .dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;}.sc .sn{font-size:.76em;font-weight:600;color:var(--bright);flex:1;}.sc .sl{font-size:.6em;font-family:var(--mono);color:var(--dim);padding:1px 5px;border-radius:3px;background:var(--bg);}.sc .si{font-size:.65em;color:var(--dim);font-family:var(--mono);}
+.lc{background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:5px 7px;margin-bottom:3px;font-size:.68em;display:flex;align-items:center;gap:4px;}.lc .lp{color:var(--bright);font-weight:600;flex:1;}.lc .lt{font-family:var(--mono);font-size:.85em;color:var(--dim);}
+.nm{display:flex;align-items:center;gap:5px;margin-bottom:4px;}.nm .ni{font-size:.95em;}.nm label{font-size:.7em;flex:1;}.nm input[type=range]{flex:1.2;height:3px;background:var(--border);border-radius:2px;-webkit-appearance:none;outline:none;}.nm input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;height:11px;border-radius:50%;background:var(--cyan);cursor:pointer;}.nm .nv{font-family:var(--mono);font-size:.66em;color:var(--cyan);min-width:28px;text-align:right;}
+#bbar{position:absolute;bottom:10px;left:60px;right:320px;z-index:10;display:flex;align-items:center;gap:7px;padding:7px 12px;}
+.sb{width:34px;height:34px;border-radius:7px;border:1px solid var(--border);background:rgba(6,12,24,0.85);color:var(--text);font-size:.95em;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .1s;backdrop-filter:blur(8px);}.sb:hover{border-color:var(--cyan);color:var(--cyan);}.sb.run{background:rgba(0,220,80,.12);border-color:var(--green);color:var(--green);}
+#spd{font-family:var(--mono);font-size:.68em;color:var(--dim);}.pip{display:flex;gap:2px;margin-left:auto;}.pp{padding:2px 6px;border-radius:3px;font-family:var(--mono);font-size:7.5px;font-weight:600;background:rgba(6,12,24,0.7);border:1px solid var(--border);color:var(--dim);}.pp.on{border-color:var(--cyan);color:var(--cyan);background:rgba(50,150,255,0.06);}
+#pmod{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:100;display:none;justify-content:center;align-items:center;}#pmod.vis{display:flex;}
+.mbox{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:20px;max-width:480px;width:92%;max-height:80vh;overflow-y:auto;}.mbox h2{font-size:1em;color:var(--bright);margin-bottom:10px;}
+.pc{background:var(--bg3);border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:7px;cursor:pointer;transition:all .1s;}.pc:hover{border-color:var(--cyan);transform:translateY(-1px);}.pc h3{font-size:.85em;color:var(--bright);margin-bottom:3px;}.pc p{font-size:.7em;color:var(--dim);line-height:1.4;}.pc .tgs{margin-top:4px;display:flex;gap:3px;flex-wrap:wrap;}.pc .tg{font-size:.6em;padding:1px 6px;border-radius:8px;background:rgba(50,150,255,0.06);border:1px solid rgba(50,150,255,0.12);color:var(--cyan);font-family:var(--mono);}
+.toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);padding:8px 18px;border-radius:7px;font-size:.78em;font-weight:600;z-index:200;opacity:0;transition:opacity .3s;pointer-events:none;}.toast.sh{opacity:1;}.tok{background:var(--green);color:#000;}.ter{background:var(--red);color:#fff;}
+.legend{position:absolute;bottom:60px;right:320px;z-index:10;padding:8px 12px;font-size:.62em;line-height:1.8;font-family:var(--mono);}.legend .li{display:flex;align-items:center;gap:5px;}.legend .lc2{width:10px;height:10px;border-radius:2px;flex-shrink:0;}
+@media(max-width:800px){#panel{width:240px;}#bbar{right:250px;}#stats{right:252px;}.legend{right:250px;}}
+
+/* ═══ MOBILE ═══ */
+body.mobile{touch-action:none;}
+body.mobile #brand{padding:5px 10px;}
+body.mobile #brand h1{font-size:.82em;}
+body.mobile #brand .sub{display:none;}
+body.mobile #stats{position:fixed;top:auto;bottom:54px;left:6px;right:auto;font-size:8px;line-height:1.5;min-width:auto;padding:5px 8px;border-radius:8px;max-width:55vw;}
+body.mobile #stats br:last-of-type,body.mobile #stats .l:last-of-type~*{display:none;}
+body.mobile #toolbar{display:none;}
+body.mobile .legend{display:none;}
+body.mobile #hud-top{left:6px;right:6px;top:6px;}
+
+/* Mobile toolbar: horizontal bar at top below brand */
+body.mobile #m-toolbar{display:flex;position:fixed;top:44px;left:6px;right:6px;z-index:12;gap:3px;padding:4px 6px;overflow-x:auto;-webkit-overflow-scrolling:touch;}
+body.mobile #m-toolbar .mb{width:36px;height:36px;min-width:36px;border-radius:8px;border:1px solid var(--border);background:rgba(6,12,24,.9);backdrop-filter:blur(8px);color:var(--text);font-size:.95em;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+body.mobile #m-toolbar .mb.on{border-color:var(--cyan);color:var(--cyan);box-shadow:0 0 8px rgba(50,150,255,.2);}
+
+/* Mobile panel: bottom sheet */
+body.mobile #panel{position:fixed;top:auto;left:0;right:0;bottom:0;width:100%;height:55vh;border-radius:16px 16px 0 0;transform:translateY(calc(100% - 42px));transition:transform .3s ease;z-index:15;}
+body.mobile #panel.m-open{transform:translateY(0);}
+body.mobile #panel .ptog{border-radius:16px 16px 0 0;justify-content:center;padding:10px;position:relative;}
+body.mobile #panel .ptog::before{content:'';position:absolute;top:6px;left:50%;transform:translateX(-50%);width:36px;height:4px;border-radius:2px;background:var(--dim);}
+body.mobile #panel .ptog h2{text-align:center;font-size:.72em;}
+body.mobile #panel .ptog .ar{display:none;}
+body.mobile #panel.collapsed{width:100%;transform:translateY(calc(100% - 42px));}
+body.mobile #panel.collapsed .pbody,body.mobile #panel.collapsed .tabs{display:block;}
+body.mobile .tabs{padding:0 8px;}
+body.mobile .tab{font-size:.65em;padding:6px 0;}
+body.mobile .pbody{padding:0 8px 16px;}
+
+/* Mobile bottom sim bar */
+body.mobile #bbar{left:6px;right:6px;bottom:6px;padding:5px 8px;border-radius:8px;}
+body.mobile .sb{width:30px;height:30px;font-size:.85em;border-radius:6px;}
+body.mobile .pip{display:none;}
+body.mobile #spd{font-size:.6em;}
+body.mobile #spd-sl{width:50px;}
+
+/* Mobile preset modal */
+body.mobile .mbox{padding:14px;max-height:85vh;}
+body.mobile .pc{padding:10px;}
+body.mobile .pc h3{font-size:.78em;}
+body.mobile .pc p{font-size:.65em;}
+
+/* Mobile toast */
+body.mobile .toast{bottom:60px;font-size:.7em;padding:6px 14px;}
+
+/* Hide mobile toolbar on desktop */
+#m-toolbar{display:none;}
+
+</style>
+</head>
+<body>
+<div id="app"><canvas id="c3d"></canvas>
+<div class="hud" id="hud-top"><div id="brand" class="glass"><h1><a href="https://www.researchgate.net/publication/400868863" target="_blank">🧠 Neuraxon v2.0 Multi-Sphere</a></h1><div class="sub">Bioinspired Modular Connectomic Architecture —  By <a href="https://vivancos.com/" target="_blank" style="color:var(--cyan)">David Vivancos</a> & <a href="https://josesanchezgarcia.com/" target="_blank" style="color:var(--cyan)">Jose Sanchez</a> — <a href="https://qubic.org/" target="_blank" style="color:var(--cyan)">Qubic</a> Open Science ·</div></div><div id="stats" class="glass"><span class="l">Spheres:</span> <span class="v" id="s-sph">0</span> <span class="l">Links:</span> <span class="v" id="s-lnk">0</span> <span class="l">Neurons:</span> <span class="v" id="s-neu">0</span> <span class="l">Syn:</span> <span class="v" id="s-syn">0</span><br><span class="l">Time:</span> <span class="v" id="s-time">0</span><span class="l">ms</span> <span class="l">Steps:</span> <span class="v" id="s-steps">0</span> <span class="l">Energy:</span> <span class="c" id="s-nrg">0</span> <span class="l">Active:</span> <span class="c" id="s-act">0</span><br><span class="l" style="opacity:.5;font-size:8px;">✋ Layout mode to drag spheres · DblClick to add · 🔗 to link</span></div></div>
+<div id="toolbar"><button class="tbtn" onclick="showPresets()"><span>🧠</span><span class="tp">Brain Presets</span></button><button class="tbtn" onclick="addSphereUI()"><span>➕</span><span class="tp">Add Sphere</span></button><button class="tbtn" onclick="startLinking()" id="lnk-tool"><span>🔗</span><span class="tp">Connect Spheres</span></button><button class="tbtn" onclick="deleteSelected()"><span>🗑</span><span class="tp">Delete</span></button><button class="tbtn" onclick="togLayout()" id="layout-btn"><span>✋</span><span class="tp">Layout Mode</span></button><div style="height:1px;background:var(--border);margin:3px 5px;"></div><button class="tbtn" onclick="saveBrain()"><span>💾</span><span class="tp">Save Brain</span></button><button class="tbtn" onclick="document.getElementById('li').click()"><span>📂</span><span class="tp">Load Brain</span></button><input type="file" id="li" accept=".json" style="display:none" onchange="loadBrain(this)"><button class="tbtn" onclick="exportSphere()"><span>📤</span><span class="tp">Export Sphere</span></button><button class="tbtn" onclick="document.getElementById('lsi').click()"><span>📥</span><span class="tp">Import Sphere</span></button><input type="file" id="lsi" accept=".json" style="display:none" onchange="importSphere(this)"><div style="height:1px;background:var(--border);margin:3px 5px;"></div><button class="tbtn" onclick="resetCam()"><span>🎯</span><span class="tp">Reset View</span></button><button class="tbtn on" onclick="togRotate()" id="rot-btn"><span>🔄</span><span class="tp">Auto Rotate</span></button></div>
+<div id="m-toolbar" class="glass"><button class="mb" onclick="showPresets()">🧠</button><button class="mb" onclick="addSphereUI()">➕</button><button class="mb" onclick="startLinking()" id="m-lnk">🔗</button><button class="mb" onclick="togLayout()" id="m-layout">✋</button><button class="mb" onclick="deleteSelected()">🗑</button><button class="mb" onclick="saveBrain()">💾</button><button class="mb" onclick="document.getElementById('li').click()">📂</button><button class="mb" onclick="togMobilePanel()">⚙</button></div>
+<div id="panel" class="glass"><div class="ptog" onclick="togPanel()"><h2>Control Center</h2><span class="ar">◂</span></div><div class="tabs"><button class="tab on" onclick="stab('spheres',this)">Spheres</button><button class="tab" onclick="stab('neuromod',this)">Neuromod</button><button class="tab" onclick="stab('links',this)">Links</button><button class="tab" onclick="stab('detail',this)">Detail</button></div><div class="pbody"><div class="tc on" id="t-spheres"><div class="br"><button class="btn btn-p" onclick="addSphereUI()">+ Add Sphere</button><button class="btn" onclick="showPresets()">🧠 Presets</button></div><div id="sph-list"></div></div><div class="tc" id="t-neuromod"><div class="sec"><div class="st">Global Volume Transmission</div><div class="nm"><span class="ni">🎯</span><label>Dopamine</label><input type="range" id="nm-da" min="0" max="1" step="0.01" value="0.15"><span class="nv" id="nv-da">0.15</span></div><div class="nm"><span class="ni">😊</span><label>Serotonin</label><input type="range" id="nm-5ht" min="0" max="1" step="0.01" value="0.15"><span class="nv" id="nv-5ht">0.15</span></div><div class="nm"><span class="ni">💡</span><label>Acetylcholine</label><input type="range" id="nm-ach" min="0" max="1" step="0.01" value="0.15"><span class="nv" id="nv-ach">0.15</span></div><div class="nm"><span class="ni">⚡</span><label>Norepinephrine</label><input type="range" id="nm-na" min="0" max="1" step="0.01" value="0.15"><span class="nv" id="nv-na">0.15</span></div></div><div class="sec"><div class="st">Receptors</div><div id="r-disp" style="display:grid;grid-template-columns:repeat(3,1fr);gap:2px;"></div></div><div class="sec"><div class="st">Oscillators</div><div id="osc-disp" style="display:flex;align-items:flex-end;gap:2px;height:28px;"></div><div style="display:flex;justify-content:space-between;font-size:7px;font-family:var(--mono);color:var(--dim);margin-top:1px;"><span>Infra</span><span>Slow</span><span>θ</span><span>α</span><span>γ</span></div></div></div><div class="tc" id="t-links"><div class="br"><button class="btn" onclick="startLinking()">🔗 New Link</button></div><div id="lnk-list"></div></div><div class="tc" id="t-detail"><div id="det-c"><div style="color:var(--dim);font-size:.75em;padding:16px 0;text-align:center;">Click a sphere to see details</div></div></div></div></div>
+<div id="bbar" class="glass"><div style="display:flex;gap:3px;"><button class="sb" id="btn-play" onclick="togSim()">▶</button><button class="sb" onclick="stepOnce()">⏭</button><button class="sb" onclick="resetSim()">↻</button></div><input type="range" id="spd-sl" min="1" max="60" value="15" style="width:70px;height:3px;-webkit-appearance:none;background:var(--border);border-radius:2px;outline:none;"><span id="spd">15 Hz</span><div class="pip"><div class="pp" id="pp-ch">CHRONO</div><div class="pp" id="pp-ds">DSN</div><div class="pp" id="pp-ct">CTSN</div><div class="pp" id="pp-ag">AGMP</div></div></div>
+<div class="legend glass"><div class="li"><div class="lc2" style="background:#00ccff;"></div>Input (Box)</div><div class="li"><div class="lc2" style="background:#bb77ff;border-radius:50%;"></div>Hidden (Sphere)</div><div class="li"><div class="lc2" style="background:#ff3366;"></div>Output (Cone)</div><div class="li"><div class="lc2" style="background:#00ff88;height:3px;"></div>Excitatory</div><div class="li"><div class="lc2" style="background:#ff4488;height:3px;"></div>Inhibitory</div><div class="li"><div class="lc2" style="background:#ffc040;border-radius:50%;"></div>Neuromod 🎯😊💡⚡</div></div>
+<div id="pmod"><div class="mbox"><h2>🧠 Brain Presets</h2><div class="pc" onclick="loadPreset('sensory-motor')"><h3>👁👂 Sensory → Association → Motor 💪</h3><p>V1+A1 → Associative → Prefrontal → Motor. Feedback connections.</p><div class="tgs"><span class="tg">5 spheres</span><span class="tg">FF+FB</span></div></div><div class="pc" onclick="loadPreset('prefrontal')"><h3>🧩 Prefrontal Executive Control</h3><p>V1, A1, Somatosensory, Association, dlPFC, Motor.</p><div class="tgs"><span class="tg">6 spheres</span><span class="tg">executive</span></div></div><div class="pc" onclick="loadPreset('triangle')"><h3>🔄 Triangular Recurrent Loop</h3><p>A→B→C→A cycle with laterals.</p><div class="tgs"><span class="tg">3 spheres</span><span class="tg">recurrent</span></div></div><div class="pc" onclick="loadPreset('star')"><h3>🧠 Star / Global Workspace</h3><p>Central executive ↔ 4 modality spheres.</p><div class="tgs"><span class="tg">5 spheres</span><span class="tg">broadcast</span></div></div><div class="pc" onclick="loadPreset('minimal')"><h3>⚡ Minimal Pair</h3><p>Two spheres, bidirectional.</p><div class="tgs"><span class="tg">2 spheres</span></div></div><div class="pc" onclick="loadPreset('drosophila')" style="border:1px solid rgba(0,230,176,0.25);background:rgba(0,230,176,0.03);"><h3>🪰 Drosophila melanogaster Adult Brain</h3><p>Hemibrain connectome: 139,255 neurons across 10 brain regions (OL, CX, MB, INP, FB, VB, SIP, SLP, CRE, LH). Small-world topology with region-specific connectivity from published connectomics data.</p><div class="tgs"><span class="tg">10 spheres</span><span class="tg">139,255 neurons</span><span class="tg">hemibrain v1.2</span><span class="tg">connectome</span><span class="tg">FF+FB+LAT</span></div></div><div style="text-align:center;margin-top:10px;"><button class="btn" onclick="hidePresets()">Close</button></div></div></div></div>
+<div class="toast" id="toast"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+'use strict';const E=id=>document.getElementById(id);
+const ST={sensory_visual:{hex:0xddaa44,css:'#ddaa44',label:'V1 Visual',emoji:'👁',layer:'L0'},sensory_auditory:{hex:0x55bbcc,css:'#55bbcc',label:'A1 Auditory',emoji:'👂',layer:'L0'},sensory_somatosensory:{hex:0x66bb66,css:'#66bb66',label:'Somatosensory',emoji:'🖐',layer:'L0'},association:{hex:0x7799cc,css:'#7799cc',label:'Association',emoji:'🔄',layer:'L1'},prefrontal:{hex:0x55cc88,css:'#55cc88',label:'Prefrontal',emoji:'🧩',layer:'L2'},motor:{hex:0xcc66aa,css:'#cc66aa',label:'Motor',emoji:'💪',layer:'L2'},executive:{hex:0xaa77dd,css:'#aa77dd',label:'Executive',emoji:'🧠',layer:'L3'},custom:{hex:0x77aacc,css:'#77aacc',label:'Custom',emoji:'⚙',layer:'L1'}};
+const ME={DA:'🎯','5HT':'😊',ACh:'💡',NA:'⚡'};
+let B={spheres:{},links:{},gNM:{DA:.15,'5HT':.15,ACh:.15,NA:.15},gP:{DA:0,'5HT':0,ACh:0,NA:0},R:{D1:0,D2:0,'5HT1A':0,'5HT2A':0,'5HT4':0,M1:0,M2:0,beta1:0,alpha2:0},osc:{infraslow:Math.random()*6.28,slow:Math.random()*6.28,theta:Math.random()*6.28,alpha:Math.random()*6.28,gamma:Math.random()*6.28},t:0,steps:0};
+let selId=null,linkMode=false,linkSrc=null,simOn=false,simIv=null,sCtr=0;
+function mkN(id,tp){return{id,type:tp,state:0,pot:0,st:0,ch:0,adapt:0,auto:0,hp:1,act:true,fr:.2,ast:0,da:.5};}
+function mkSy(p,q){return{p,q,b:~~(Math.random()*3),wf:(Math.random()-.5)*.6,ws:(Math.random()-.5)*.3,wm:(Math.random()-.5)*.1,sil:Math.random()<.1,mod:Math.random()<.15,int:1,pt:0,qt:0,dw:0,cf:0,cs:0,om:.5,el:0};}
+function mkSphere(id,type,pos,p={}){const nI=p.nI||4,nH=p.nH||15,nO=p.nO||4;let ni=0;const neu={input:[],hidden:[],output:[]};for(let i=0;i<nI;i++)neu.input.push(mkN(ni++,'input'));for(let i=0;i<nH;i++)neu.hidden.push(mkN(ni++,'hidden'));for(let i=0;i<nO;i++)neu.output.push(mkN(ni++,'output'));const all=[...neu.input,...neu.hidden,...neu.output],N=all.length;const shIdx=Array.from({length:N},(_,i)=>i);for(let i=N-1;i>0;i--){const j=~~(Math.random()*(i+1));[shIdx[i],shIdx[j]]=[shIdx[j],shIdx[i]];}const ring=shIdx.map(i=>all[i]);const k=Math.min(Math.max(6,Math.round(N*.3)),N-1),hk=Math.max(~~(k/2),1);const edges=new Set();for(let i=0;i<N;i++)for(let j=1;j<=hk;j++)for(const t of[(i+j)%N,(i-j+N)%N])if(!(ring[i].type==='output'&&ring[t].type==='input')&&i!==t)edges.add(ring[i].id+'-'+ring[t].id);const ea=[...edges];for(const e of ea)if(Math.random()<.35){edges.delete(e);const s2=ring[~~(Math.random()*N)],t2=ring[~~(Math.random()*N)];if(s2.id!==t2.id&&!edges.has(s2.id+'-'+t2.id)&&!(s2.type==='output'&&t2.type==='input'))edges.add(s2.id+'-'+t2.id);else edges.add(e);}const syn=[];for(const e of edges){const[a,b]=e.split('-').map(Number);syn.push(mkSy(a,b));}const col=ST[type]||ST.custom;return{id,type,label:p.label||col.label,layerId:p.layerId||col.layer,pos:{x:pos.x||0,y:pos.y||0,z:pos.z||0},color:col,neu,syn,nI,nH,nO,nm:{DA:.15,'5HT':.15,ACh:.15,NA:.15},ph:{DA:0,'5HT':0,ACh:0,NA:0},osc:{infraslow:Math.random()*6.28,slow:Math.random()*6.28,theta:Math.random()*6.28,alpha:Math.random()*6.28,gamma:Math.random()*6.28},inP:neu.input.map(n=>n.id),outP:neu.output.map(n=>n.id),nrg:0,time:0};}
+function mkLink(si,ti,type='feedforward'){const s=B.spheres[si],t=B.spheres[ti];if(!s||!t)return null;const W=[];for(let r=0;r<s.outP.length;r++){const row=[];for(let c=0;c<t.inP.length;c++)row.push((Math.random()-.3)*.5);W.push(row);}return{id:si+'__'+ti+'__'+Date.now(),si,ti,type,W,pr:.005};}
+function fN(s,nid){return[...s.neu.input,...s.neu.hidden,...s.neu.output].find(n=>n.id===nid);}
+// ═══ SIMULATION ═══
+function simStep(){const dt=1,of={infraslow:.05,slow:.5,theta:6,alpha:10,gamma:40};for(const b in B.osc)B.osc[b]=(B.osc[b]+2*Math.PI*of[b]*dt/1000)%(2*Math.PI);let mA=0,cnt=0;for(const si in B.spheres){[...B.spheres[si].neu.input,...B.spheres[si].neu.hidden,...B.spheres[si].neu.output].forEach(n=>{mA+=Math.abs(n.state);cnt++;});}if(cnt>0)mA/=cnt;B.gP.DA+=dt/200*(-B.gP.DA)+.02*mA*dt;B.gP['5HT']+=dt/200*(-B.gP['5HT'])+.01*mA*dt;B.gP.ACh+=dt/200*(-B.gP.ACh)+.015*mA*dt;B.gP.NA+=dt/200*(-B.gP.NA)+.02*mA*dt;const T=B.gNM,P=B.gP,rd={D1:{p:'DA',th:.35,t:false},D2:{p:'DA',th:.25,t:true},'5HT1A':{p:'5HT',th:.05,t:true},'5HT2A':{p:'5HT',th:.3,t:false},'5HT4':{p:'5HT',th:.2,t:false},M1:{p:'ACh',th:.3,t:false},M2:{p:'ACh',th:.1,t:true},beta1:{p:'NA',th:.2,t:false},alpha2:{p:'NA',th:.08,t:true}};for(const[n,r]of Object.entries(rd)){const c=r.t?T[r.p]:(T[r.p]+(P[r.p]||0));B.R[n]=1/(1+Math.exp(Math.max(-50,Math.min(50,-(r.t?20:10)*(c-r.th)))));}const inj={};for(const si in B.spheres)inj[si]={};for(const li in B.links){const l=B.links[li],src=B.spheres[l.si],tgt=B.spheres[l.ti];if(!src||!tgt)continue;let gate=1;if(l.type==='feedforward')gate=1+.3*(.5+.5*Math.sin(src.osc.gamma))*Math.max(0,Math.cos(src.osc.gamma));else if(l.type==='feedback')gate=1+.3*Math.max(0,-Math.cos(tgt.osc.alpha));else if(l.type==='lateral')gate=1+.2*Math.max(0,Math.cos(src.osc.theta-tgt.osc.theta));for(let r=0;r<Math.min(src.outP.length,l.W.length);r++){const sn=fN(src,src.outP[r]);if(!sn)continue;for(let c=0;c<Math.min(tgt.inP.length,l.W[r].length);c++){inj[l.ti][tgt.inP[c]]=(inj[l.ti][tgt.inP[c]]||0)+gate*l.W[r][c]*sn.state;}}}for(const si in B.spheres)simSph(B.spheres[si],inj[si]||{},dt);for(const li in B.links){const l=B.links[li],src=B.spheres[l.si],tgt=B.spheres[l.ti];if(!src||!tgt||l.pr<=0)continue;const dg=.5+B.gNM.DA;for(let r=0;r<l.W.length;r++){const sn=fN(src,src.outP[r]);if(!sn)continue;for(let c=0;c<l.W[r].length;c++){const tn=fN(tgt,tgt.inP[c]);if(!tn)continue;l.W[r][c]=Math.max(-1.5,Math.min(1.5,l.W[r][c]+l.pr*sn.state*tn.state*dg*dt));}}}B.steps++;let mx=0;for(const si in B.spheres)mx=Math.max(mx,B.spheres[si].time);B.t=mx;animPip();updHUD();if(B.steps%2===0)spawnIntra();spawnInter();}
+function simSph(s,ext,dt){const all=[...s.neu.input,...s.neu.hidden,...s.neu.output],R=B.R;for(const k in B.gNM)s.nm[k]+=.1*(B.gNM[k]-s.nm[k])*dt;const of2={infraslow:.05,slow:.5,theta:6,alpha:10,gamma:40};for(const b in s.osc)s.osc[b]=(s.osc[b]+2*Math.PI*of2[b]*dt/1000)%(2*Math.PI);const bI={},mI={};all.forEach(n=>{bI[n.id]={0:[],1:[],2:[]};mI[n.id]=[];});for(const syn of s.syn){if(syn.int<=0)continue;const pre=all.find(n=>n.id===syn.p);if(!pre||!pre.act)continue;const sp=Math.abs(pre.state)===1?1:0;syn.cf=.95*syn.cf+sp;syn.cs=Math.pow(.99,syn.om)*syn.cs+sp;syn.om=1/(1+Math.exp(-(2*sp+1.5*syn.cs-1)));let inp=0;if(!syn.sil)inp=(syn.wf+syn.ws)*pre.state+.15*syn.wf*syn.cf+.08*syn.ws*syn.cs;if(bI[syn.q]&&bI[syn.q][syn.b])bI[syn.q][syn.b].push(inp);if(syn.mod&&mI[syn.q])mI[syn.q].push(syn.wm*pre.state);}for(const n of all){if(!n.act)continue;n._pv=n.state;if(n.type==='input'){const e=ext[n.id];if(e!==undefined){n.state=e>.25?1:(e<-.25?-1:0);n.pot=e;}continue;}let D=0;const bi=bI[n.id]||{};for(const b in bi){const sm=bi[b].reduce((a,v)=>a+v,0);D+=Math.abs(sm)>.4?Math.sign(sm)*Math.pow(Math.abs(sm),1.3):sm;}if(ext[n.id]!==undefined)D+=ext[n.id];const gNA=1+.5*(R.beta1||0)+.2*(R.alpha2||0),sp2=(.02+.3*(R.alpha2||0))*(Math.random()<.5?1:-1)*(Math.random()<.02?1:0),od=.1*(Math.sin(s.osc.gamma*2+n.id*.5)*Math.max(0,Math.cos(s.osc.theta+n.id*.3)));n.pot=n.da*n.pot+(1-n.da)*(gNA*D+od-n.adapt+sp2);n.ch=.9*n.ch+.1*Math.tanh((Math.abs(D)+Math.abs(ext[n.id]||0))*.5);n.st=n.pot+n.ch;const rm=(mI[n.id]||[]).reduce((a,v)=>a+v,0)+.3*(R.M1||0)-.2*(R.M2||0),dM=.3*Math.tanh(rm),dH=.0005*(n.fr-.2);n.state=n.st>(.4-dM+dH-.1*n.auto)?1:(n.st<(-.4-dM+dH+.1*n.auto)?-1:0);n.adapt+=dt/100*(-n.adapt+.1*Math.abs(n.state));n.auto+=dt/200*(-n.auto+.2*n.state);n.fr+=.01*(Math.abs(n.state)-n.fr)*dt;n.ast=.999*n.ast+.001*Math.abs(n.st);}for(const syn of s.syn){if(syn.int<=0)continue;const pre=all.find(n=>n.id===syn.p),post=all.find(n=>n.id===syn.q);if(!pre||!post||!pre.act||!post.act)continue;syn.pt+=(-syn.pt/20+(pre.state===1?1:0))*dt;syn.qt+=(-syn.qt/20+(post.state===1?1:0))*dt;let dw=.01*syn.pt*(post.state===1?1:0)*(R.D1||.5)-.01*syn.qt*(pre.state===1?1:0)*(R.D2||.5);syn.wf=Math.max(-1,Math.min(1,syn.wf+dt/5*(-.01*syn.wf+.3*dw)));syn.ws=Math.max(-1,Math.min(1,syn.ws+dt/50*(-.01*syn.ws+.1*dw)));syn.wm=Math.max(-.5,Math.min(.5,syn.wm+dt/1000*(-.01*syn.wm+.05*dw)));if(Math.abs(syn.wf)<.01&&Math.abs(syn.ws)<.01)syn.int-=.01*dt;else syn.int=Math.min(1,syn.int+.001*dt);}s.nrg+=.01*all.filter(n=>n.act&&n.state!==0).length*dt;s.time+=dt;}
+let pipS=0;function animPip(){pipS=(pipS+1)%4;['pp-ch','pp-ds','pp-ct','pp-ag'].forEach((id,i)=>E(id).classList.toggle('on',i===pipS));}
+// ═══ THREE.JS ═══
+let scene,cam,rnd,orb,world,brainG;const VM={},LVM={};let iParts=[],eParts=[];const emoTex={},ray=new THREE.Raycaster(),mouse=new THREE.Vector2();
+function initThree(){const cv=E('c3d');scene=new THREE.Scene();scene.background=new THREE.Color(0x040810);cam=new THREE.PerspectiveCamera(50,cv.clientWidth/cv.clientHeight,.1,900);cam.position.set(0,25,90);rnd=new THREE.WebGLRenderer({canvas:cv,antialias:true});rnd.setSize(cv.clientWidth,cv.clientHeight,false);rnd.setPixelRatio(Math.min(devicePixelRatio,2));rnd.toneMapping=THREE.ACESFilmicToneMapping;rnd.toneMappingExposure=1.15;orb=new THREE.OrbitControls(cam,rnd.domElement);orb.enableDamping=true;orb.dampingFactor=.06;orb.autoRotate=true;orb.autoRotateSpeed=.12;scene.add(new THREE.HemisphereLight(0x0a1428,0x060a10,.55));scene.add(new THREE.AmbientLight(0x1a2840,.3));const d=new THREE.DirectionalLight(0x8ab4f8,.7);d.position.set(35,45,25);scene.add(d);const p1=new THREE.PointLight(0xff5588,.35,140);p1.position.set(-35,20,-25);scene.add(p1);const p2=new THREE.PointLight(0x44ddee,.35,140);p2.position.set(25,-15,35);scene.add(p2);const sg=new THREE.BufferGeometry(),sv=[];for(let i=0;i<500;i++)sv.push((Math.random()-.5)*350,(Math.random()-.5)*350,(Math.random()-.5)*350);sg.setAttribute('position',new THREE.Float32BufferAttribute(sv,3));scene.add(new THREE.Points(sg,new THREE.PointsMaterial({color:0x223344,size:.35,transparent:true,opacity:.4})));world=new THREE.Group();scene.add(world);mkBrain();mkEmoji();cv.addEventListener('click',onClick);cv.addEventListener('dblclick',onDbl);cv.addEventListener('mousedown',onDown);cv.addEventListener('mousemove',onMove);cv.addEventListener('mouseup',onUp);requestAnimationFrame(loop);}
+function mkBrain(){brainG=new THREE.Group();
+function mkHemi(xOff){
+  const geo=new THREE.SphereGeometry(26,48,36);
+  const pos=geo.attributes.position;
+  for(let i=0;i<pos.count;i++){
+    let x=pos.getX(i),y=pos.getY(i),z=pos.getZ(i);
+    y*=.72;z*=.88;
+    const xDist=Math.abs(x);if(xDist<3.5)x+=Math.sign(x||1)*(.7*(3.5-xDist));
+    // Cortical folds via multiple sine waves
+    const r=Math.sqrt(x*x+y*y+z*z);
+    if(r>2){
+      const lat=Math.atan2(y,Math.sqrt(x*x+z*z)),lon=Math.atan2(z,x);
+      const folds=Math.sin(lat*4+lon*2)*.6+Math.sin(lat*7-lon*3)*.3+Math.sin(lon*5+lat)*.25+Math.cos(lat*3+lon*4)*.2;
+      const sc=(r+folds)/r;x*=sc;y*=sc;z*=sc;
+    }
+    pos.setXYZ(i,x+xOff,y+2,z);
+  }
+  geo.computeVertexNormals();
+  brainG.add(new THREE.Mesh(geo,new THREE.MeshPhongMaterial({color:0x3a5577,emissive:0x1a3355,emissiveIntensity:.4,transparent:true,opacity:.14,side:THREE.FrontSide,depthWrite:false,flatShading:true})));
+  // Subtle wireframe
+  const wGeo=geo.clone();
+  brainG.add(new THREE.Mesh(wGeo,new THREE.MeshBasicMaterial({color:0x4a7099,transparent:true,opacity:.05,wireframe:true,depthWrite:false})));
+}
+mkHemi(-3);mkHemi(3);
+// Cerebellum
+const cg=new THREE.SphereGeometry(10,28,22);const cp=cg.attributes.position;
+for(let i=0;i<cp.count;i++){let x=cp.getX(i),y=cp.getY(i),z=cp.getZ(i);y*=.55;const r=Math.sqrt(x*x+y*y+z*z);if(r>1){const f=Math.sin(x*3.5)*.35+Math.sin(z*5)*.25;const sc=(r+f)/r;x*=sc;y*=sc;z*=sc;}cp.setXYZ(i,x,y-12+2,z-12);}
+cg.computeVertexNormals();
+brainG.add(new THREE.Mesh(cg,new THREE.MeshPhongMaterial({color:0x3a5577,emissive:0x1a3355,emissiveIntensity:.35,transparent:true,opacity:.11,side:THREE.FrontSide,depthWrite:false,flatShading:true})));
+// Brainstem
+const bsMesh=new THREE.Mesh(new THREE.CylinderGeometry(3.5,2.5,12,12),new THREE.MeshPhongMaterial({color:0x3a5577,emissive:0x1a3050,emissiveIntensity:.3,transparent:true,opacity:.09,depthWrite:false}));bsMesh.position.set(0,-16,-6);brainG.add(bsMesh);
+world.add(brainG);}
+function mkEmoji(){const all={...ME,...Object.fromEntries(Object.entries(ST).map(([k,v])=>[k,v.emoji]))};for(const[k,e]of Object.entries(all)){const c=document.createElement('canvas');c.width=128;c.height=128;const x=c.getContext('2d');x.font='96px serif';x.textAlign='center';x.textBaseline='middle';x.fillText(e,64,68);emoTex[k]=new THREE.CanvasTexture(c);}}
+function buildSV(sph){const g=new THREE.Group();g.position.set(sph.pos.x,sph.pos.y,sph.pos.z);const all=[...sph.neu.input,...sph.neu.hidden,...sph.neu.output];const R=3.5+all.length*.08;const sGeo=new THREE.SphereGeometry(R,48,48);const sMat=new THREE.MeshPhongMaterial({color:sph.color.hex,emissive:sph.color.hex,emissiveIntensity:.2,transparent:true,opacity:.07,shininess:30,side:THREE.DoubleSide,depthWrite:false});const shell=new THREE.Mesh(sGeo,sMat);shell.renderOrder=10;g.add(shell);const igm=new THREE.Mesh(new THREE.SphereGeometry(R*.6,24,24),new THREE.MeshBasicMaterial({color:sph.color.hex,transparent:true,opacity:.04,blending:THREE.AdditiveBlending,depthWrite:false}));igm.renderOrder=10;g.add(igm);const golden=Math.PI*(3-Math.sqrt(5)),iR=R*.72,nM={};all.forEach((n,i)=>{const y=1-(i/Math.max(1,all.length-1))*2,r=Math.sqrt(Math.max(0,1-y*y)),theta=golden*i,px=Math.cos(theta)*r*iR,py=y*iR,pz=Math.sin(theta)*r*iR;let geo,ch,sc;if(n.type==='input'){geo=new THREE.BoxGeometry(1.2,1.2,1.2);ch=0x00ccff;sc=.35;}else if(n.type==='output'){geo=new THREE.ConeGeometry(.7,1.8,6);ch=0xff3366;sc=.35;}else{geo=new THREE.SphereGeometry(.7,16,16);ch=0xbb77ff;sc=.28;}const base=new THREE.Color(ch);const mat=new THREE.MeshPhongMaterial({color:base,emissive:base,emissiveIntensity:.7,transparent:true,opacity:.95,shininess:80});const mesh=new THREE.Mesh(geo,mat);mesh.position.set(px,py,pz);mesh.scale.set(sc,sc,sc);mesh.userData={nRef:n,bp:new THREE.Vector3(px,py,pz)};g.add(mesh);nM[n.id]=mesh;});const sM=[];const mx=Math.min(sph.syn.length,Math.max(180,all.length*4));const tubeSeg=all.length>50?8:12;for(let si=0;si<mx;si++){const syn=sph.syn[si];if(syn.int<=0)continue;const pM=nM[syn.p],qM=nM[syn.q];if(!pM||!qM)continue;const tw=syn.wf+syn.ws,str=Math.min(Math.abs(tw),1),c=tw>.02?0x00ff88:(tw<-.02?0xff4488:0x6688aa),rad=.012+.028*str;const d=new THREE.Vector3().subVectors(qM.position,pM.position),len=Math.max(.001,d.length()),dn=d.clone().normalize();let up=new THREE.Vector3(0,1,0);if(Math.abs(dn.dot(up))>.95)up=new THREE.Vector3(1,0,0);const nn=new THREE.Vector3().crossVectors(up,dn).normalize(),bn=new THREE.Vector3().crossVectors(dn,nn).normalize(),amp=len*.18;const p1=pM.position.clone().add(dn.clone().multiplyScalar(len*.3)).add(nn.clone().multiplyScalar((Math.random()-.5)*amp)),p2=pM.position.clone().add(dn.clone().multiplyScalar(len*.7)).add(bn.clone().multiplyScalar((Math.random()-.5)*amp));const curve=new THREE.CatmullRomCurve3([pM.position.clone(),p1,p2,qM.position.clone()]);const tGeo=new THREE.TubeGeometry(curve,tubeSeg,rad,5,false);const tMat=new THREE.MeshPhongMaterial({color:c,emissive:new THREE.Color(c),emissiveIntensity:.6,transparent:true,opacity:.85,shininess:50});const tMesh=new THREE.Mesh(tGeo,tMat);tMesh.userData={syn,curve,baseR:rad};g.add(tMesh);sM.push(tMesh);}const ringMat=new THREE.MeshBasicMaterial({color:0x40d0ff,transparent:true,opacity:0,side:THREE.DoubleSide,depthWrite:false});g.add(new THREE.Mesh(new THREE.RingGeometry(R+.3,R+.6,64),ringMat)).rotation.x=Math.PI/2;const lc=document.createElement('canvas');lc.width=512;lc.height=64;const lx=lc.getContext('2d');lx.font='bold 36px "DM Sans",sans-serif';lx.shadowColor='rgba(0,0,0,0.8)';lx.shadowBlur=6;lx.fillStyle=sph.color.css;lx.textAlign='center';lx.fillText(sph.label,256,42);const lsp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(lc),transparent:true,opacity:.9,depthTest:false}));lsp.scale.set(R*1.8,R*.35,1);lsp.position.y=R+1.5;lsp.renderOrder=998;g.add(lsp);if(emoTex[sph.type]){const es=new THREE.Sprite(new THREE.SpriteMaterial({map:emoTex[sph.type],transparent:true,opacity:.9,depthTest:false}));es.scale.set(3.5,3.5,1);es.position.y=R+3.5;es.renderOrder=999;es.userData.isEmojiIcon=true;g.add(es);}world.add(g);VM[sph.id]={group:g,shell,sMat,nM,sM,ringMat,R,all};}
+function buildLV(lnk){const src=B.spheres[lnk.si],tgt=B.spheres[lnk.ti];if(!src||!tgt)return;
+const sP=new THREE.Vector3(src.pos.x,src.pos.y,src.pos.z),eP=new THREE.Vector3(tgt.pos.x,tgt.pos.y,tgt.pos.z);
+const mid=sP.clone().add(eP).multiplyScalar(.5),len=sP.distanceTo(eP);mid.y+=len*.15;mid.x+=(Math.random()-.5)*len*.1;
+const curve=new THREE.QuadraticBezierCurve3(sP,mid,eP);
+const tcol={feedforward:0x40d0ff,feedback:0xff9040,lateral:0xb060ff,recurrent:0xff5090};const c=tcol[lnk.type]||0x40d0ff;
+// Main tract tube
+const tube=new THREE.Mesh(new THREE.TubeGeometry(curve,32,.45,8,false),new THREE.MeshPhongMaterial({color:c,emissive:new THREE.Color(c),emissiveIntensity:.7,transparent:true,opacity:.55,shininess:60}));
+const core=new THREE.Mesh(new THREE.TubeGeometry(curve,32,.15,6,false),new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:.8,blending:THREE.AdditiveBlending}));
+const glow=new THREE.Mesh(new THREE.TubeGeometry(curve,32,.9,8,false),new THREE.MeshBasicMaterial({color:c,transparent:true,opacity:.1,blending:THREE.AdditiveBlending,depthWrite:false}));
+world.add(glow);world.add(tube);world.add(core);
+// Port-to-port axon lines: output neurons → input neurons
+const axons=[];const svM=VM[lnk.si],tvM=VM[lnk.ti];
+if(svM&&tvM){
+  svM.group.updateMatrixWorld(true);tvM.group.updateMatrixWorld(true);
+  const nAxons=Math.min(src.outP.length,tgt.inP.length,6);
+  for(let i=0;i<nAxons;i++){
+    const oM=svM.nM[src.outP[i%src.outP.length]],iM=tvM.nM[tgt.inP[i%tgt.inP.length]];
+    if(!oM||!iM)continue;
+    // Convert local neuron positions to world positions
+    const oW=oM.position.clone().applyMatrix4(svM.group.matrixWorld);
+    const iW=iM.position.clone().applyMatrix4(tvM.group.matrixWorld);
+    const aMid=oW.clone().add(iW).multiplyScalar(.5);
+    aMid.y+=(Math.random()-.3)*3;aMid.x+=(Math.random()-.5)*2;aMid.z+=(Math.random()-.5)*2;
+    const aCurve=new THREE.QuadraticBezierCurve3(oW,aMid,iW);
+    const aGeo=new THREE.TubeGeometry(aCurve,16,.06,4,false);
+    const aMat=new THREE.MeshBasicMaterial({color:c,transparent:true,opacity:.35,blending:THREE.AdditiveBlending,depthWrite:false});
+    const aMesh=new THREE.Mesh(aGeo,aMat);
+    world.add(aMesh);axons.push(aMesh);
+  }
+}
+LVM[lnk.id]={tube,core,glow,axons,curve,color:c,link:lnk};}
+function updSV(sph){const vm=VM[sph.id];if(!vm)return;const all=[...sph.neu.input,...sph.neu.hidden,...sph.neu.output];let ac=0;for(const n of all){const m=vm.nM[n.id];if(!m)continue;const act=Math.abs(n.state),bp=m.userData.bp,br=1+.08*act*Math.sin(B.t*.008+n.id);m.position.set(bp.x*br,bp.y*br,bp.z*br);let col,ei;if(n.state===1){col=n.type==='input'?0x00eeff:(n.type==='output'?0xff1144:0xdd44ff);ei=1.2;ac++;}else if(n.state===-1){col=n.type==='input'?0x4477ff:(n.type==='output'?0xaa0033:0x8844cc);ei=.9;ac++;}else{col=0x556688;ei=.35;}m.material.color.setHex(col);m.material.emissive.setHex(col);m.material.emissiveIntensity=n.act?ei:.1;m.scale.setScalar((n.type==='hidden'?.28:.35)*(1+.25*act));}vm.sMat.opacity=.05+.12*(all.length>0?ac/all.length:0);vm.sMat.emissiveIntensity=.15+.5*(all.length>0?ac/all.length:0);vm.ringMat.opacity=selId===sph.id?.4+.2*Math.sin(B.t*.04):0;if(B.steps%10===0)for(const tm of vm.sM){const syn=tm.userData.syn;if(!syn||syn.int<=0){tm.visible=false;continue;}tm.visible=true;const tw=syn.wf+syn.ws,c=tw>.08?0x00ff88:(tw<-.08?0xff4488:0x7799bb);tm.material.color.setHex(c);tm.material.emissive.setHex(c);tm.material.emissiveIntensity=.4+.6*Math.min(Math.abs(tw),1);tm.material.opacity=.6+.3*Math.min(Math.abs(tw),1);}}
+function spawnIntra(){for(const si in B.spheres){const sph=B.spheres[si],vm=VM[si];if(!vm||vm.sM.length===0)continue;for(const mk of['DA','5HT','ACh','NA']){if(Math.random()>sph.nm[mk]*1.5)continue;const sm=vm.sM[~~(Math.random()*vm.sM.length)];if(!sm||!sm.userData.curve)continue;const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:emoTex[mk],transparent:true,opacity:.8,depthTest:false}));sp.scale.set(.5,.5,.5);vm.group.add(sp);iParts.push({sp,curve:sm.userData.curve,prog:Math.random()*.2,spd:.008+.02*sph.nm[mk]+Math.random()*.005,grp:vm.group});}}}
+// Cache for flow emoji textures (by emoji char)
+const flowEmoCache={};
+function getFlowEmoTex(emoji){
+  if(flowEmoCache[emoji])return flowEmoCache[emoji];
+  const c=document.createElement('canvas');c.width=64;c.height=64;
+  const x=c.getContext('2d');x.font='48px serif';x.textAlign='center';x.textBaseline='middle';x.fillText(emoji,32,34);
+  flowEmoCache[emoji]=new THREE.CanvasTexture(c);return flowEmoCache[emoji];
+}
+function spawnInter(){for(const li in B.links){const lv=LVM[li];if(!lv)continue;const src=B.spheres[lv.link.si];if(!src)continue;let tA=0;src.outP.forEach(nid=>{const n=fN(src,nid);if(n)tA+=Math.abs(n.state);});
+const spawnChance=.15+tA*.2;
+if(Math.random()<spawnChance){const srcEmoji=src._customEmoji||ST[src.type]?.emoji||'⚙';const tex=getFlowEmoTex(srcEmoji);const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,transparent:true,opacity:.9,depthTest:false}));const sz=1.2+tA*.4;sp.scale.set(sz,sz,sz);sp.renderOrder=500;world.add(sp);eParts.push({sp,curve:lv.curve,prog:0,spd:.006+Math.random()*.012+tA*.003});}}}
+function updParts(dt){for(let i=iParts.length-1;i>=0;i--){const p=iParts[i];p.prog+=p.spd*(dt/16.67);if(p.prog>=1){p.grp.remove(p.sp);p.sp.material.dispose();iParts.splice(i,1);continue;}p.sp.position.copy(p.curve.getPoint(p.prog));p.sp.material.opacity=.8*Math.sin(p.prog*Math.PI);}for(let i=eParts.length-1;i>=0;i--){const p=eParts[i];p.prog+=p.spd*(dt/16.67);if(p.prog>=1){world.remove(p.sp);p.sp.material.dispose();eParts.splice(i,1);continue;}p.sp.position.copy(p.curve.getPoint(p.prog));p.sp.position.y+=Math.sin(p.prog*12)*.3;const s=1.0+.8*Math.sin(p.prog*Math.PI);p.sp.scale.set(s,s,s);p.sp.material.opacity=.95*Math.sin(p.prog*Math.PI);}}
+function updBrain(){if(!brainG)return;const t=performance.now()*.0003;let tA=0,cnt=0;for(const si in B.spheres){[...B.spheres[si].neu.input,...B.spheres[si].neu.hidden,...B.spheres[si].neu.output].forEach(n=>{tA+=Math.abs(n.state);cnt++;});}const act=cnt>0?tA/cnt:0;brainG.children.forEach((c,i)=>{if(c.material&&c.material.opacity!==undefined){const base=c.material.wireframe?.05:.12;c.material.opacity=base+.08*act+.015*Math.sin(t+i);}});}
+let lastT=performance.now();function loop(ts){requestAnimationFrame(loop);const dt=ts-lastT;lastT=ts;for(const si in B.spheres)updSV(B.spheres[si]);updParts(dt);updBrain();orb.update();const cv=E('c3d'),r=cv.getBoundingClientRect(),w=Math.max(1,~~r.width),h=Math.max(1,~~r.height);if(cv.width!==w||cv.height!==h){cam.aspect=w/h;cam.updateProjectionMatrix();rnd.setSize(w,h,false);}rnd.render(scene,cam);}
+// ═══ INTERACTION (Layout mode toggle + Click + Link) ═══
+let layoutMode=false,dragging=null,didDrag=false,dragPlane=new THREE.Plane(),dragOff=new THREE.Vector3(),dragPt=new THREE.Vector3();
+function togLayout(){layoutMode=!layoutMode;E('layout-btn').classList.toggle('on',layoutMode);E('c3d').classList.toggle('layout-on',layoutMode);if(E('m-layout'))E('m-layout').classList.toggle('on',layoutMode);
+  orb.enabled=!layoutMode;E('c3d').style.cursor=layoutMode?'crosshair':'';
+  if(layoutMode){orb.autoRotate=false;E('rot-btn').classList.remove('on');}
+  toast(layoutMode?'✋ Layout mode ON — drag spheres':'🔄 Orbit mode — rotate view','ok');}
+function getMouseXY(e){const cv=E('c3d'),rc=cv.getBoundingClientRect();mouse.x=((e.clientX-rc.left)/rc.width)*2-1;mouse.y=-((e.clientY-rc.top)/rc.height)*2+1;}
+function hitSphere(){const shells=Object.entries(VM).map(([id,vm])=>({id,mesh:vm.shell}));const hits=ray.intersectObjects(shells.map(s=>s.mesh));if(hits.length>0){const f=shells.find(s=>s.mesh===hits[0].object);return f||null;}return null;}
+function onDown(e){if(e.button!==0)return;getMouseXY(e);ray.setFromCamera(mouse,cam);
+  if(layoutMode&&!linkMode){const f=hitSphere();
+    if(f){dragging=f.id;didDrag=false;const g=VM[f.id].group;
+      dragPlane.setFromNormalAndCoplanarPoint(cam.getWorldDirection(new THREE.Vector3()).negate(),g.position);
+      ray.ray.intersectPlane(dragPlane,dragPt);dragOff.copy(g.position).sub(dragPt);E('c3d').style.cursor='grabbing';}}}
+function onMove(e){if(!dragging)return;didDrag=true;getMouseXY(e);ray.setFromCamera(mouse,cam);
+  if(ray.ray.intersectPlane(dragPlane,dragPt)){const np=dragPt.add(dragOff);VM[dragging].group.position.copy(np);B.spheres[dragging].pos={x:np.x,y:np.y,z:np.z};}}
+function onUp(e){if(dragging){const sid=dragging;dragging=null;E('c3d').style.cursor=layoutMode?'crosshair':'';
+  for(const li in B.links){const l=B.links[li];if(l.si===sid||l.ti===sid){rmLV(li);buildLV(l);}}
+  if(!didDrag){selSph(sid);}}didDrag=false;}
+function onClick(e){if(didDrag){didDrag=false;return;}getMouseXY(e);ray.setFromCamera(mouse,cam);const f=hitSphere();
+  if(f){if(linkMode){if(!linkSrc){linkSrc=f.id;toast(`Source: ${B.spheres[f.id].label}. Click target.`,'ok');}
+    else if(f.id!==linkSrc){const l=mkLink(linkSrc,f.id,'feedforward');if(l){B.links[l.id]=l;buildLV(l);updLL();toast('Link created!','ok');}linkMode=false;linkSrc=null;E('lnk-tool').classList.remove('on');}return;}
+    if(!layoutMode||!didDrag)selSph(f.id);}
+  else{if(!linkMode)selSph(null);}}
+function onDbl(e){getMouseXY(e);ray.setFromCamera(mouse,cam);if(!hitSphere())addSphereUI();}
+function selSph(id){selId=id;updSL();if(id)showDet(id);stab('detail',document.querySelectorAll('.tab')[3]);}
+function startLinking(){linkMode=!linkMode;linkSrc=null;E('lnk-tool').classList.toggle('on',linkMode);if(E('m-lnk'))E('m-lnk').classList.toggle('on',linkMode);if(linkMode)toast('Tap source sphere, then target','ok');}
+// ═══ UI ═══
+function updHUD(){let tN=0,tS=0,tE=0,tA=0,tRealN=0;for(const si in B.spheres){const s=B.spheres[si];const a=[...s.neu.input,...s.neu.hidden,...s.neu.output];tN+=a.length;tS+=s.syn.length;tE+=s.nrg;tA+=a.filter(n=>n.state!==0).length;if(s._realNeurons)tRealN+=s._realNeurons;}const neuDisp=tRealN>0?(tRealN.toLocaleString()+' <span style="font-size:7px;color:var(--dim);">('+tN+' sim)</span>'):tN;E('s-sph').textContent=Object.keys(B.spheres).length;E('s-lnk').textContent=Object.keys(B.links).length;E('s-neu').innerHTML=neuDisp;E('s-syn').textContent=tS;E('s-time').textContent=B.t.toFixed(1);E('s-steps').textContent=B.steps;E('s-nrg').textContent=tE.toFixed(2);E('s-act').textContent=tA;const rd=E('r-disp');if(rd&&rd.children.length===0)for(const n of['D1','D2','5HT1A','5HT2A','5HT4','M1','M2','β1','α2']){const d=document.createElement('div');d.style.cssText='padding:2px 3px;border-radius:3px;font-family:var(--mono);font-size:8px;text-align:center;background:var(--bg);border:1px solid var(--border);';d.innerHTML=`<div style="font-weight:600;color:var(--bright)">${n}</div><div class="rv" style="color:var(--cyan)">0</div>`;rd.appendChild(d);}const rn=['D1','D2','5HT1A','5HT2A','5HT4','M1','M2','beta1','alpha2'];rd.querySelectorAll('.rv').forEach((el,i)=>{el.textContent=(B.R[rn[i]]||0).toFixed(2);});const od=E('osc-disp');if(od&&od.children.length===0)for(const b of['infraslow','slow','theta','alpha','gamma']){const bar=document.createElement('div');bar.style.cssText='flex:1;border-radius:2px 2px 0 0;background:linear-gradient(to top,var(--cyan),var(--teal));min-height:2px;opacity:.7;transition:height .1s;';bar.id='ob-'+b;od.appendChild(bar);}for(const b of['infraslow','slow','theta','alpha','gamma']){const el=E('ob-'+b);if(el)el.style.height=(3+25*Math.abs(Math.sin(B.osc[b]||0)))+'px';}}
+function updSL(){const c=E('sph-list');c.innerHTML='';for(const sph of Object.values(B.spheres).sort((a,b)=>a.layerId.localeCompare(b.layerId))){const a=[...sph.neu.input,...sph.neu.hidden,...sph.neu.output];const d=document.createElement('div');d.className='sc'+(selId===sph.id?' sel':'');const nDisp=sph._realNeurons?(sph._realNeurons.toLocaleString()+'n'):a.length+'n';d.innerHTML=`<div class="sct"><div class="dot" style="background:${sph.color.css}"></div><span class="sn">${sph._customEmoji||ST[sph.type]?.emoji||'⚙'} ${sph.label}</span><span class="sl">${sph.layerId}</span></div><div class="si">${nDisp} · ${sph.syn.length}s · ${a.filter(n=>n.state!==0).length} act</div>`;d.onclick=()=>selSph(sph.id);c.appendChild(d);}}
+function updLL(){const c=E('lnk-list');c.innerHTML='';for(const li in B.links){const l=B.links[li];const d=document.createElement('div');d.className='lc';d.innerHTML=`<span class="lp">${(B.spheres[l.si]||{}).label||'?'} → ${(B.spheres[l.ti]||{}).label||'?'}</span><span class="lt">[${l.type.toUpperCase()}]</span><button class="btn btn-r" style="padding:1px 5px;font-size:.65em;margin-left:auto;" onclick="rmLink('${li}')">×</button>`;c.appendChild(d);}}
+function showDet(sid){const sph=B.spheres[sid];if(!sph)return;const a=[...sph.neu.input,...sph.neu.hidden,...sph.neu.output];
+const EMOJIS=['👁','👂','🖐','🔄','🧩','💪','🧠','⚙','🌐','💎','🔥','⭐','🎯','🫀','🦠','🧬','📡','🔮','🌊','⚡','🎭','🪐','🧪','🏛'];
+E('det-c').innerHTML=`
+<div class="sec"><div class="st" style="color:${sph.color.css}">Sphere Settings</div>
+  <div style="margin-bottom:6px;">
+    <label style="font-size:.65em;color:var(--dim);">Name</label>
+    <input type="text" id="det-name" value="${sph.label}" style="width:100%;padding:4px 6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--bright);font-family:var(--font);font-size:.75em;margin-top:2px;">
+  </div>
+  <div style="margin-bottom:6px;">
+    <label style="font-size:.65em;color:var(--dim);">Emoji Icon</label>
+    <div id="det-emoji-grid" style="display:flex;flex-wrap:wrap;gap:2px;margin-top:3px;"></div>
+  </div>
+  <div style="margin-bottom:6px;">
+    <label style="font-size:.65em;color:var(--dim);">Type</label>
+    <select id="det-type" style="width:100%;padding:3px 5px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--bright);font-size:.7em;margin-top:2px;">
+      ${Object.entries(ST).map(([k,v])=>`<option value="${k}" ${k===sph.type?'selected':''}>${v.emoji} ${v.label}</option>`).join('')}
+    </select>
+  </div>
+</div>
+<div class="sec"><div class="st">Network Architecture</div>
+  <div style="display:grid;grid-template-columns:1fr;gap:5px;">
+    <div style="display:flex;align-items:center;gap:6px;">
+      <label style="font-size:.65em;color:var(--dim);min-width:55px;">Input <span style="color:var(--cyan);font-family:var(--mono);" id="det-nI-v">${sph.nI}</span></label>
+      <input type="range" id="det-nI" min="1" max="10" value="${sph.nI}" style="flex:1;height:3px;background:var(--border);border-radius:2px;-webkit-appearance:none;outline:none;">
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+      <label style="font-size:.65em;color:var(--dim);min-width:55px;">Hidden <span style="color:var(--purple);font-family:var(--mono);" id="det-nH-v">${sph.nH}</span></label>
+      <input type="range" id="det-nH" min="4" max="48" value="${sph.nH}" style="flex:1;height:3px;background:var(--border);border-radius:2px;-webkit-appearance:none;outline:none;">
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+      <label style="font-size:.65em;color:var(--dim);min-width:55px;">Output <span style="color:var(--red);font-family:var(--mono);" id="det-nO-v">${sph.nO}</span></label>
+      <input type="range" id="det-nO" min="1" max="10" value="${sph.nO}" style="flex:1;height:3px;background:var(--border);border-radius:2px;-webkit-appearance:none;outline:none;">
+    </div>
+    <div style="font-size:.58em;color:var(--dim);font-style:italic;">Total: <span id="det-nT" style="color:var(--bright)">${a.length}</span> neurons · Changing rebuilds the network</div>
+  </div>
+</div>
+<div style="margin-bottom:8px;">
+  <button class="btn btn-p" onclick="applySphSettings('${sid}')" style="width:100%;justify-content:center;">Apply Changes</button>
+</div>
+<div class="sec"><div class="st">Status</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px;font-size:.7em;font-family:var(--mono);">
+    <div>Neurons: <span style="color:var(--bright)">${sph._realNeurons?sph._realNeurons.toLocaleString():a.length}</span></div>
+    <div>Synapses: <span style="color:var(--bright)">${sph.syn.length}</span></div>
+    <div>Exc: <span style="color:var(--green)">${a.filter(n=>n.state===1).length}</span></div>
+    <div>Inh: <span style="color:var(--red)">${a.filter(n=>n.state===-1).length}</span></div>
+    <div>Energy: <span style="color:var(--cyan)">${sph.nrg.toFixed(2)}</span></div>
+    <div>Layer: <span style="color:var(--cyan)">${sph.layerId}</span></div>
+    ${sph._realNeurons?'<div style="grid-column:span 2;margin-top:3px;padding:3px 5px;background:rgba(0,230,176,0.06);border:1px solid rgba(0,230,176,0.15);border-radius:4px;font-size:.9em;"><span style="color:var(--teal);">Connectome region</span> · '+sph._realNeurons.toLocaleString()+' biological neurons<br><span style="color:var(--dim);font-size:.85em;">Sim: '+a.length+' neurons (proportional representation)</span></div>':''}
+  </div>
+</div>
+<div class="sec"><div class="st">Inputs (Click to toggle)</div><div id="di" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(48px,1fr));gap:2px;"></div></div>
+<div class="sec"><div class="st">Outputs</div><div id="do2" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(48px,1fr));gap:2px;"></div></div>
+<div class="br" style="margin-top:6px;"><button class="btn btn-r" onclick="rmSph('${sid}')">🗑 Delete</button><button class="btn" style="border-color:var(--gold);color:var(--gold);" onclick="exportSphere('${sid}')">📤 Export</button></div>`;
+// Slider live preview
+['nI','nH','nO'].forEach(k=>{const sl=E('det-'+k),vl=E('det-'+k+'-v'),tl=E('det-nT');if(sl)sl.oninput=()=>{vl.textContent=sl.value;const ni=parseInt(E('det-nI').value),nh=parseInt(E('det-nH').value),no=parseInt(E('det-nO').value);tl.textContent=ni+nh+no;};});
+// Style range thumbs
+document.querySelectorAll('#det-nI,#det-nH,#det-nO').forEach(sl=>{sl.style.cssText+=';-webkit-appearance:none;height:3px;background:var(--border);border-radius:2px;outline:none;';});
+// Emoji grid
+const eg=E('det-emoji-grid');sph._customEmoji=sph._customEmoji||ST[sph.type]?.emoji||'⚙';
+EMOJIS.forEach(em=>{const b=document.createElement('button');b.textContent=em;b.style.cssText=`width:26px;height:26px;border:1px solid ${em===sph._customEmoji?'var(--cyan)':'var(--border)'};border-radius:4px;background:${em===sph._customEmoji?'rgba(60,180,255,.15)':'var(--bg)'};font-size:14px;cursor:pointer;padding:0;line-height:1;`;
+  b.onclick=()=>{sph._customEmoji=em;showDet(sid);};eg.appendChild(b);});
+// Inputs
+sph.neu.input.forEach((n,i)=>{const b=document.createElement('button');b.className='btn';b.style.cssText='padding:3px;font-size:.65em;font-family:var(--mono);';setIB(b,n,i);b.onclick=()=>{n.state=n.state===0?1:(n.state===1?-1:0);n.pot=n.state*.5;setIB(b,n,i);};E('di').appendChild(b);});
+sph.neu.output.forEach((n,i)=>{const d=document.createElement('div');d.style.cssText=`padding:3px;font-size:.65em;font-family:var(--mono);text-align:center;border-radius:3px;border:1px solid var(--border);background:var(--bg);color:${n.state===1?'var(--green)':(n.state===-1?'var(--red)':'var(--dim)')};`;d.textContent=`O${i}:${n.state}`;E('do2').appendChild(d);});}
+function applySphSettings(sid){
+  const sph=B.spheres[sid];if(!sph)return;
+  const newName=E('det-name')?.value||sph.label;
+  const newType=E('det-type')?.value||sph.type;
+  const newEmoji=sph._customEmoji||ST[newType]?.emoji||'⚙';
+  const newNI=parseInt(E('det-nI')?.value)||sph.nI;
+  const newNH=parseInt(E('det-nH')?.value)||sph.nH;
+  const newNO=parseInt(E('det-nO')?.value)||sph.nO;
+  const needsRebuild=(newNI!==sph.nI||newNH!==sph.nH||newNO!==sph.nO);
+  sph.label=newName;sph.type=newType;sph.color=ST[newType]||ST.custom;
+  if(needsRebuild){
+    // Rebuild neurons and synapses from scratch with new counts
+    rebuildSphNetwork(sph,newNI,newNH,newNO);
+  }
+  // Rebuild visual
+  rmSV(sid);buildSV(sph);
+  updSphEmoji(sid,newEmoji);
+  // Rebuild connected links (port IDs may have changed)
+  for(const li in B.links){const l=B.links[li];if(l.si===sid||l.ti===sid){
+    // Update weight matrices if port counts changed
+    if(needsRebuild)rebuildLinkWeights(l);
+    rmLV(li);buildLV(l);}}
+  updSL();updHUD();showDet(sid);toast(`Updated: ${newName}${needsRebuild?' (network rebuilt)':''}`,'ok');
+}
+function rebuildSphNetwork(sph,nI,nH,nO){
+  let ni=0;const neu={input:[],hidden:[],output:[]};
+  for(let i=0;i<nI;i++)neu.input.push(mkN(ni++,'input'));
+  for(let i=0;i<nH;i++)neu.hidden.push(mkN(ni++,'hidden'));
+  for(let i=0;i<nO;i++)neu.output.push(mkN(ni++,'output'));
+  const all=[...neu.input,...neu.hidden,...neu.output],N=all.length;
+  // Shuffle for ring to interleave types
+  const idx=Array.from({length:N},(_,i)=>i);for(let i=N-1;i>0;i--){const j=~~(Math.random()*(i+1));[idx[i],idx[j]]=[idx[j],idx[i]];}
+  const ring=idx.map(i=>all[i]);
+  // Scale k: 30% of N, minimum 6
+  const k=Math.min(Math.max(6,Math.round(N*.3)),N-1),hk=Math.max(~~(k/2),1);
+  const edges=new Set();
+  for(let i=0;i<N;i++)for(let j=1;j<=hk;j++)for(const t of[(i+j)%N,(i-j+N)%N])if(!(ring[i].type==='output'&&ring[t].type==='input')&&i!==t)edges.add(ring[i].id+'-'+ring[t].id);
+  const ea=[...edges];for(const e of ea)if(Math.random()<.35){edges.delete(e);const src=ring[~~(Math.random()*N)],tgt=ring[~~(Math.random()*N)];if(src.id!==tgt.id&&!edges.has(src.id+'-'+tgt.id)&&!(src.type==='output'&&tgt.type==='input'))edges.add(src.id+'-'+tgt.id);else edges.add(e);}
+  const syn=[];for(const e of edges){const[a,b]=e.split('-').map(Number);syn.push(mkSy(a,b));}
+  sph.neu=neu;sph.syn=syn;sph.nI=nI;sph.nH=nH;sph.nO=nO;
+  sph.inP=neu.input.map(n=>n.id);sph.outP=neu.output.map(n=>n.id);
+  sph.nrg=0;sph.time=0;
+}
+function rebuildLinkWeights(l){
+  const src=B.spheres[l.si],tgt=B.spheres[l.ti];if(!src||!tgt)return;
+  const W=[];for(let r=0;r<src.outP.length;r++){const row=[];for(let c=0;c<tgt.inP.length;c++)row.push((Math.random()-.3)*.5);W.push(row);}
+  l.W=W;
+}
+function updSphEmoji(sid,emoji){
+  const vm=VM[sid];if(!vm)return;
+  // Safely collect and remove ALL old emoji sprites
+  const toRemove=[];
+  vm.group.children.forEach(c=>{if(c.userData&&c.userData.isEmojiIcon)toRemove.push(c);});
+  toRemove.forEach(c=>{vm.group.remove(c);if(c.material){if(c.material.map)c.material.map.dispose();c.material.dispose();}});
+  // Create new emoji texture
+  const cv2=document.createElement('canvas');cv2.width=128;cv2.height=128;
+  const cx=cv2.getContext('2d');cx.font='96px serif';cx.textAlign='center';cx.textBaseline='middle';cx.fillText(emoji,64,68);
+  const tex=new THREE.CanvasTexture(cv2);
+  const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,transparent:true,opacity:.9,depthTest:false}));
+  sp.scale.set(3.5,3.5,1);sp.position.y=vm.R+3.5;sp.renderOrder=999;sp.userData.isEmojiIcon=true;vm.group.add(sp);
+}
+function setIB(b,n,i){const cs={1:{bg:'rgba(0,220,80,.12)',bc:'var(--green)',c:'var(--green)'},'-1':{bg:'rgba(255,50,80,.12)',bc:'var(--red)',c:'var(--red)'},0:{bg:'var(--bg)',bc:'var(--border)',c:'var(--dim)'}};const s=cs[n.state];b.style.background=s.bg;b.style.borderColor=s.bc;b.style.color=s.c;b.textContent=`I${i}:${n.state>0?'+1':(n.state<0?'-1':'0')}`;}
+// ═══ ACTIONS ═══
+function addSphereUI(){const types=Object.keys(ST),type=types[sCtr%types.length],id='S'+sCtr++,a=sCtr*1.1,dist=14+Math.random()*8;const sph=mkSphere(id,type,{x:Math.cos(a)*dist,y:(Math.random()-.5)*8,z:Math.sin(a)*dist},{label:ST[type].label});B.spheres[id]=sph;buildSV(sph);updSL();updHUD();selSph(id);toast(`Added: ${sph.label}`,'ok');}
+function rmSph(sid){for(const li in B.links)if(B.links[li].si===sid||B.links[li].ti===sid){rmLV(li);delete B.links[li];}rmSV(sid);delete B.spheres[sid];if(selId===sid)selId=null;updSL();updLL();updHUD();toast('Removed','ok');}
+function rmSV(sid){const vm=VM[sid];if(vm){world.remove(vm.group);delete VM[sid];}}function rmLV(li){const lv=LVM[li];if(lv){world.remove(lv.tube);world.remove(lv.core);if(lv.glow)world.remove(lv.glow);if(lv.axons)lv.axons.forEach(a=>world.remove(a));delete LVM[li];}}function rmLink(li){rmLV(li);delete B.links[li];updLL();toast('Link removed','ok');}function deleteSelected(){if(selId)rmSph(selId);}
+function togSim(){simOn=!simOn;const b=E('btn-play');if(simOn){b.classList.add('run');b.textContent='⏸';const hz=parseInt(E('spd-sl').value);simIv=setInterval(simStep,Math.max(10,1000/hz));}else{b.classList.remove('run');b.textContent='▶';if(simIv){clearInterval(simIv);simIv=null;}}}
+function stepOnce(){if(!simOn)simStep();}function resetSim(){if(simOn)togSim();for(const si in B.spheres){const s=B.spheres[si];[...s.neu.input,...s.neu.hidden,...s.neu.output].forEach(n=>{n.state=0;n.pot=0;n.st=0;n.ch=0;n.adapt=0;n.auto=0;n.ast=0;});s.time=0;s.nrg=0;}B.t=0;B.steps=0;updHUD();toast('Reset','ok');}
+E('spd-sl').addEventListener('input',e=>{const hz=parseInt(e.target.value);E('spd').textContent=hz+' Hz';if(simOn){clearInterval(simIv);simIv=setInterval(simStep,Math.max(10,1000/hz));}});
+['da','5ht','ach','na'].forEach(k=>{const m={da:'DA','5ht':'5HT',ach:'ACh',na:'NA'};E('nm-'+k).addEventListener('input',e=>{const v=parseFloat(e.target.value);E('nv-'+k).textContent=v.toFixed(2);B.gNM[m[k]]=v;});});
+function saveBrain(){const d={v:'2.0-multi',spheres:{},links:{},gNM:B.gNM,t:B.t,steps:B.steps};for(const si in B.spheres){const s=B.spheres[si];d.spheres[si]={id:s.id,type:s.type,label:s.label,layerId:s.layerId,pos:s.pos,nI:s.nI,nH:s.nH,nO:s.nO,neu:s.neu,syn:s.syn,inP:s.inP,outP:s.outP,nrg:s.nrg,time:s.time};}for(const li in B.links)d.links[li]=B.links[li];dl(JSON.stringify(d),'neuraxon_multi_brain.json');toast('Brain saved!','ok');}
+function exportSphere(sid){sid=sid||selId;if(!sid||!B.spheres[sid])return toast('Select sphere','er');const s=B.spheres[sid];dl(JSON.stringify({v:'2.0-sphere',id:s.id,type:s.type,label:s.label,nI:s.nI,nH:s.nH,nO:s.nO,neu:s.neu,syn:s.syn}),`sphere_${s.label.replace(/\s+/g,'_')}.json`);toast('Exported!','ok');}
+/* ===== Neuraxon-Life (NxEr) interoperability ===== */
+/* Detects a Neuraxon-Life server export ({name,params,brain,stats}) and converts
+   it into this builder's native {v,spheres,links,gNM,t,steps} format. The export
+   stores inter-sphere links (with real weight matrices) but often ships an EMPTY
+   brain.spheres map — spheres exist only as ids referenced inside links. We rebuild
+   each sphere, inferring neuron counts from the links, and transpose the weight
+   matrices (Neuraxon stores [input x output]; this builder expects [output x input]). */
+function looksNeuraxon(d){
+  if(!d||typeof d!=='object')return false;
+  if(d.spheres&&d.v&&String(d.v).indexOf('2.0')===0)return false; // already native builder format
+  if(d.brain&&typeof d.brain==='object')return true;
+  if(d.global_neuromodulators||d.layers)return true;
+  if(d.params&&(d.links||d.stats))return true;
+  if(d.links){for(const k in d.links){return !!(d.links[k]&&d.links[k].source_sphere_id);}}
+  return false;
+}
+function convertNeuraxon(d){
+  const brain=d.brain||d, P=d.params||{};
+  const links=brain.links||{}, srcSpheres=brain.spheres||{};
+  const NXTYPE={feedforward:1,feedback:1,lateral:1,recurrent:1};
+  const ROLE={
+    sensory:    {type:'sensory_somatosensory',layer:'L0',depth:0,label:'Sensory Hub'},
+    visual:     {type:'sensory_visual',        layer:'L0',depth:0,label:'Visual'},
+    auditory:   {type:'sensory_auditory',      layer:'L0',depth:0,label:'Auditory'},
+    intero:     {type:'sensory_somatosensory', layer:'L0',depth:0,label:'Interoceptive'},
+    assoc_fluid:{type:'association',           layer:'L1',depth:1,label:'Assoc · Fluid'},
+    assoc_cryst:{type:'executive',             layer:'L2',depth:2,label:'Assoc · Cryst'},
+    motor:      {type:'motor',                 layer:'L3',depth:3,label:'Motor'},
+    peer:       {type:'custom',                layer:'L1',depth:1,label:'Peer'}
+  };
+  const roleOf=id=>{
+    if(ROLE[id])return ROLE[id];
+    if(/motor/.test(id))return {type:'motor',layer:'L3',depth:3,label:id};
+    if(/assoc|association/.test(id))return {type:'association',layer:'L1',depth:1,label:id};
+    if(/visual|audi|sensor|intero|somat|touch|smell|taste/.test(id))return {type:'sensory_somatosensory',layer:'L0',depth:0,label:id};
+    if(/exec|pfc|prefront/.test(id))return {type:'executive',layer:'L2',depth:2,label:id};
+    return {type:'custom',layer:'L1',depth:1,label:id};
+  };
+  // collect sphere ids (from spheres map + everything referenced by links)
+  const ids=new Set(Object.keys(srcSpheres));
+  for(const lid in links){const L=links[lid];if(L.source_sphere_id)ids.add(L.source_sphere_id);if(L.target_sphere_id)ids.add(L.target_sphere_id);}
+  // infer neuron I/O counts per sphere from link connectivity
+  const need={};ids.forEach(id=>need[id]={nO:0,nI:0});
+  for(const lid in links){
+    const L=links[lid],wm=L.weight_matrix||[];
+    const soc=(L.source_output_ids||[]).length||(wm[0]?wm[0].length:0);
+    const tic=(L.target_input_ids||[]).length||wm.length;
+    if(need[L.source_sphere_id])need[L.source_sphere_id].nO=Math.max(need[L.source_sphere_id].nO,soc);
+    if(need[L.target_sphere_id])need[L.target_sphere_id].nI=Math.max(need[L.target_sphere_id].nI,tic);
+  }
+  const hiddenFor=id=>{
+    if(/assoc|association/.test(id))return P.ms_association_hidden||P.num_hidden_neurons||16;
+    if(/motor/.test(id))return P.ms_motor_hidden||P.num_hidden_neurons||8;
+    if(/visual|audi|sensor|intero|somat/.test(id))return P.ms_sensory_hidden||P.num_hidden_neurons||12;
+    return P.num_hidden_neurons||14;
+  };
+  // layout: bucket spheres by depth, spread them out
+  const idArr=[...ids],byDepth={};
+  idArr.forEach(id=>{const dp=roleOf(id).depth;(byDepth[dp]=byDepth[dp]||[]).push(id);});
+  const pos={};
+  Object.keys(byDepth).forEach(dp=>{
+    const arr=byDepth[dp],n=arr.length;
+    arr.forEach((id,i)=>{
+      const x=(Number(dp)-1.5)*18;
+      const z=(n===1)?0:((i/(n-1))-0.5)*Math.max(20,n*9);
+      const y=Math.max(-9,Math.min(9,(i%2?1:-1)*i*2.2));
+      pos[id]={x,y,z};
+    });
+  });
+  // build spheres (mkSphere generates valid neu/syn/inP/outP for render + sim)
+  const spheres={};
+  idArr.forEach(id=>{
+    const role=roleOf(id),sd=srcSpheres[id]||{};
+    const nO=Math.max(need[id].nO,3),nI=Math.max(need[id].nI,3),nH=hiddenFor(id);
+    const label=sd.label||sd.name||role.label||id;
+    spheres[id]=mkSphere(id,role.type,pos[id],{nI,nH,nO,label,layerId:role.layer});
+  });
+  // build links (transpose weight matrix; map link kind -> builder link type)
+  const outLinks={};
+  for(const lid in links){
+    const L=links[lid],si=L.source_sphere_id,ti=L.target_sphere_id;
+    if(!spheres[si]||!spheres[ti])continue;
+    const wm=L.weight_matrix||[],rows=wm.length,cols=rows&&wm[0]?wm[0].length:0,W=[];
+    for(let c=0;c<cols;c++){const row=[];for(let rr=0;rr<rows;rr++)row.push(+wm[rr][c]||0);W.push(row);}
+    let type=(L.params&&L.params.kind)||L.kind||'';
+    if(!NXTYPE[type]){const ds=roleOf(si).depth,dt=roleOf(ti).depth;type=si===ti?'recurrent':(ds<dt?'feedforward':(ds>dt?'feedback':'lateral'));}
+    const pr=(L.params&&L.params.plasticity_rate!=null)?L.params.plasticity_rate:0.005;
+    outLinks[lid]={id:lid,si,ti,type,W,pr};
+  }
+  const g=brain.global_neuromodulators||{},pick=(v,f)=>v!=null?v:f;
+  const gNM={DA:pick(g.dopamine,.15),'5HT':pick(g.serotonin,.15),ACh:pick(g.acetylcholine,.15),NA:pick(g.norepinephrine,.15)};
+  return {v:'2.0-multi-converted',spheres,links:outLinks,gNM,t:brain.time||0,steps:brain.step_count||0,_nxName:d.name||brain.name||'NxEr'};
+}
+function loadBrain(inp){const f=inp.files[0];if(!f)return;inp.value='';const r=new FileReader();r.onload=ev=>{try{let d=JSON.parse(ev.target.result);if(looksNeuraxon(d))d=convertNeuraxon(d);clearBrain();B.gNM=d.gNM||{DA:.15,'5HT':.15,ACh:.15,NA:.15};B.t=d.t||0;B.steps=d.steps||0;for(const si in d.spheres){const sd=d.spheres[si],type=sd.type||'custom',col=ST[type]||ST.custom;const sph={id:sd.id,type,label:sd.label,layerId:sd.layerId||'L0',pos:sd.pos||{x:0,y:0,z:0},color:col,neu:sd.neu,syn:sd.syn||[],nm:{DA:.15,'5HT':.15,ACh:.15,NA:.15},ph:{DA:0,'5HT':0,ACh:0,NA:0},osc:{infraslow:Math.random()*6.28,slow:Math.random()*6.28,theta:Math.random()*6.28,alpha:Math.random()*6.28,gamma:Math.random()*6.28},nI:sd.nI,nH:sd.nH,nO:sd.nO,inP:sd.inP||sd.neu.input.map(n=>n.id),outP:sd.outP||sd.neu.output.map(n=>n.id),nrg:sd.nrg||0,time:sd.time||0};B.spheres[si]=sph;buildSV(sph);}for(const li in d.links){B.links[li]=d.links[li];buildLV(d.links[li]);}sCtr=Object.keys(B.spheres).length;updSL();updLL();updHUD();if(typeof resetCam==='function')resetCam();const conv=d.v&&String(d.v).indexOf('converted')>=0;toast(conv?('Neuraxon model loaded: '+(d._nxName||'NxEr')+' · '+sCtr+' spheres, '+Object.keys(B.links).length+' links'):'Loaded!','ok');}catch(err){toast('Error: '+err.message,'er');}};r.readAsText(f);}
+function importSphere(inp){const f=inp.files[0];if(!f)return;inp.value='';const r=new FileReader();r.onload=ev=>{try{const d=JSON.parse(ev.target.result),id='S'+sCtr++,type=d.type||'custom',col=ST[type]||ST.custom,a=sCtr*1.1,dist=14+Math.random()*8;const sph={id,type,label:d.label||'Imported',layerId:'L0',pos:{x:Math.cos(a)*dist,y:(Math.random()-.5)*8,z:Math.sin(a)*dist},color:col,neu:d.neu,syn:d.syn||[],nm:{DA:.15,'5HT':.15,ACh:.15,NA:.15},ph:{DA:0,'5HT':0,ACh:0,NA:0},osc:{infraslow:Math.random()*6.28,slow:Math.random()*6.28,theta:Math.random()*6.28,alpha:Math.random()*6.28,gamma:Math.random()*6.28},nI:d.nI||d.neu.input.length,nH:d.nH||d.neu.hidden.length,nO:d.nO||d.neu.output.length,inP:d.neu.input.map(n=>n.id),outP:d.neu.output.map(n=>n.id),nrg:0,time:0};B.spheres[id]=sph;buildSV(sph);updSL();updHUD();selSph(id);toast('Imported!','ok');}catch(err){toast('Error','er');}};r.readAsText(f);}
+function clearBrain(){if(simOn)togSim();for(const li in B.links)rmLV(li);for(const si in B.spheres)rmSV(si);B.spheres={};B.links={};B.t=0;B.steps=0;selId=null;iParts.forEach(p=>{p.grp.remove(p.sp);p.sp.material.dispose();});iParts=[];eParts.forEach(p=>{world.remove(p.sp);p.sp.material.dispose();});eParts=[];}
+function showPresets(){E('pmod').classList.add('vis');}function hidePresets(){E('pmod').classList.remove('vis');}
+function loadPreset(name){hidePresets();clearBrain();sCtr=0;const P={'sensory-motor':()=>{aS('V1','sensory_visual',{x:-22,y:-10,z:10},{label:'V1 Visual',nH:14});aS('A1','sensory_auditory',{x:-22,y:-10,z:-10},{label:'A1 Auditory',nH:14});aS('Assoc','association',{x:0,y:0,z:0},{label:'Association Cortex',nH:20,layerId:'L1'});aS('PFC','prefrontal',{x:18,y:6,z:5},{label:'Prefrontal dlPFC',nH:18,layerId:'L2'});aS('M1','motor',{x:12,y:14,z:-3},{label:'M1 Motor',nH:12,layerId:'L2'});aL('V1','Assoc','feedforward');aL('A1','Assoc','feedforward');aL('Assoc','PFC','feedforward');aL('Assoc','M1','feedforward');aL('PFC','M1','feedforward');aL('PFC','Assoc','feedback');aL('M1','Assoc','feedback');},'prefrontal':()=>{aS('V1','sensory_visual',{x:-26,y:-12,z:12},{label:'V1 Visual',nH:10});aS('A1','sensory_auditory',{x:-26,y:-12,z:-12},{label:'A1 Auditory',nH:10});aS('SOM','sensory_somatosensory',{x:-24,y:-6,z:0},{label:'Somatosensory',nH:10});aS('Assoc','association',{x:-4,y:-2,z:0},{label:'Assoc Cortex',nH:18,layerId:'L1'});aS('dlPFC','prefrontal',{x:18,y:6,z:6},{label:'dlPFC',nH:20,layerId:'L2'});aS('M1','motor',{x:14,y:14,z:-4},{label:'M1 Motor',nH:12,layerId:'L2'});aL('V1','Assoc','feedforward');aL('A1','Assoc','feedforward');aL('SOM','Assoc','feedforward');aL('Assoc','dlPFC','feedforward');aL('dlPFC','M1','feedforward');aL('dlPFC','Assoc','feedback');aL('dlPFC','V1','feedback');aL('dlPFC','A1','feedback');aL('M1','Assoc','feedback');aL('Assoc','M1','lateral');},'triangle':()=>{aS('A','association',{x:-14,y:8,z:0},{label:'Sphere A',nH:15});aS('B','executive',{x:14,y:8,z:0},{label:'Sphere B',nH:15});aS('C','motor',{x:0,y:-10,z:0},{label:'Sphere C',nH:15});aL('A','B','feedforward');aL('B','C','feedforward');aL('C','A','feedforward');aL('A','C','lateral');aL('B','A','lateral');},'star':()=>{aS('GW','executive',{x:0,y:0,z:0},{label:'Global Workspace',nH:22,layerId:'L3'});aS('V','sensory_visual',{x:-20,y:0,z:12},{label:'Visual',nH:12});aS('A','sensory_auditory',{x:-20,y:0,z:-12},{label:'Auditory',nH:12});aS('S','sensory_somatosensory',{x:0,y:-16,z:0},{label:'Somatosensory',nH:12});aS('M','motor',{x:20,y:8,z:0},{label:'Motor',nH:12,layerId:'L2'});for(const s of['V','A','S','M']){aL(s,'GW','feedforward');aL('GW',s,'feedback');}},'minimal':()=>{aS('A','association',{x:-10,y:0,z:0},{label:'Sphere A',nH:12});aS('B','motor',{x:10,y:0,z:0},{label:'Sphere B',nH:12});aL('A','B','feedforward');aL('B','A','feedback');},'drosophila':()=>{
+/* ═══ Drosophila melanogaster Adult Brain Connectome ═══
+   Hemibrain dataset: 139,255 neurons, ~480M synapses
+   10 brain regions with anatomically-derived proportions
+   Region connection probabilities from published connectomics data
+   Small-world: clustering=0.28, avg_path=3.5, modularity=0.42 */
+const TOTAL=139255;
+const REG={
+  OL:{pct:.35,label:'Optic Lobes',type:'sensory_visual',pos:{x:-30,y:-4,z:0},layer:'L0',emoji:'👁'},
+  CX:{pct:.05,label:'Central Complex',type:'executive',pos:{x:0,y:4,z:0},layer:'L2',emoji:'🧠'},
+  MB:{pct:.10,label:'Mushroom Bodies',type:'prefrontal',pos:{x:-10,y:10,z:10},layer:'L2',emoji:'🍄'},
+  INP:{pct:.08,label:'Inferior Neuropils',type:'association',pos:{x:4,y:-8,z:-6},layer:'L1',emoji:'🔄'},
+  FB:{pct:.04,label:'Fan-shaped Body',type:'motor',pos:{x:0,y:12,z:-2},layer:'L2',emoji:'🪭'},
+  VB:{pct:.06,label:'Ventral Nerve Cord',type:'motor',pos:{x:0,y:-20,z:-12},layer:'L0',emoji:'⚡'},
+  SIP:{pct:.05,label:'Sup. Int. Protocerebrum',type:'prefrontal',pos:{x:-14,y:14,z:4},layer:'L3',emoji:'🧩'},
+  SLP:{pct:.05,label:'Sup. Lat. Protocerebrum',type:'prefrontal',pos:{x:14,y:14,z:-4},layer:'L3',emoji:'🧩'},
+  CRE:{pct:.06,label:'Crepine',type:'association',pos:{x:-6,y:-2,z:-10},layer:'L1',emoji:'🌐'},
+  LH:{pct:.06,label:'Lateral Horn',type:'sensory_somatosensory',pos:{x:20,y:4,z:10},layer:'L1',emoji:'🔮'}
+};
+/* Neuron counts per region & scaled hidden-neuron counts for rendering */
+for(const[k,r]of Object.entries(REG)){
+  const nReal=Math.round(TOTAL*r.pct);
+  const nH=Math.max(8,Math.round(r.pct*160));/* proportional visual fidelity */
+  const nI=Math.min(6,Math.max(2,Math.round(nH*.2)));
+  const nO=Math.min(6,Math.max(2,Math.round(nH*.18)));
+  aS(k,r.type,r.pos,{label:r.label,nH,nI,nO,layerId:r.layer});
+  /* Tag sphere with real neuron count for HUD */
+  if(B.spheres[k]){B.spheres[k]._realNeurons=nReal;B.spheres[k]._customEmoji=r.emoji;}
+}
+/* ═══ Region-to-region connectivity (from wiring.py connection probability matrix) ═══ */
+/* Major anatomical pathways (feedforward) */
+aL('OL','CX','feedforward');  /* Visual → Central Complex */
+aL('OL','LH','feedforward');  /* Visual → Lateral Horn */
+aL('CX','FB','feedforward');  /* Central Complex → Fan-shaped Body */
+aL('MB','INP','feedforward'); /* Mushroom Bodies → Inferior Neuropils */
+aL('INP','VB','feedforward'); /* Inferior Neuropils → Ventral Nerve Cord */
+/* Secondary feedforward pathways */
+aL('CX','INP','feedforward'); /* Central Complex → Inferior Neuropils */
+aL('FB','VB','feedforward');  /* Fan-shaped Body → Ventral Nerve Cord */
+aL('OL','SLP','feedforward'); /* Optic Lobes → Superior Lateral Protocerebrum */
+aL('SIP','SLP','lateral');    /* Superior Intermediate ↔ Superior Lateral */
+aL('SLP','LH','feedforward'); /* Superior Lateral → Lateral Horn */
+/* Feedback pathways */
+aL('CX','MB','feedback');     /* Central Complex → Mushroom Bodies */
+aL('INP','CX','feedback');    /* Inferior Neuropils → Central Complex */
+aL('FB','CX','feedback');     /* Fan-shaped Body → Central Complex */
+aL('LH','MB','feedback');     /* Lateral Horn → Mushroom Bodies */
+aL('VB','CRE','feedback');    /* Ventral Nerve Cord → Crepine */
+/* Lateral / modulatory connections */
+aL('MB','CX','lateral');      /* Mushroom Bodies ↔ Central Complex */
+aL('CRE','LH','lateral');     /* Crepine ↔ Lateral Horn */
+aL('SIP','MB','lateral');     /* Sup. Int. Protocerebrum ↔ Mushroom Bodies */
+aL('CRE','VB','lateral');     /* Crepine ↔ Ventral Nerve Cord */
+/* Post-load: update emoji icons for all Drosophila spheres */
+for(const[k,r]of Object.entries(REG)){if(VM[k])updSphEmoji(k,r.emoji);}
+}};if(P[name])P[name]();updSL();updLL();updHUD();resetCam();const PN={'sensory-motor':'Sensory-Motor','prefrontal':'Prefrontal Executive','triangle':'Triangle Loop','star':'Star / GW','minimal':'Minimal Pair','drosophila':'🪰 Drosophila melanogaster · 139,255 neurons'};toast('Loaded: '+(PN[name]||name),'ok');}
+function aS(id,type,pos,p){const s=mkSphere(id,type,pos,p);B.spheres[id]=s;buildSV(s);sCtr++;}function aL(si,ti,type){const l=mkLink(si,ti,type);if(l){B.links[l.id]=l;buildLV(l);}}
+function dl(t,fn){const b=new Blob([t],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=fn;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(a.href);}
+function toast(m,t){const e=E('toast');e.textContent=m;e.className='toast '+(t==='ok'?'tok':'ter')+' sh';setTimeout(()=>e.classList.remove('sh'),2200);}
+function stab(n,btn){document.querySelectorAll('.tc').forEach(t=>t.classList.remove('on'));document.querySelectorAll('.tab').forEach(b=>b.classList.remove('on'));E('t-'+n).classList.add('on');if(btn)btn.classList.add('on');}
+function togPanel(){if(isMobile){togMobilePanel();return;}E('panel').classList.toggle('collapsed');document.querySelector('.ptog .ar').textContent=E('panel').classList.contains('collapsed')?'▸':'◂';}
+let mPanelOpen=false;
+function togMobilePanel(){mPanelOpen=!mPanelOpen;E('panel').classList.toggle('m-open',mPanelOpen);}
+function resetCam(){cam.position.set(0,25,90);orb.target.set(0,0,0);orb.update();}function togRotate(){orb.autoRotate=!orb.autoRotate;E('rot-btn').classList.toggle('on',orb.autoRotate);}
+
+// ═══ MOBILE DETECTION & SETUP ═══
+let isMobile=false;
+function detectMobile(){return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)||(window.innerWidth<=768&&'ontouchstart' in window);}
+function setupMobile(){
+  isMobile=true;document.body.classList.add('mobile');
+  // Panel starts collapsed as bottom sheet
+  E('panel').classList.remove('collapsed');
+  // Touch events for drag on mobile
+  const cv=E('c3d');
+  cv.addEventListener('touchstart',e=>{if(e.touches.length===1){const t=e.touches[0];onDown({button:0,clientX:t.clientX,clientY:t.clientY,shiftKey:false,preventDefault:()=>{}});}},{passive:true});
+  cv.addEventListener('touchmove',e=>{if(e.touches.length===1&&dragging){e.preventDefault();const t=e.touches[0];onMove({clientX:t.clientX,clientY:t.clientY});}},{passive:false});
+  cv.addEventListener('touchend',e=>{if(dragging)onUp({});},{passive:true});
+  // Swipe panel
+  let touchStartY=0;
+  E('panel').addEventListener('touchstart',e=>{touchStartY=e.touches[0].clientY;},{passive:true});
+  E('panel').addEventListener('touchmove',e=>{const dy=e.touches[0].clientY-touchStartY;if(!mPanelOpen&&dy<-30){togMobilePanel();touchStartY=9999;}if(mPanelOpen&&dy>40){togMobilePanel();touchStartY=9999;}},{passive:true});
+  // Tap on sphere for mobile select
+  let tapTimer=null,tapTarget=null;
+  cv.addEventListener('touchstart',e=>{if(e.touches.length===1){tapTimer=Date.now();const t=e.touches[0];getMouseXY({clientX:t.clientX,clientY:t.clientY});ray.setFromCamera(mouse,cam);tapTarget=hitSphere();}},{passive:true});
+  cv.addEventListener('touchend',e=>{const dt=Date.now()-(tapTimer||0);if(dt<300&&tapTarget&&!didDrag){
+    if(linkMode){if(!linkSrc){linkSrc=tapTarget.id;toast(`Source: ${B.spheres[tapTarget.id].label}. Tap target.`,'ok');}
+      else if(tapTarget.id!==linkSrc){const l=mkLink(linkSrc,tapTarget.id,'feedforward');if(l){B.links[l.id]=l;buildLV(l);updLL();toast('Link created!','ok');}linkMode=false;linkSrc=null;if(E('m-lnk'))E('m-lnk').classList.remove('on');E('lnk-tool').classList.remove('on');}return;}
+    selSph(tapTarget.id);togMobilePanel();mPanelOpen=true;E('panel').classList.add('m-open');}tapTarget=null;},{passive:true});
+  // Mobile layout mode button sync
+  const origTogLayout=togLayout;
+  // Adjust camera for portrait
+  cam.position.set(0,20,70);cam.fov=60;cam.updateProjectionMatrix();
+}
+window.addEventListener('resize',()=>{if(cam&&rnd){const c=E('c3d'),r=c.getBoundingClientRect();cam.aspect=r.width/r.height;cam.updateProjectionMatrix();rnd.setSize(r.width,r.height,false);}});
+initThree();if(detectMobile())setupMobile();updHUD();updSL();updLL();setTimeout(()=>loadPreset('prefrontal'),300);
+
+
+
+
+/* === mngol5 integration v2 =======================================
+ * Trims this builder into the "Advanced Neuraxon Model designer" the
+ * GoL Live page launches. Three jobs:
+ *   1. Hide every button the user shouldn't reach (the topology is
+ *      fixed to chc6, so add/delete/connect/preset/import/export of
+ *      spheres+links are all wrong here).
+ *   2. Add a "GoL Tunables" tab carrying sliders for EVERY
+ *      USER_TUNABLE parameter the server exposes (fetched live from
+ *      /api/params).  The exported JSON now carries all 17 of them,
+ *      not just num_hidden_neurons.
+ *   3. Replace the toolbar "Save for GoL Life" button: it now also
+ *      postMessage's the JSON back to the opener window AND closes,
+ *      so the main page lands with the sliders pre-filled, ready to
+ *      Create the NxEr.
+ */
+(function mngol5Trim(){
+  // ---- 1. Hide / disable unneeded UI ------------------------------
+  // CSS-driven so we don't fight the builder's own DOM updates.
+  const css=document.createElement('style');
+  css.textContent=`
+    /* toolbar: keep only ✋ layout, 🎯 reset, 🔄 rotate, and the new Export. */
+    #toolbar > button[onclick*="showPresets"],
+    #toolbar > button[onclick*="addSphereUI"],
+    #toolbar > button[onclick*="startLinking"],
+    #toolbar > button[onclick*="deleteSelected"],
+    #toolbar > button[onclick*="saveBrain"],
+    #toolbar > button[onclick*="li.click"],
+    #toolbar > button[onclick*="exportSphere"],
+    #toolbar > button[onclick*="lsi.click"]    { display:none !important; }
+    /* spheres-tab preset button + add-sphere button */
+    #t-spheres .br button[onclick*="showPresets"],
+    #t-spheres .br button[onclick*="addSphereUI"] { display:none !important; }
+    /* links-tab "New Link" button */
+    #t-links .br button[onclick*="startLinking"] { display:none !important; }
+    /* sphere-detail Delete button */
+    #det-c button[onclick*="rmSph"] { display:none !important; }
+    /* Modal preset dialog (orphan w/o trigger, but hide just in case) */
+    #pmod { display:none !important; }
+    /* mobile toolbar: same trimming */
+    #m-toolbar button[onclick*="showPresets"],
+    #m-toolbar button[onclick*="addSphereUI"],
+    #m-toolbar button[onclick*="startLinking"],
+    #m-toolbar button[onclick*="deleteSelected"],
+    #m-toolbar button[onclick*="saveBrain"],
+    #m-toolbar button[onclick*="li.click"]        { display:none !important; }
+    /* GoL tunables panel layout */
+    #gol-tun{padding:8px}
+    #gol-tun .gt{margin:6px 0}
+    #gol-tun label{display:block;font-size:9px;color:#9fb0d0;margin-bottom:2px}
+    #gol-tun .row{display:flex;align-items:center;gap:6px}
+    #gol-tun input[type=range]{flex:1}
+    #gol-tun .v{min-width:38px;text-align:right;font-family:var(--mono);
+                font-size:9px;color:var(--cyan)}
+    #gol-tun .sw{display:flex;align-items:center;gap:6px;margin:6px 0}
+    #gol-tun .head{font-size:10px;color:var(--gold);
+                   border-bottom:1px solid var(--border);
+                   padding-bottom:4px;margin-bottom:6px}
+  `;
+  document.head.appendChild(css);
+
+  // ---- 2. GoL Tunables tab + sliders ------------------------------
+  // Add a new tab "GoL Tunables" next to Detail. The sliders are
+  // dynamically built from /api/params (same schema the main page
+  // uses), so they always match the server's USER_TUNABLE.
+  let GOL_SPEC=null, GOL_VALS={};
+  async function buildTunablesPanel(){
+    try{
+      const r=await fetch('/api/params');
+      GOL_SPEC=await r.json();
+    }catch(e){
+      GOL_SPEC={params:[],topology:'chc6'};
+    }
+    const tabs=document.querySelector('#panel .tabs'); if(!tabs) return;
+    const btn=document.createElement('button');
+    btn.className='tab'; btn.textContent='GoL';
+    btn.onclick=()=>stab('gol',btn);
+    tabs.appendChild(btn);
+    const pbody=document.querySelector('#panel .pbody'); if(!pbody) return;
+    const tc=document.createElement('div');
+    tc.className='tc'; tc.id='t-gol';
+    tc.innerHTML='<div id="gol-tun"></div>';
+    pbody.appendChild(tc);
+    const host=document.getElementById('gol-tun');
+    const labels={num_hidden_neurons:'Hidden neurons / sphere',
+      connection_probability:'Connection probability',learning_rate:'Learning rate',
+      spontaneous_firing_rate:'Spontaneous firing',
+      intrinsic_timescale_default:'Intrinsic timescale',
+      firing_threshold_excitatory:'Firing threshold',
+      plasticity_threshold:'Plasticity threshold',
+      afferent_synapse_strength:'Afferent strength',
+      sensory_input_gain:'Sensory gain',adaptation_tau_ticks:'Adaptation τ',
+      resting_potential_decay:'Resting decay',refractory_period_ticks:'Refractory ticks',
+      post_spike_mp_reset:'Post-spike reset',cross_sphere_coupling:'Cross-sphere κ',
+      cryst_capacity:'Crystallised capacity',free_energy_beta:'Free-energy β',
+      symmetric_stdp:'Symmetric STDP'};
+    let h='<div class="head">Tunable parameters (server schema)</div>';
+    for(const p of GOL_SPEC.params){
+      const lab=labels[p.key]||p.key;
+      GOL_VALS[p.key]=p.default;
+      if(p.type==='bool'){
+        h+=`<div class="sw"><input type="checkbox" id="gt-${p.key}" `
+          +`${p.default?'checked':''}><label style="margin:0">${lab}</label></div>`;
+      }else{
+        const step=p.type==='int'?1:((p.max-p.min)/100);
+        const dec=p.type==='int'?0:3;
+        h+=`<div class="gt"><label>${lab} <span style="color:#5a6884">[${p.min}..${p.max}]</span></label>
+          <div class="row"><input type="range" id="gt-${p.key}" min="${p.min}" max="${p.max}"
+            step="${step}" value="${p.default}"
+            oninput="document.getElementById('gtv-${p.key}').textContent=(+this.value).toFixed(${dec})">
+            <span class="v" id="gtv-${p.key}">${(+p.default).toFixed(dec)}</span></div></div>`;
+      }
+    }
+    h+='<div style="margin-top:10px;padding:6px;background:rgba(255,207,74,0.05);'
+      +'border:1px solid rgba(255,207,74,0.2);border-radius:4px;font-size:9px;color:#cfb872">'
+      +'When you hit <b>🎮 Export to GoL Life</b> these values are sent back to '
+      +'the main window pre-loaded into the Create form — you can review and Create immediately.'
+      +'</div>';
+    host.innerHTML=h;
+  }
+  function collectTunables(){
+    const out={};
+    if(!GOL_SPEC) return out;
+    for(const p of GOL_SPEC.params){
+      const el=document.getElementById('gt-'+p.key); if(!el) continue;
+      out[p.key]=p.type==='bool'?(el.checked?1:0):(+el.value);
+    }
+    return out;
+  }
+  // Sync num_hidden_neurons from average of per-sphere nH when the
+  // builder topology changes — so the tunable reflects what the user
+  // is designing visually too.
+  function syncFromBuilder(){
+    if(!GOL_SPEC||!B||!B.spheres) return;
+    const sph=Object.values(B.spheres); if(!sph.length) return;
+    const nHs=sph.map(s=>s.nH||0).filter(n=>n>0);
+    const avg=Math.max(4,Math.min(48,Math.round(
+      nHs.reduce((a,b)=>a+b,0)/Math.max(1,nHs.length))));
+    const el=document.getElementById('gt-num_hidden_neurons');
+    const lbl=document.getElementById('gtv-num_hidden_neurons');
+    if(el){el.value=avg; if(lbl)lbl.textContent=avg;}
+  }
+
+  // ---- 3. Save-for-GoL: handler + toolbar button ------------------
+  window.saveForNeuraxonLife=function(){
+    if(!GOL_SPEC){toast('Tunables not ready yet','er'); return;}
+    syncFromBuilder();
+    const params=collectTunables();
+    const sph=Object.values(B.spheres||{});
+    const blob={
+      version:'mngol5-1.0', topology:'chc6',
+      created:new Date().toISOString(),
+      source:'MultiNx2Builder (trimmed)',
+      designer_notes:{
+        spheres:sph.length,
+        sphere_labels:sph.map(s=>s.label),
+        hidden_per_sphere:Object.fromEntries(
+          sph.map(s=>[s.label||s.id,s.nH||0]))
+      },
+      params
+    };
+    const txt=JSON.stringify(blob,null,2);
+    // Always download a copy.
+    const b=new Blob([txt],{type:'application/json'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(b);
+    a.download='neuraxon_life_model_'+Date.now()+'.json';
+    a.click();
+    // Hand it to the main GoL window if we were opened from one,
+    // then close so the user returns to the main page automatically.
+    if(window.opener && !window.opener.closed){
+      try{
+        window.opener.postMessage(
+          {type:'mngol5-model', model:blob}, window.location.origin);
+        toast('🎮 Sent to GoL Live and saved — closing','ok');
+        setTimeout(()=>window.close(), 700);
+        return;
+      }catch(e){/* fall through to plain "saved" message */}
+    }
+    toast('💾 Saved model JSON','ok');
+  };
+
+  // Add the export button to the toolbar (the old hidden-only buttons
+  // are gone via CSS).
+  function injectButton(){
+    const tb=document.getElementById('toolbar'); if(!tb) return;
+    const sep=document.createElement('div');
+    sep.style.cssText='height:1px;background:var(--border);margin:3px 5px;';
+    const btn=document.createElement('button');
+    btn.className='tbtn'; btn.onclick=window.saveForNeuraxonLife;
+    btn.title='Save this model JSON AND hand it back to the main GoL window '
+             +'(pre-loaded into the Create form)';
+    btn.innerHTML='<span>🎮</span><span class="tp">Export to GoL Life</span>';
+    tb.appendChild(sep); tb.appendChild(btn);
+    const banner=document.createElement('div');
+    banner.style.cssText='position:fixed;left:50%;top:8px;transform:translateX(-50%);'
+      +'background:rgba(20,30,55,0.92);border:1px solid var(--border);'
+      +'padding:5px 14px;border-radius:6px;font-size:10px;color:#cfe3ff;z-index:1000';
+    banner.innerHTML='Advanced Neuraxon Model Designer — fixed to CHC 6-sphere · '
+      +'tune sphere counts and the <b>GoL</b> tab parameters · '
+      +'<b>🎮 Export to GoL Life</b> sends the model back to the main window';
+    document.body.appendChild(banner);
+  }
+  document.addEventListener('DOMContentLoaded',()=>{
+    buildTunablesPanel(); injectButton();
+  });
+  // The builder doesn't actually use DOMContentLoaded for its setup
+  // (it's inline), so also run immediately.
+  if(document.readyState!=='loading'){ buildTunablesPanel(); injectButton(); }
+})();
+
+</script></body></html>

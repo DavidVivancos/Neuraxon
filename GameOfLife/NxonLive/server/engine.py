@@ -204,10 +204,16 @@ class NxEr:
     def owner_view(self):
         """Full detail — only for the authenticated owner / god."""
         d = self.public_view()
+        # `energy` was a leftover field set once to 100.0 and never
+        # updated. Compute it as food-percentage so it actually tracks
+        # the NxEr's vitality (100 = just spawned / full belly, 0 =
+        # about to die).
+        full = getattr(self, "start_food", 0) or 120.0
+        energy_pct = max(0.0, min(100.0, self.food / full * 100.0))
         d.update({
             "stats": self.stats.as_dict(),
             "food": round(self.food, 1),
-            "energy": round(self.energy, 1),
+            "energy": round(energy_pct, 1),
             "heading": self.heading,
             "born_tick": self.born_tick,
             "parents": self.parents,
@@ -242,7 +248,7 @@ class NxEr:
 # is range-clamped server-side (min,max). The brain topology is ALWAYS
 # the CHC g-capable 6-sphere architecture — it is NOT user-selectable.
 USER_TUNABLE = {
-    "num_hidden_neurons":          (4,    24,   int),
+    "num_hidden_neurons":          (4,    48,   int),
     "connection_probability":      (0.05, 0.6,  float),
     "learning_rate":               (0.001, 0.05, float),
     "spontaneous_firing_rate":     (0.0,  0.12, float),
@@ -357,16 +363,22 @@ def make_params(overrides=None):
 # --------------------------------------------------------------------
 class World:
     def __init__(self, size, sea_pct, rock_pct, seed=0,
-                 earth_map=False):
+                 earth_map=False, pole_frac=None):
         self.size = int(size)
         self.sea_pct = float(sea_pct)
         self.rock_pct = float(rock_pct)
         self.earth_map = bool(earth_map)
-        # The flat world is projected onto a sphere, so the first/last
-        # rows in y all converge at the two poles -> heavy crowding.
-        # Make a thin band at each pole UNREACHABLE (treated like rock)
-        # so NxErs/food never pile up there. ~7% of the height each.
-        self._pole = max(2, int(self.size * 0.07))
+        # Sphere projection collapses the top/bottom rows toward the
+        # poles. y=0 is literally a single 3D point, y=1 a tiny ring,
+        # etc. To stop NxErs and food from piling on top of each other
+        # at that infinitesimal apex we BAN a thin band of rows. 7%
+        # was MUCH too generous on big worlds (N=1000 → 70 rows ≈ a
+        # 13° cap at each pole, the huge empty disc the user noticed).
+        # Default now 1% — at N=1000 → 10 rows ≈ a 1.8° cap, basically
+        # invisible. Tunable via world_config "pole_frac".
+        if pole_frac is None:
+            pole_frac = 0.01
+        self._pole = max(1, int(self.size * float(pole_frac)))
         self.terrain = {}
         if self.earth_map:
             # Earth-map mode (same as Game of Life Lite "useEarth"):
@@ -509,7 +521,8 @@ class Engine:
         self.names = name_allocator
         self.world = World(cfg["world_size"], cfg["sea_pct"],
                            cfg["rock_pct"], cfg.get("world_seed", 12345),
-                           earth_map=cfg.get("earth_map", False))
+                           earth_map=cfg.get("earth_map", False),
+                           pole_frac=cfg.get("pole_frac", 0.01))
         self.nxers = {}                 # id -> NxEr (alive + recently dead)
         self.foods = {}                 # food_id -> {pos, amount}
         self.tick = 0
@@ -517,6 +530,25 @@ class Engine:
         self.next_food_id = 0
         # all-time best record (survives deaths + restarts)
         self.all_time = {m: [] for m in RANK_METRICS}   # list of dicts
+        # ----- Lifetime counters (persisted, monotonic) -------------
+        # Cumulative stats for the whole server's history. Each event
+        # below increments the counter once, even when state survives
+        # restarts (loaded from snapshot.json).
+        self.lifetime = {
+            "started_at_unix": time.time(),
+            "uptime_seconds":  0.0,    # accumulated across restarts
+            "total_ticks":     0,      # accumulated across restarts
+            "total_spawns":    0,      # every NxEr ever created
+            "total_managed_registrations": 0,  # registered by a user
+            "total_births_mating": 0,  # NxErs born from mating
+            "total_deaths":    0,
+            "total_food_eaten":0,
+            "total_food_spawned":0,
+            "total_matings":   0,
+            "peak_alive":      0,
+            "peak_managed":    0,
+        }
+        self._uptime_t0 = time.time()
         self._g_cache = {"pc1": 0.0, "pos_manifold": 0.0,
                          "mean_r": 0.0, "lambda_ratio": 1.0, "n": 0}
         self._init_runtime(cfg)
@@ -561,6 +593,7 @@ class Engine:
             self.next_food_id += 1
             self.foods[fid] = {"pos": self._free_cell(),
                                "remaining": 25}
+            self.lifetime["total_food_spawned"] += 1
         self._food_dirty = True
 
     def _spawn_nxer(self, params=None, owner_token=None,
@@ -589,11 +622,16 @@ class Engine:
         nx.can_land = can_land
         nx.can_sea = can_sea
         nx.food = self.bio_start_food
+        nx.start_food = self.bio_start_food   # for energy% display
         nx.born_tick = self.tick
         self.pool.add(nid, _params_to_dict(nx.params))
         self.nxers[nid] = nx
         self._nxer_names[nid] = nx.name
         self._occupied[(nx.pos[0], nx.pos[1])] = nx.id
+        # lifetime counters
+        self.lifetime["total_spawns"] += 1
+        if nx.is_managed:
+            self.lifetime["total_managed_registrations"] += 1
         return nx
 
     def register_user_nxer(self, param_overrides, password_hash,
@@ -804,6 +842,7 @@ class Engine:
                 f["remaining"] = rem - 1
                 nx.food += 1.0
                 nx.stats.food_found += 1
+                self.lifetime["total_food_eaten"] += 1
                 # sing on DISCOVERY of a new food source (like Lite's
                 # "first-time food" trigger), not on every bite — keeps
                 # singing discrete rather than a constant choir.
@@ -941,6 +980,8 @@ class Engine:
         if child:
             a.offspring_ids.append(child.id)
             b.offspring_ids.append(child.id)
+            self.lifetime["total_matings"] += 1
+            self.lifetime["total_births_mating"] += 1
             if len(self._events) < 200:
                 self._events.append({"k": "mate",
                                      "x": a.pos[0], "y": a.pos[1]})
@@ -967,6 +1008,16 @@ class Engine:
 
     def step(self):
         self.tick += 1
+        self.lifetime["total_ticks"] += 1
+        # peak watermarks (cheap; the next_food/respawn block runs
+        # less often than every tick on busy worlds, so do it here)
+        n_alive = sum(1 for a in self.nxers.values() if a.alive)
+        if n_alive > self.lifetime["peak_alive"]:
+            self.lifetime["peak_alive"] = n_alive
+        n_managed_alive = sum(1 for a in self.nxers.values()
+                              if a.alive and a.is_managed)
+        if n_managed_alive > self.lifetime["peak_managed"]:
+            self.lifetime["peak_managed"] = n_managed_alive
         self._events = []
         order = [nx for nx in self.nxers.values() if nx.alive]
 
@@ -1049,6 +1100,7 @@ class Engine:
 
     def _kill(self, nx):
         nx.alive = False
+        self.lifetime["total_deaths"] += 1
         # free the cell so other NxErs (and respawns) can use it
         cell = (nx.pos[0], nx.pos[1])
         if self._occupied.get(cell) == nx.id:
@@ -1250,11 +1302,17 @@ class Engine:
                 if bd is not None:
                     rec["brain"] = bd
             nxers.append(rec)
+        # update accumulated uptime on every save so a hard kill
+        # doesn't lose more than `snap_secs` of session time
+        now = time.time()
+        self.lifetime["uptime_seconds"] += max(0.0, now - self._uptime_t0)
+        self._uptime_t0 = now
         return {
             "tick": self.tick,
             "next_nxer_id": self.next_nxer_id,
             "next_food_id": self.next_food_id,
             "all_time": self.all_time,
+            "lifetime":  self.lifetime,
             "names_state": self.names.state(),
             "foods": [{"id": k, "pos": v["pos"],
                        "remaining": v.get("remaining", 25)}

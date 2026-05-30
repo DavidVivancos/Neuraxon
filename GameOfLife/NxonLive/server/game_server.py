@@ -24,7 +24,7 @@ from .names import NameAllocator
 from .persistence import Persistence
 
 
-SERVER_VERSION = "GoL Server V 1.035"   # bumped each release
+SERVER_VERSION = "GoL Server V 1.048"   # bumped each release
 
 class GameServer:
     def __init__(self, config_path, state_dir):
@@ -125,7 +125,8 @@ class GameServer:
         eng.world = World(self.cfg["world_size"], self.cfg["sea_pct"],
                           self.cfg["rock_pct"],
                           self.cfg.get("world_seed", 12345),
-                          earth_map=self.cfg.get("earth_map", False))
+                          earth_map=self.cfg.get("earth_map", False),
+                          pole_frac=self.cfg.get("pole_frac", 0.01))
         eng.nxers = {}
         eng.foods = {}
         eng.tick = int(snap.get("tick", 0))
@@ -133,6 +134,31 @@ class GameServer:
         eng.next_food_id = int(snap.get("next_food_id", 0))
         eng.all_time = snap.get("all_time",
                                 {m: [] for m in RANK_METRICS})
+        # _restore bypasses Engine.__init__ via Engine.__new__, so we
+        # must seed the lifetime dict here too. Defaults match
+        # Engine.__init__'s. If the snapshot has a "lifetime" sub-dict
+        # (created in v1.038+), merge its values in; older snapshots
+        # silently start with fresh zeros and accumulate from this run
+        # forward.
+        eng.lifetime = {
+            "started_at_unix": time.time(),
+            "uptime_seconds":  0.0,
+            "total_ticks":     0,
+            "total_spawns":    0,
+            "total_managed_registrations": 0,
+            "total_births_mating": 0,
+            "total_deaths":    0,
+            "total_food_eaten":0,
+            "total_food_spawned":0,
+            "total_matings":   0,
+            "peak_alive":      0,
+            "peak_managed":    0,
+        }
+        eng._uptime_t0 = time.time()
+        if isinstance(snap.get("lifetime"), dict):
+            for k, v in snap["lifetime"].items():
+                if k in eng.lifetime:
+                    eng.lifetime[k] = v
         eng._g_cache = {"pc1": 0.0, "pos_manifold": 0.0,
                         "mean_r": 0.0, "lambda_ratio": 1.0, "n": 0}
         # one source of truth for all derived runtime state
@@ -405,6 +431,65 @@ class GameServer:
         with self._lock:
             a = self.find_nxer_by_name(name)
             return self.engine.export_model_for(a) if a else None
+
+    def get_family(self, name):
+        """Return the lineage view for an owned NxEr: parents (if any)
+        plus the direct offspring. Used by /api/mynxer/family. Does
+        NOT include grand-children — the spec is one generation +
+        click-through, not a full tree dump."""
+        with self._lock:
+            a = self.find_nxer_by_name(name)
+            if not a:
+                return None
+            def _mini(nid):
+                o = self.engine.nxers.get(nid)
+                return {
+                    "id": nid,
+                    "name": o.name if o else
+                            self.engine._nxer_names.get(nid, "?"),
+                    "alive": bool(o and o.alive),
+                    "managed": bool(o and o.is_managed),
+                    "born_tick": getattr(o, "born_tick", None),
+                }
+            parents = [_mini(pid) for pid in (a.parents or [])
+                       if pid is not None]
+            children = [_mini(cid) for cid in (a.offspring_ids or [])]
+            return {
+                "self": {"id": a.id, "name": a.name, "alive": a.alive,
+                         "born_tick": getattr(a, "born_tick", None)},
+                "parents": parents,
+                "children": children,
+                # true while the owner's NxEr is alive — the client
+                # uses this to grey out child-inspection if it died.
+                "can_inspect_children": bool(a.alive),
+            }
+
+    def get_child_view(self, parent_name, child_name):
+        """Return the owner-style view of a CHILD of `parent_name`.
+        Returns:
+          ("ok", view_dict)            on success
+          ("parent_dead", None)        if the original is no longer alive
+          ("not_a_child", None)        if name is not in offspring_ids
+          ("not_found", None)          if either NxEr is missing
+        """
+        with self._lock:
+            parent = self.find_nxer_by_name(parent_name)
+            if not parent:
+                return "not_found", None
+            if not parent.alive:
+                return "parent_dead", None
+            child = self.find_nxer_by_name(child_name)
+            if not child:
+                return "not_found", None
+            if child.id not in (parent.offspring_ids or []):
+                return "not_a_child", None
+            d = child.owner_view()
+            try:
+                d["ranks"] = self.engine.rank_of(child)
+                d["brain_building"] = self.engine._brain_building(child)
+            except Exception:
+                d["ranks"] = {}
+            return "ok", d
 
     def register_nxer(self, overrides, password_hash, owner_token):
         # Decouple create-latency from the (possibly slow) step: the

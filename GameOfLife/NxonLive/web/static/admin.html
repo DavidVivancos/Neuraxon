@@ -50,6 +50,16 @@
   </div>
 
   <div class="card">
+    <div class="sec">Lifetime totals (since first boot — persisted across reboots)</div>
+    <div class="grid" id="lt1"></div>
+    <div class="grid" id="lt2" style="margin-top:10px"></div>
+    <div class="grid" id="lt3" style="margin-top:10px"></div>
+    <div class="sub" style="margin-top:8px;color:#7d88a8">
+      Reset only by deleting <code>state/snapshot.json</code> and the <code>.prev</code> file on disk.
+    </div>
+  </div>
+
+  <div class="card">
     <div class="sec">Configuration (editable)</div>
     <table id="cfg"></table>
     <button onclick="saveCfg()">💾 Apply config</button>
@@ -78,6 +88,8 @@ async function login(){
   if(t.s!==200){ $('lmsg').innerHTML='<div class="msg err">load failed (HTTP '+t.s+'): '+(t.j.error||'')+'</div>'; return; }
   $('loginCard').classList.add('hide'); $('app').classList.remove('hide');
   render(t.j);
+  try{ const st=await post('/api/admin/stats',{token:TOK});
+       if(st.s===200) renderStats(st.j); }catch(e){}
   if(POLL) clearInterval(POLL);
   POLL=setInterval(tick,3000);
 }
@@ -113,6 +125,45 @@ async function tick(){
     return;
   }
   render(j);
+  // lifetime totals — best effort; don't break the page if it fails
+  try{
+    const st=await post('/api/admin/stats',{token:TOK});
+    if(st.s===200) renderStats(st.j);
+  }catch(e){}
+}
+function fmt(n){
+  if(typeof n!=='number') return n;
+  if(n>=1e9) return (n/1e9).toFixed(2)+'B';
+  if(n>=1e6) return (n/1e6).toFixed(2)+'M';
+  if(n>=1e3) return (n/1e3).toFixed(1)+'k';
+  return n.toLocaleString();
+}
+function fmtDur(sec){
+  sec=Math.floor(sec||0);
+  const d=Math.floor(sec/86400), h=Math.floor((sec%86400)/3600),
+        m=Math.floor((sec%3600)/60);
+  return (d?d+'d ':'')+(h||d?h+'h ':'')+m+'m';
+}
+function renderStats(j){
+  const L=j.lifetime||{}, C=j.current||{}, D=j.derived||{};
+  $('lt1').innerHTML=[
+    ['Total NxErs ever',fmt(L.total_spawns)],
+    ['Managed registrations',fmt(L.total_managed_registrations)],
+    ['Total deaths',fmt(L.total_deaths)],
+  ].map(([k,v])=>`<div class="kv"><span>${k}</span><b>${v}</b></div>`).join('');
+  $('lt2').innerHTML=[
+    ['Births via mating',fmt(L.total_births_mating)],
+    ['Total matings',fmt(L.total_matings)],
+    ['Total food eaten',fmt(L.total_food_eaten)],
+  ].map(([k,v])=>`<div class="kv"><span>${k}</span><b>${v}</b></div>`).join('');
+  $('lt3').innerHTML=[
+    ['Peak alive',fmt(L.peak_alive)],
+    ['Peak managed',fmt(L.peak_managed)],
+    ['Total ticks',fmt(L.total_ticks)],
+    ['Uptime',fmtDur(L.uptime_seconds)],
+    ['Avg lifespan (ticks)',fmt(D.avg_lifespan_ticks)],
+    ['% births via mating',((D.share_births_via_mating||0)*100).toFixed(1)+'%'],
+  ].map(([k,v])=>`<div class="kv"><span>${k}</span><b>${v}</b></div>`).join('');
 }
 async function saveCfg(){
   const patch={}; EDITABLE.forEach(k=>{const e=$('cf-'+k); if(e){const n=+e.value; patch[k]=isNaN(n)?e.value:n;}});

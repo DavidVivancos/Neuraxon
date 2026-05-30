@@ -91,6 +91,15 @@ class App:
         return self._no_cache(web.FileResponse(
             os.path.join(STATIC, "admin.html")))
 
+    async def builder_page(self, req):
+        """Serve the trimmed MultiNx2Builder — Advanced Neuraxon
+        model design opened in a separate window from the Create form.
+        Fixed to the chc6 topology (auto-loads the prefrontal preset)
+        with a 'Save for GoL Life' button that exports a JSON the
+        client's Load button accepts."""
+        return self._no_cache(web.FileResponse(
+            os.path.join(STATIC, "builder.html")))
+
     async def _hidden_404(self, req):
         """When admin_path is customised, the default /admin URL must
         not reveal the panel — return a generic 404 page so scanners
@@ -235,6 +244,33 @@ class App:
             return web.json_response({"error": "not found"}, status=404)
         return web.json_response(view)
 
+    async def api_mynxer_family(self, req):
+        """Direct-lineage view (parents + children) for an owned
+        NxEr. Names are publicly addressable already (api_mynxer);
+        the family endpoint follows the same model — knowing the
+        name is the gate."""
+        name = sanitize(req.query.get("name", ""), 16)
+        fam = self.gs.get_family(name)
+        if fam is None:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response(fam)
+
+    async def api_mynxer_child(self, req):
+        """Inspect ONE child of an owned NxEr. Server enforces the
+        rule from the spec: only allowed while the parent is alive.
+        That makes ancestry browsing a privilege of the surviving
+        original NxEr — once it dies, the line is sealed."""
+        parent = sanitize(req.query.get("name", ""), 16)
+        child  = sanitize(req.query.get("child", ""), 16)
+        status, view = self.gs.get_child_view(parent, child)
+        if status == "ok":
+            return web.json_response(view)
+        codes = {"parent_dead": 410, "not_a_child": 403,
+                 "not_found":   404}
+        return web.json_response(
+            {"error": status.replace("_", " ")},
+            status=codes.get(status, 400))
+
     async def api_export(self, req):
         name = sanitize(req.query.get("name", ""), 16)
         model = self.gs.export_nxer(name)
@@ -302,6 +338,54 @@ class App:
                                      status=403)
         self.gs.reboot()
         return web.json_response({"ok": True})
+
+    async def api_admin_stats(self, req):
+        """All-time / lifetime counters plus current snapshot —
+        designed to be useful for days-long sessions. Updates uptime
+        on every call so the admin page always shows fresh totals."""
+        d = await self._json(req)
+        if not self._is_admin(d):
+            return web.json_response({"error": "unauthorized"},
+                                     status=403)
+        eng = self.gs.engine
+        # refresh uptime
+        import time as _t
+        now = _t.time()
+        eng.lifetime["uptime_seconds"] += max(0.0,
+            now - eng._uptime_t0)
+        eng._uptime_t0 = now
+        # current snapshot of the live world
+        alive_total = sum(1 for a in eng.nxers.values() if a.alive)
+        alive_managed = sum(1 for a in eng.nxers.values()
+                            if a.alive and a.is_managed)
+        # average lifespan among the dead we still have records for
+        dead_with_age = [
+            (eng.tick - a.born_tick) if hasattr(a, "born_tick") else 0
+            for a in eng.nxers.values()
+            if not a.alive and getattr(a, "born_tick", None) is not None
+        ]
+        avg_lifespan_ticks = (sum(dead_with_age) / len(dead_with_age)
+                              if dead_with_age else 0.0)
+        # mating efficiency (births per spawn) is a useful long-run
+        # indicator of population health
+        ts = eng.lifetime["total_spawns"] or 1
+        mating_share = eng.lifetime["total_births_mating"] / ts
+        return web.json_response({
+            "lifetime": eng.lifetime,
+            "current": {
+                "tick": eng.tick,
+                "alive_total": alive_total,
+                "alive_managed": alive_managed,
+                "tracked": len(eng.nxers),    # alive + dead in pool
+                "foods_on_map": len(eng.foods),
+            },
+            "derived": {
+                "avg_lifespan_ticks": round(avg_lifespan_ticks, 1),
+                "share_births_via_mating": round(mating_share, 3),
+                "uptime_hours": round(
+                    eng.lifetime["uptime_seconds"] / 3600.0, 2),
+            },
+        })
 
     # ---- god --------------------------------------------------------
     async def api_god_login(self, req):
@@ -372,6 +456,7 @@ class App:
         admin_route = "/" + (admin_path or "admin")
         routes = [
             web.get("/", self.index),
+            web.get("/static/builder.html", self.builder_page),
             web.get(admin_route, self.admin_page),
             web.get("/ws", self.ws),
             web.get("/api/world", self.api_world),
@@ -380,11 +465,14 @@ class App:
             web.post("/api/session", self.api_session),
             web.post("/api/login", self.api_login),
             web.get("/api/mynxer", self.api_mynxer),
+            web.get("/api/mynxer/family", self.api_mynxer_family),
+            web.get("/api/mynxer/child",  self.api_mynxer_child),
             web.get("/api/export", self.api_export),
             web.post("/api/admin/login", self.api_admin_login),
             web.post("/api/admin/load", self.api_admin_load),
             web.post("/api/admin/config", self.api_admin_config),
             web.post("/api/admin/reboot", self.api_admin_reboot),
+            web.post("/api/admin/stats", self.api_admin_stats),
             web.post("/api/god/login", self.api_god_login),
             web.post("/api/god/inspect", self.api_god_inspect),
         ]

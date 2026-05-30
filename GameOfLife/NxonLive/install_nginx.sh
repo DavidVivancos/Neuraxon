@@ -38,7 +38,7 @@ if [ -z "$HOST" ]; then
     cat >&2 <<EOF
 "canonical_host" is empty in $CONFIG.
 Set it first, e.g.:
-    "canonical_host": "yourserver.com",
+    "canonical_host": "nxon.online",
     "force_https":    true,
 then re-run this script.
 EOF

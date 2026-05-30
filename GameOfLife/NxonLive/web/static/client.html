@@ -59,7 +59,7 @@
 <canvas id="cv"></canvas>
 
 <div class="panel hide" id="left">
-  <h1>🧠 Neuraxon GoL Live — v 1.035</h1>
+  <h1>🧠 Neuraxon GoL Live — v 1.048</h1>
   <div class="credits"><strong>By <a href="https://vivancos.com/" target="_blank">David Vivancos</a> & <a href="https://josesanchezgarcia.com/" target="_blank">Jose Sanchez</a></strong></div>
   <div class="credits"><strong>for <a href="https://qubic.org/" target="_blank">Qubic</a> Science</strong></div>
   <div class="sub" id="conn">connecting…</div>
@@ -84,6 +84,12 @@
     <div class="sub">Every brain is the <b>CHC g-capable 6-sphere</b> architecture (not selectable &mdash; required for g). Tune it with the sliders below; the server validates every value. The server assigns a unique name <b>and a 4-character password</b> &mdash; shown once after creation so you can save it.</div>
     <div id="sliders"></div>
     <button class="gold" onclick="doRegister()">Create NxEr</button>
+    <div style="display:flex;gap:6px;margin-top:6px">
+      <button style="flex:1" onclick="saveModelJson()" title="Download current slider settings as a JSON model file you can re-load later">💾 Save</button>
+      <button style="flex:1" onclick="document.getElementById('modelin').click()" title="Load a previously saved JSON model into the sliders. The model is validated before any field is changed.">📥 Load</button>
+      <button style="flex:1" onclick="openBuilder()" title="Open the Advanced Builder in a new window — a trimmed MultiNx2Builder fixed to the chc6 topology with tunable per-sphere parameters">🧠 Builder</button>
+    </div>
+    <input id="modelin" type="file" accept=".json,application/json" style="display:none" onchange="loadModelJson(this)">
     <div id="r-msg"></div>
   </div>
 
@@ -103,6 +109,10 @@
       <div id="m-stats"></div>
       <div class="sec">My ranks</div>
       <div id="m-ranks"></div>
+      <div class="sec" id="fam-sec" style="display:none">Family</div>
+      <div id="m-family" style="display:none"></div>
+      <div id="m-childview" style="display:none;margin-top:8px;
+           border-top:1px solid #26304a;padding-top:8px"></div>
     </div>
   </div>
 </div>
@@ -148,7 +158,15 @@ webgl.setSize(innerWidth,innerHeight);
 webgl.setPixelRatio(Math.min(devicePixelRatio,2));
 webgl.toneMapping=THREE.ACESFilmicToneMapping;
 webgl.toneMappingExposure=1.2;
-const composer=new EffectComposer(webgl);
+// EffectComposer renders into its OWN render target — which bypasses
+// the WebGLRenderer's native MSAA. That's why facet/coast edges look
+// aliased when the planet shrinks at long zoom-out. A multisample
+// render target gives the post-processed scene proper AA. capped at
+// 4 samples to stay safe across GPUs (older drivers reject 8+).
+const _aaTgt=new THREE.WebGLRenderTarget(innerWidth,innerHeight,{
+  samples: Math.min(4, webgl.capabilities.maxSamples||0)
+});
+const composer=new EffectComposer(webgl,_aaTgt);
 composer.addPass(new RenderPass(scene,camera));
 const bloom=new UnrealBloomPass(new THREE.Vector2(innerWidth,innerHeight),0.8,0.45,0.85);
 composer.addPass(bloom);
@@ -167,6 +185,12 @@ const sunMesh=new THREE.Mesh(new THREE.SphereGeometry(8,32,32),
 sunMesh.position.set(200,50,0);scene.add(sunMesh);
 
 let planetRadius=30,terrainMesh=null,core=null,atmo=null;
+// Everything that should track planet size lives here. Defaults are
+// the hardcoded values used historically (calibrated for ~N=300
+// worlds). buildPlanet() recomputes them so big worlds get visibly
+// tall cliffs, visible entities, and a visible sun.
+const Scale={land:0.3,rock:1.0,hover:0.35,entity:0.35,food:0.4,
+             evt:1.0,sun:8};
 const nxerMeshes=new Map(),foodMeshes=new Map();
 const FX=[];
 const babyTex=makeEmoji('👶');
@@ -201,8 +225,31 @@ function terrAt(x,y){
 function buildPlanet(){
   const N=TERRAIN.size;
   planetRadius=(N*0.8)/2;
-  [core,atmo,terrainMesh].forEach(m=>{if(m){scene.remove(m);m.geometry.dispose();}});
-  core=new THREE.Mesh(new THREE.SphereGeometry(planetRadius,48,48),
+  // Recompute size-dependent constants. Each value uses max(legacy,
+  // proportional) so SMALL worlds keep their look while big worlds
+  // get cliffs/mountains/entities that are actually visible.
+  Scale.land  = Math.max(0.3,  planetRadius*0.004);
+  Scale.rock  = Math.max(1.0,  planetRadius*0.012);
+  Scale.hover = Math.max(0.35, planetRadius*0.005);
+  Scale.entity= Math.max(0.35, planetRadius*0.0035);
+  Scale.food  = Math.max(0.4,  planetRadius*0.0040);
+  Scale.evt   = Math.max(1.0,  planetRadius*0.012);
+  Scale.sun   = Math.max(8,    planetRadius*0.08);
+  [core,atmo,terrainMesh].forEach(m=>{
+    if(!m)return;
+    scene.remove(m);
+    m.geometry.dispose();
+    if(m.material){
+      if(m.material.map)m.material.map.dispose();
+      m.material.dispose();
+    }
+  });
+  // Core sits ~2% INSIDE the terrain shell so it never z-fights with
+  // the sea vertices at planetRadius. Equal radii produced random
+  // depth-buffer flicker that read as blue dots scattered inside
+  // continents on long zoom-outs (depth precision is worst at
+  // distance). 0.97× gives enough headroom for very large worlds.
+  core=new THREE.Mesh(new THREE.SphereGeometry(planetRadius*0.97,48,48),
         new THREE.MeshStandardMaterial({color:0x1964c8,roughness:0.2,metalness:0.1}));
   scene.add(core);
   atmo=new THREE.Mesh(new THREE.SphereGeometry(planetRadius*1.06,48,48),
@@ -212,11 +259,14 @@ function buildPlanet(){
           fragmentShader:'uniform vec3 c;varying vec3 n;void main(){float i=pow(0.72-dot(n,vec3(0.,0.,1.)),2.0);gl_FragColor=vec4(c,i*0.45);}',
           side:THREE.BackSide,blending:THREE.AdditiveBlending,transparent:true}));
   scene.add(atmo);
-  // tessellation scaled to world size so coastlines render crisply
-  // and an NxEr visibly sits on the SAME terrain it is on in the
-  // sim. (Fixed detail 38 made small worlds blocky and big worlds
-  // blurry, so entities looked stranded on the wrong terrain colour.)
-  const _det=Math.max(28,Math.min(96,Math.round(N*0.9)));
+  // Restored: icosahedron sphere with per-vertex sampling +
+  // displacement. The textured-smooth-sphere experiment killed the
+  // 3D relief that gave the world its "voxel planet" look (visible
+  // step cliffs at coasts, raised mountains). Per-vertex colour
+  // sampling also reads coastline pixels exactly without the
+  // filtering blur a texture-mapped sphere introduced.
+  // Detail cap bumped 240→300 so close-up faces stay small.
+  const _det=Math.max(28,Math.min(300,Math.round(N*1.0)));
   const geo=new THREE.IcosahedronGeometry(planetRadius,_det);
   const pos=geo.attributes.position,cnt=pos.count;
   const col=new THREE.BufferAttribute(new Float32Array(cnt*3),3);
@@ -224,26 +274,61 @@ function buildPlanet(){
   for(let i=0;i<cnt;i++){
     v.fromBufferAttribute(pos,i);
     const nrm=v.clone().normalize();
+    // Same sampling as getSpherePos's inverse — keeps NxErs / food
+    // exactly over the terrain colour painted at their cell.
     let phi=Math.atan2(v.z,v.x);if(phi<0)phi+=Math.PI*2;
     const u=1.0-(phi/(Math.PI*2));
     const theta=Math.acos(Math.max(-1,Math.min(1,v.y/planetRadius)));
     const vv=theta/Math.PI;
     const gx=Math.floor(((u+0.25)%1.0)*N)%N,gy=Math.floor(vv*N)%N;
     const ch=terrAt(gx,gy);
-    let h=-0.1;
-    if(ch===','){h=0.3;color.setHex(0x28b43c);}
-    else if(ch==='#'){h=1.0;color.setHex(0x6e6e6e);}
+    let h=0;
+    if(ch===','){h=Scale.land; color.setHex(0x28b43c);}
+    else if(ch==='#'){h=Scale.rock; color.setHex(0x6e6e6e);}
     else{color.setHex(0x1964c8);}
     v.copy(nrm).multiplyScalar(planetRadius+h);
     pos.setXYZ(i,v.x,v.y,v.z);
     col.setXYZ(i,color.r,color.g,color.b);
   }
-  geo.setAttribute('color',col);geo.computeVertexNormals();
+  geo.setAttribute('color',col);
+  // computeVertexNormals reads the DISPLACED geometry, so vertices
+  // at the foot of a cliff (sea h=0 next to land h=+0.3, or land
+  // next to rock h=+1.0) get tilted normals — the directional sun
+  // catches those tilts and you see the 3D relief on close zoom.
+  // (v1.039 had switched to flat radial normals to kill a speckle
+  // pattern at long zoom-out; that fix also killed the relief
+  // shading the user actually wants. Speckle pre-empted by recent
+  // detail-cap + MSAA improvements; if it returns we'll address it
+  // differently than by flattening normals.)
+  geo.computeVertexNormals();
   terrainMesh=new THREE.Mesh(geo,new THREE.MeshStandardMaterial({vertexColors:true,roughness:0.85}));
   scene.add(terrainMesh);
   controls.target.set(0,0,0);
-  controls.minDistance=planetRadius*1.25;
+  // Camera limits scale with world size. minDistance previously
+  // forced the camera 25% of a radius above the surface, which was
+  // very far on big worlds (N=1000 → 100 units above) — now 1.03×
+  // lets you fly right above the terrain to inspect individual
+  // NxErs. maxDistance kept at 5× so the whole planet is framed.
+  controls.minDistance=planetRadius*1.03;
   controls.maxDistance=planetRadius*5;
+  // sun disc scaled per planet so it's still visible from far away
+  if(sunMesh) sunMesh.scale.setScalar(Scale.sun/8);
+  // far clip plane must comfortably exceed (maxDistance + radius)
+  // or the back side of the planet gets culled at full zoom-out on
+  // huge worlds. Hardcoded 4000 was fine for N≤~1200; auto-scale
+  // covers any size.
+  const wantFar=Math.max(4000,planetRadius*8);
+  if(camera.far!==wantFar){camera.far=wantFar;camera.updateProjectionMatrix();}
+  // Fog must scale with the planet too. The original 400/1600
+  // hardcoded distances were calibrated for ~N=120 worlds; on N≥800
+  // the planet sat INSIDE the fog (start 400 < radius=320 + camera
+  // dist) so zooming out darkened the entire earth toward the fog
+  // colour. Scale fog so it only ever attenuates the deep starfield
+  // background, never the planet at any reachable zoom.
+  if(scene.fog){
+    scene.fog.near=planetRadius*8;
+    scene.fog.far =planetRadius*30;
+  }
   camera.position.set(0,planetRadius*0.6,planetRadius*2.6);
   $('loader').classList.add('hide');
   $('left').classList.remove('hide');$('rank').classList.remove('hide');
@@ -255,20 +340,21 @@ function syncEntities(){
   for(const[id,m]of nxerMeshes){if(!liveIds.has(id)){scene.remove(m);nxerMeshes.delete(id);}}
   for(const a of SNAP.nxers){
     const ch=terrAt(a.x,a.y);
-    const hOff=ch===','?0.3:ch==='#'?1.0:0.0;
-    const p=getSpherePos(a.x,a.y,N,planetRadius+hOff+0.35);
+    const hOff=ch===','?Scale.land:ch==='#'?Scale.rock:0.0;
+    const p=getSpherePos(a.x,a.y,N,planetRadius+hOff+Scale.hover);
     let m=nxerMeshes.get(a.id);
     const mine=(a.name===MY);
     if(!m){
-      // Lite NxEr: SphereGeometry(0.35,12,12), server-assigned
+      // Lite NxEr: SphereGeometry(Scale.entity,12,12), server-assigned
       // rgb() colour (identical on every client + matches Lite),
       // emissive same colour, + a red energy torus.
       const base=new THREE.Color(a.c||'rgb(200,200,200)');
-      m=new THREE.Mesh(new THREE.SphereGeometry(0.35,12,12),
+      m=new THREE.Mesh(new THREE.SphereGeometry(Scale.entity,12,12),
         new THREE.MeshStandardMaterial({color:base.clone(),
           emissive:base.clone(),emissiveIntensity:0.15,
           roughness:0.4,metalness:0.3}));
-      const ring=new THREE.Mesh(new THREE.TorusGeometry(0.5,0.04,8,24),
+      const ring=new THREE.Mesh(
+        new THREE.TorusGeometry(Scale.entity*1.43,Scale.entity*0.114,8,24),
         new THREE.MeshBasicMaterial({color:0xff3333,transparent:true,opacity:0.8}));
       ring.rotation.x=Math.PI/2;m.add(ring);m.userData.ring=ring;
       m.userData.baby=null;m.userData.sing=null;
@@ -302,12 +388,16 @@ function syncEntities(){
     // 🎵 over a singing NxEr (server `s` flag)
     if(a.s&&!m.userData.sing){
       const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:noteTex,depthTest:false}));
-      sp.scale.set(0.9,0.9,0.9);sp.position.set(0,0.85,0);m.add(sp);m.userData.sing=sp;
+      const ss=Scale.entity*2.57;
+      sp.scale.set(ss,ss,ss);sp.position.set(0,Scale.entity*2.43,0);
+      m.add(sp);m.userData.sing=sp;
     }else if(!a.s&&m.userData.sing){m.remove(m.userData.sing);m.userData.sing=null;}
     const isMyChild=MY&&MY_OFFSPRING.has(a.id);
     if(isMyChild&&!m.userData.baby){
       const sb=new THREE.Sprite(new THREE.SpriteMaterial({map:babyTex,depthTest:false}));
-      sb.scale.set(0.9,0.9,0.9);sb.position.set(0,-0.85,0);m.add(sb);m.userData.baby=sb;
+      const ss=Scale.entity*2.57;
+      sb.scale.set(ss,ss,ss);sb.position.set(0,-Scale.entity*2.43,0);
+      m.add(sb);m.userData.baby=sb;
     }else if(!isMyChild&&m.userData.baby){m.remove(m.userData.baby);m.userData.baby=null;}
     m.position.lerp(p,0.35);
   }
@@ -315,12 +405,16 @@ function syncEntities(){
   for(const[id,m]of foodMeshes){if(!fids.has(id)){scene.remove(m);foodMeshes.delete(id);}}
   SNAP.foods.forEach((f,i)=>{
     let m=foodMeshes.get(i);
-    if(!m){m=new THREE.Mesh(new THREE.OctahedronGeometry(0.4,0),
+    if(!m){m=new THREE.Mesh(new THREE.OctahedronGeometry(Scale.food,0),
       new THREE.MeshStandardMaterial({color:0xff4444,emissive:0xff2200,
         emissiveIntensity:0.35,roughness:0.3,metalness:0.5}));
       m.rotation.set(0.4,0.4,0);     // fixed pose, never animated
       scene.add(m);foodMeshes.set(i,m);}
-    m.position.copy(getSpherePos(f.x,f.y,N,planetRadius+0.45));
+    // place a touch above terrain elevation at this cell so it
+    // doesn't sink into mountains on big worlds
+    const fch=terrAt(f.x,f.y);
+    const fhOff=fch===','?Scale.land:fch==='#'?Scale.rock:0.0;
+    m.position.copy(getSpherePos(f.x,f.y,N,planetRadius+fhOff+Scale.food*1.1));
   });
   // event emojis (Lite vocabulary): mate=❤️, death=💀, birth=🥚
   if(SNAP.events&&SNAP.events.length&&SNAP.tick!==FX._lastTick){
@@ -330,8 +424,9 @@ function syncEntities(){
       const tex=EMO[e.k];if(!tex)continue;
       const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,
         depthTest:false,transparent:true}));
-      sp.scale.set(1.4,1.4,1.4);
-      const p=getSpherePos(e.x,e.y,N,planetRadius+1.0);
+      const es=Scale.evt*1.4;
+      sp.scale.set(es,es,es);
+      const p=getSpherePos(e.x,e.y,N,planetRadius+Scale.evt);
       sp.position.copy(p);sp.userData.born=performance.now();
       sp.userData.dir=p.clone().normalize();
       scene.add(sp);FX.push(sp);
@@ -354,6 +449,16 @@ addEventListener('resize',()=>{
 const _dayCol=new THREE.Color(0x0a1430), _nightCol=new THREE.Color(0x040509);
 function loop(){
   requestAnimationFrame(loop);
+  // Rotation speed should fall with zoom-in (otherwise a drag flings
+  // you across the planet because OrbitControls orbits the CENTRE),
+  // but not all the way to zero or it feels stuck. Use a sqrt curve
+  // so close-zoom is responsive but not runaway. Floor 0.25 keeps a
+  // good base feel at max zoom; ceil 1.0 caps at default at far zoom.
+  if(planetRadius){
+    const t=Math.min(1.0,(camera.position.length()-planetRadius)
+                         /planetRadius);
+    controls.rotateSpeed=Math.max(0.25,Math.min(1.0,Math.sqrt(Math.max(0,t))));
+  }
   controls.update();
   if(terrainMesh)syncEntities();
   // day/night cycle from the server tick (same phase the brains sense)
@@ -642,6 +747,121 @@ window.closeModal=()=>{
   tab('login');                 // jump to the My-NxEr detail screen
   locate();
 };
+
+// --- Save / Load / Advanced Builder ---------------------------------
+// A model JSON captures the slider state plus a small header. The
+// Load button validates BEFORE touching any field, so a bad upload
+// can never half-fill the form.
+const MODEL_VERSION='mngol5-1.0';
+const MODEL_TOPOLOGY='chc6';
+function _currentParams(){
+  if(!PARAMS||!PARAMS.params) return null;
+  const out={};
+  for(const p of PARAMS.params){
+    const el=$('p-'+p.key); if(!el) continue;
+    out[p.key]=p.type==='bool'?(el.checked?1:0):(+el.value);
+  }
+  return out;
+}
+window.saveModelJson=function(){
+  const params=_currentParams();
+  if(!params) return note('r-msg','slider spec not loaded yet',0);
+  const blob={version:MODEL_VERSION,topology:MODEL_TOPOLOGY,
+              created:new Date().toISOString(),params};
+  const b=new Blob([JSON.stringify(blob,null,2)],{type:'application/json'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(b);
+  a.download='neuraxon_model_'+Date.now()+'.json';
+  a.click();
+  note('r-msg','✅ Saved model JSON',1);
+};
+function _validateModel(j){
+  // Accept (a) our own save format, OR (b) a server-export
+  // {name,params,brain,stats}, OR (c) the advanced builder's mngol5
+  // export. In every case we need a `params` dict whose keys are a
+  // SUBSET of the server's USER_TUNABLE schema, and whose values are
+  // numbers / bools inside the declared min/max range.
+  if(!j||typeof j!=='object') return 'not a JSON object';
+  if(!j.params||typeof j.params!=='object') return 'missing "params" object';
+  if(!PARAMS||!PARAMS.params) return 'slider schema not loaded yet — try again';
+  const known=new Map(PARAMS.params.map(p=>[p.key,p]));
+  for(const [k,v] of Object.entries(j.params)){
+    const spec=known.get(k);
+    if(!spec) return 'unknown parameter "'+k+'"';
+    if(spec.type==='bool'){
+      if(v!==0&&v!==1&&v!==true&&v!==false) return '"'+k+'" must be 0/1/true/false';
+    }else{
+      const n=+v;
+      if(!isFinite(n)) return '"'+k+'" must be a number';
+      if(n<spec.min||n>spec.max) return '"'+k+'" out of range ['+spec.min+'..'+spec.max+']';
+    }
+  }
+  if(j.topology&&j.topology!==MODEL_TOPOLOGY)
+    return 'topology "'+j.topology+'" is not supported (only chc6)';
+  return null;            // valid
+}
+window.loadModelJson=async function(input){
+  const f=input.files&&input.files[0]; input.value='';
+  if(!f) return;
+  let txt; try{ txt=await f.text(); }catch(e){ return note('r-msg','could not read file',0); }
+  let j;   try{ j=JSON.parse(txt); }catch(e){ return note('r-msg','invalid JSON: '+e.message,0); }
+  const err=_validateModel(j);
+  if(err) return note('r-msg','❌ '+err,0);
+  // Apply only AFTER validation. Unspecified sliders keep their
+  // current value (so partial models still work).
+  let n=0;
+  for(const [k,v] of Object.entries(j.params)){
+    const el=$('p-'+k); const spec=PARAMS.params.find(p=>p.key===k); if(!el||!spec)continue;
+    if(spec.type==='bool'){ el.checked=!!v; }
+    else{
+      el.value=v;
+      const lab=$('pv-'+k); if(lab) lab.textContent=(+v).toFixed(spec.type==='int'?0:3);
+    }
+    n++;
+  }
+  note('r-msg','✅ Loaded '+n+' parameters from '+f.name+'. Review the sliders, then Create NxEr.',1);
+};
+window.openBuilder=function(){
+  // Open the trimmed Advanced Builder in a new window. It loads with
+  // the chc6 topology pre-applied and a "Save for Neuraxon Life"
+  // button that produces the JSON the Load button consumes.
+  const w=window.open('/static/builder.html','nxBuilder',
+    'width=1280,height=800,menubar=no,toolbar=no');
+  if(!w) note('r-msg','popup blocked — allow popups for this site',0);
+};
+// Receive a model directly from the Advanced Builder window (via
+// postMessage). The builder also downloads a copy of the JSON; this
+// path spares the user from re-uploading their own file AND skips
+// the manual "Create NxEr" click — the message hands off the full
+// brain spec, so we apply it and trigger creation immediately.
+addEventListener('message', ev=>{
+  if(ev.origin!==window.location.origin) return;
+  const d=ev.data;
+  if(!d||d.type!=='mngol5-model'||!d.model) return;
+  const err=_validateModel(d.model);
+  if(err){ note('r-msg','❌ from Builder: '+err, 0); return; }
+  try{ tab('reg'); }catch(e){}
+  let n=0;
+  for(const [k,v] of Object.entries(d.model.params||{})){
+    const el=$('p-'+k); const spec=PARAMS.params.find(p=>p.key===k);
+    if(!el||!spec) continue;
+    if(spec.type==='bool'){ el.checked=!!v; }
+    else{
+      el.value=v;
+      const lab=$('pv-'+k); if(lab) lab.textContent=(+v).toFixed(spec.type==='int'?0:3);
+    }
+    n++;
+  }
+  // Auto-Create the NxEr — that's the full hand-off from the
+  // builder. The user already chose every parameter in the builder
+  // window; no reason to make them click Create again here.
+  note('r-msg','📥 '+n+' params from Builder — creating NxEr…',1);
+  // tiny delay so the message paints before doRegister updates it
+  setTimeout(()=>{ try{ doRegister(); }catch(e){
+    note('r-msg','❌ auto-create failed: '+e.message,0);
+  }}, 150);
+});
+
 function setRegEnabled(on){
   const b=document.getElementById('btn-reg');
   if(b){b.disabled=!on;b.style.opacity=on?'1':'0.4';b.style.cursor=on?'pointer':'not-allowed';}
@@ -707,7 +927,103 @@ async function refreshMine(){
   }
   $('m-ranks').innerHTML=h
     +(top5?'<div class="stat" style="margin-top:6px;color:#ffd24a"><span>★ on All-time board</span><b></b></div>':'');
+  // family — best effort, doesn't block the rest of the panel
+  refreshFamily().catch(()=>{});
 }
+let _FAM_SEL=null;   // currently inspected child name (one at a time)
+async function refreshFamily(){
+  if(!MY) return;
+  let fam;
+  try{
+    const r=await fetch('/api/mynxer/family?name='+encodeURIComponent(MY));
+    if(!r.ok) return;
+    fam=await r.json();
+  }catch(e){ return; }
+  const kids=fam.children||[], pars=fam.parents||[];
+  if(!kids.length && !pars.length){
+    $('fam-sec').style.display='none';
+    $('m-family').style.display='none';
+    $('m-childview').style.display='none';
+    return;
+  }
+  $('fam-sec').style.display='';
+  $('m-family').style.display='';
+  const live = fam.can_inspect_children;
+  let h='';
+  if(pars.length){
+    h+='<div style="font-size:10px;color:#9fb0d0;margin-bottom:2px">Parents</div>';
+    h+=pars.map(p=>`<div class="stat"><span>${p.name}</span><b style="color:${p.alive?'#7fe0a0':'#888'}">${p.alive?'alive':'died'}</b></div>`).join('');
+  }
+  if(kids.length){
+    h+='<div style="font-size:10px;color:#9fb0d0;margin:6px 0 2px">Children ('+kids.length+')'
+      +(live?'':' — your NxEr died, lineage sealed')+'</div>';
+    // sort: alive first, then by born_tick
+    kids.sort((a,b)=>(b.alive-a.alive)||((a.born_tick||0)-(b.born_tick||0)));
+    h+=kids.map(c=>{
+      const dead=!c.alive;
+      const sel=(_FAM_SEL===c.name);
+      const click=(live&&!dead)?`onclick="inspectChild('${c.name.replace(/'/g,"\\'")}')"`:'';
+      const cls=dead?'color:#888':(sel?'color:#ffd24a':'color:#7fe0a0');
+      return `<div class="stat" style="${click?'cursor:pointer;':''}" ${click}>
+        <span style="${cls}">${dead?'☠ ':''}${c.name}${c.managed?' ◆':''}</span>
+        <b style="${cls}">${dead?'died':(sel?'viewing ▶':'inspect')}</b></div>`;
+    }).join('');
+  }
+  $('m-family').innerHTML=h;
+  // If a child was being viewed but is gone / parent died, clear it.
+  if(_FAM_SEL && (!live || !kids.find(c=>c.name===_FAM_SEL && c.alive))){
+    _FAM_SEL=null; $('m-childview').style.display='none';
+    $('m-childview').innerHTML='';
+  } else if(_FAM_SEL){
+    inspectChild(_FAM_SEL,true);   // refresh selected child
+  }
+}
+window.inspectChild=async function(name, silent){
+  if(!MY) return;
+  _FAM_SEL=name;
+  const cv=$('m-childview');
+  cv.style.display='';
+  if(!silent) cv.innerHTML='<div style="font-size:11px;color:#9fb0d0">loading '+name+'…</div>';
+  const r=await fetch('/api/mynxer/child?name='+encodeURIComponent(MY)
+                      +'&child='+encodeURIComponent(name));
+  if(r.status===410){ cv.innerHTML='<div class="msg err" style="font-size:10px">Your original NxEr died — lineage browsing is sealed.</div>'; _FAM_SEL=null; refreshFamily(); return; }
+  if(r.status===403){ cv.innerHTML='<div class="msg err" style="font-size:10px">Not one of your children.</div>'; _FAM_SEL=null; return; }
+  if(!r.ok){ cv.innerHTML='<div class="msg err" style="font-size:10px">Failed (HTTP '+r.status+').</div>'; return; }
+  const v=await r.json(), s=v.stats||{}, RK=v.ranks||{};
+  const ranksH=[['food_found','Food'],['food_taken','Stolen'],['explored','Explored'],['mates_performed','Mates'],['fitness','Fitness'],['g','g']]
+    .map(([k,lab])=>{const pos=RK[k];const txt=pos==null?'—':'#'+pos;
+       const cls=(pos===1)?'style="color:#ffd24a"':(pos&&pos<=5)?'style="color:#7fe0a0"':'';
+       return `<div class="stat"><span>${lab}</span><b ${cls}>${txt}</b></div>`;}).join('');
+  cv.innerHTML=
+    `<div style="font-size:11px;color:#ffd24a">▶ ${name} (child)
+       <span style="float:right;cursor:pointer;color:#7d88a8" onclick="closeChild()">✕</span></div>`
+    +Object.entries({'Alive':v.alive?'yes':'DIED','Food':v.food,'Energy':v.energy,
+        'Found':s.food_found,'Stolen':s.food_taken,'Explored':s.explored,'Lived':s.time_lived,
+        'Mates':s.mates_performed,'Fitness':s.fitness,'g':s.g})
+      .map(([k,x])=>`<div class="stat"><span>${k}</span><b>${x}</b></div>`).join('')
+    +'<div style="font-size:10px;color:#9fb0d0;margin:6px 0 2px">Their ranks</div>'+ranksH
+    +`<div class="row" style="margin-top:6px">
+        <button onclick="locateChild('${name.replace(/'/g,"\\'")}')">🎯 Locate</button>
+        <button onclick="exportChild('${name.replace(/'/g,"\\'")}')">💾 Save model</button>
+      </div>`;
+};
+window.closeChild=function(){ _FAM_SEL=null; $('m-childview').style.display='none'; $('m-childview').innerHTML=''; refreshFamily(); };
+window.locateChild=function(name){
+  if(!SNAP||!TERRAIN)return;
+  const n=SNAP.nxers.find(a=>a.name===name);if(!n)return;
+  const p=getSpherePos(n.x,n.y,TERRAIN.size,planetRadius*1.9);
+  camera.position.copy(p);controls.target.set(0,0,0);
+};
+window.exportChild=async function(name){
+  // The /api/export endpoint takes a name; access is gated only by
+  // knowing the name (same as the rest of the public-name design).
+  // We also verify on the server that the requesting parent is
+  // alive via the /api/mynxer/child check above before exposing
+  // the name in UI, so this is consistent.
+  const r=await fetch('/api/export?name='+encodeURIComponent(name));if(!r.ok)return;
+  const j=await r.json(),b=new Blob([JSON.stringify(j,null,2)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=name+'_model.json';a.click();
+};
 window.locate=function(){
   if(!SNAP||!MY||!TERRAIN)return;
   const n=SNAP.nxers.find(a=>a.name===MY);if(!n)return;
