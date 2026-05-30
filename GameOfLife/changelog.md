@@ -1,5 +1,8 @@
 # Neuraxon Game of Life Researh Version<br>
 CHANGE LOG:<br>
+May 30th 2026:<br>
+Multi Neuraxon Game of Life 5 — client / server ersion 5-v1.29 / GoL Server V 1.048 > Including Editor, Extend world map upto 1200x 2400 raw , + new brain base model based on latest Game Of Life research v192
+
 May 28th 2026:<br>
 First Release of Nxon Live = Nxon GoL Server + Client
 
