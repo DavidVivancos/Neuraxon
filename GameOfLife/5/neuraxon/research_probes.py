@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.5.0 research_probes (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 185
+# Neuraxon Game of Life v.5.05 research_probes (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 190
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   "Multi-Neuraxon: Emergent Specialization, Modular, Frequency-Gated Neural Dynamics" by David Vivancos & Jose Sanchez
@@ -50,12 +50,27 @@ PROBE_RNG_SEED_OFFSET: int = 7919        # determinism for probes
 SLIDING_WINDOW_TICKS: int = 200          # window for M3/M4/M6 sliding-window stats
 PAC_PHASE_BINS: int = 8                  # Tort 2010 modulation index — 8 bins is canonical
 ACW_HETEROGENEITY_FLOOR: float = 1e-6    # numerical guard
-HERITABILITY_MIN_PAIRS: int = 4          # v163 (v4.71) — was 8. Lowered after
-                                          # NAS analysis showed 0/585 trials at 600s
-                                          # ever produced 8+ parent-child pairs with
-                                          # measurable child fitness. 4 is enough for
-                                          # a Pearson r estimate with reasonable noise,
-                                          # and reliably triggers in trials >=300s.
+HERITABILITY_MIN_PAIRS: int = 8          # v187 (v5.02) — raised back to 8 from
+                                          # the v163 lowering to 4. The v186 8h
+                                          # live game showed 45% of M10 samples
+                                          # sitting at the placeholder 0.0
+                                          # (n_pairs<threshold) and the rest
+                                          # swinging from -0.99 to +0.997 between
+                                          # ticks as single births re-weighted
+                                          # the Pearson r over only 4-5 pairs.
+                                          # v163's "n=4 is enough" was correct
+                                          # for getting M10 to fire at all in
+                                          # short trials, but in multi-hour runs
+                                          # the small-sample noise dominates the
+                                          # display. 8 pairs gives noticeably
+                                          # more stable r values without making
+                                          # the metric unavailable — the v186
+                                          # live run had 30+ births so 8 pairs
+                                          # is reachable within ~the first hour.
+                                          # The fitness function uses M10_peak,
+                                          # not M10_last, so this change is for
+                                          # the live dashboard only — fitness
+                                          # selection is unaffected.
 LESION_BIN_THRESHOLDS = [0.25, 0.50, 0.75]   # neuron-loss bins for M10 graceful-degradation curve
 
 # Paper-derived healthy bands. Used for the "M*_in_band" boolean each tick

@@ -1,4 +1,4 @@
-"""Neuraxon Architecture Search (NAS) — v0.2 (Game of Life v5.0 / v185)
+"""Neuraxon Architecture Search (NAS) — v1.4 (Game of Life v5.10 / v195)
 
 Runs many small Game-of-Life trials in parallel (multiprocessing), each
 with a different architecture sampled from a search space. Each trial is
@@ -73,7 +73,51 @@ SEARCH_SPACE: Dict[str, Any] = {
     'neural.num_hidden_neurons_default':        ('int_uniform', 6, 24),
     'neural.connection_probability':            ('uniform', 0.15, 0.45),
     'neural.afferent_synapse_strength':         ('uniform', 0.6, 1.8),
-    'neural.firing_threshold_excitatory':       ('uniform', 0.40, 0.70),
+    # v195 (v5.10) — FLOOR lowered 0.40 → 0.32. The v194 8h NAS top
+    # architectures pressed against the old 0.40 floor (winners at
+    # thr_exc 0.42–0.49), i.e. the search WANTED lower excitatory
+    # thresholds to lift M1 but couldn't. 0.32 opens the higher-M1 region
+    # so excitation can stay near the paper's 0.22 even when a rest
+    # mechanism is active. The M1 tent (peak 0.22) still penalises the
+    # over-firing that very low thresholds would cause, so the search
+    # self-limits.
+    'neural.firing_threshold_excitatory':       ('uniform', 0.32, 0.70),
+    # v188 (v5.03) — firing_threshold_inhibitory enters the search space.
+    # Pre-v188 it was hardcoded at -0.55 across every architecture (and
+    # every NAS run). The v187 8h NAS data exposed the structural cost:
+    # with thr_exc searched in [0.40, 0.70] but |thr_inh| pinned at 0.55,
+    # the average architecture had thr_exc > |thr_inh|, so membrane drive
+    # distributed around 0 crossed the inhibitory threshold more easily
+    # than the excitatory one. After v187 loosened the brakes (and the
+    # network finally started firing), the trinary distribution inverted:
+    # state=-1 went from 0.5% (v186) to 22.3% (v187), state=+1 went from
+    # 7.6% to 0.5%. M1 (which only counts +1) couldn't climb because every
+    # spike was being routed to the wrong polarity.
+    #
+    # Range mirrors the excitatory threshold ([-0.70, -0.40] = the
+    # negative of [0.40, 0.70]) so the search can discover the symmetric
+    # configuration |thr_inh| ≈ thr_exc. Asymmetric configurations
+    # (intentional inhibitory bias for specific topologies) are still
+    # reachable — this just stops the search being FORCED into them.
+    # v195 (v5.10) — RANGE DEEPENED -0.70 → -1.20 (lower bound). v188's
+    # symmetric range ([-0.70, -0.40], mirroring thr_exc) was meant to let
+    # the search balance E/I, but the v194 8h NAS proved it insufficient:
+    # ALL 31 trials were still inhibition-dominant (inh > M1), median
+    # 0.195/0.172/0.550 (+1/0/-1). The cause is intrinsic — the network's
+    # recurrent dynamics bias membrane potential NEGATIVE, so even at the
+    # deepest available threshold (-0.70) negative excursions still cross
+    # into state=-1 rather than resting. corr(thr_inh, inh)=+0.34 in the
+    # v194 data confirms deeper thresholds reduce inhibition. To actually
+    # counter the bias the search needs ASYMMETRIC thresholds
+    # (|thr_inh| > thr_exc): a deep inhibitory threshold converts negative
+    # mp excursions into REST (state 0) instead of -1 firing — raising the
+    # rest band and lowering inhibition WITHOUT capping the firing rate
+    # (the way refractory/AHP do, which is why those stay capped at 5/0.5
+    # per v187). This is the primary lever for de-inverting the trinary
+    # distribution toward the paper's excitation-dominant 0.22/0.68/0.10.
+    # The inh tent (target 0.10, not 0) still penalises losing inhibition
+    # entirely, so the search finds the balance rather than thr_inh → -∞.
+    'neural.firing_threshold_inhibitory':       ('uniform', -1.20, -0.40),
     'neural.spontaneous_firing_rate':           ('loguniform', 0.005, 0.080),
     'neural.intrinsic_timescale_default':       ('uniform', 8.0, 30.0),
     'neural.resting_potential_decay':           ('uniform', 0.10, 0.35),
@@ -90,35 +134,84 @@ SEARCH_SPACE: Dict[str, Any] = {
     # v171 (v4.79) — refractory period after firing (state 0 buffer).
     # 0 = no refractory (v161-v170 behaviour). Higher values force more
     # time at state=0 between firings, restoring the paper's intended
-    # trinary dynamics. Range chosen to cover both "minimal" (1-3 ticks)
-    # and "substantial buffer" (8-12 ticks) regimes.
-    'neural.refractory_period_ticks':           ('int_uniform', 0, 12),
+    # trinary dynamics.
+    # v187 (v5.02) — RANGE TIGHTENED from [0, 12] to [0, 5]. The v186 8h
+    # NAS picked refract=10-12 on its top architectures, which combined
+    # with high AHP and slow intrinsic_timescale (~25) gave a per-spike
+    # dead time of ~35 ticks. That mathematically caps the firing rate
+    # at ~2.9% — making M1=0.22 unreachable. 0-5 covers the biologically
+    # realistic range from the v171 comment ("biologically realistic
+    # values are 1-5 (~ 1-5 game ticks at 10Hz)") and forbids the
+    # extreme suppression regime the search kept converging on.
+    'neural.refractory_period_ticks':           ('int_uniform', 0, 5),
     # v172 (v4.80) — after-hyperpolarization (mp reset). Pulls mp toward
     # 0 after firing. With v171 refractory, this is what makes state=0
     # an ACTUAL biological buffer (rather than just briefly forced).
-    # Range 0.0 (no reset, v171 behaviour) to 1.0 (full reset to mp=0).
-    'neural.post_spike_mp_reset':               ('uniform', 0.0, 1.0),
+    # v187 (v5.02) — RANGE TIGHTENED from [0.0, 1.0] to [0.0, 0.5]. The
+    # v186 8h NAS top architectures used AHP=0.87, snapping mp to ~13%
+    # of threshold after every spike. Combined with slow intrinsic_
+    # timescale, recovery to threshold took ~25 ticks. 0.0-0.5 still
+    # allows meaningful after-hyperpolarisation (50% snap-back is biolo-
+    # gically substantial) but rules out the "near-total-reset" regime
+    # that suppressed firing into quiescence. The product (refract * AHP)
+    # is now bounded at 5 * 0.5 = 2.5 — well clear of the 8.7 the v186
+    # best architecture used.
+    'neural.post_spike_mp_reset':               ('uniform', 0.0, 0.5),
     
     # -- OPERATING RANGES: plasticity / adaptation --
     'operating_ranges.learning_rate':           ('loguniform', 0.002, 0.05),
     'operating_ranges.plasticity_threshold':    ('uniform', 0.3, 0.7),
     'operating_ranges.autoreceptor_coefficient':('uniform', 0.05, 0.25),
     'operating_ranges.adaptation_tau_ticks':    ('uniform', 10.0, 50.0),
+    # v191 (v5.06) — E/I ADAPTATION-BALANCE lever enters the search space.
+    # Pre-v191 these were hardcoded at 1.5 (excitatory) / 1.0 (inhibitory)
+    # in neuron.py and IGNORED the values documented in default.json /
+    # architecture.py (a "documented-but-not-wired" bug v191 fixes). The
+    # 1.5× excitatory factor was a v149 workaround for a +1 lock-in that
+    # the v171 refractory + v172 AHP machinery now handles structurally —
+    # so the residual 1.5× now just suppresses +1 firing relative to -1,
+    # the root cause of the inhibitory skew + sub-target M1 (~0.15 vs 0.22)
+    # the v190 8h NAS exposed. Searching [0.8, 2.0] lets the optimiser
+    # LOWER the excitatory brake (toward 1.0 or below) so +1 reaches the
+    # paper target while refractory/AHP holds the 68% rest band, and tune
+    # the inhibitory brake to pull inhibitory firing toward the paper's
+    # 10%. This is the dynamics lever the v190 analysis identified as the
+    # missing piece — fitness tuning alone could not resolve the M1-vs-rest
+    # tension (corr -0.45 in the v190 run). Default 1.5 / 1.0 reproduces
+    # v190 dynamics exactly when these keys are absent.
+    'operating_ranges.adaptation_target_excitatory_multiplier': ('uniform', 0.8, 2.0),
+    'operating_ranges.adaptation_target_inhibitory_multiplier': ('uniform', 0.8, 2.0),
 
     # -- v179 (v4.87) CHC SIX-SPHERE TOPOLOGY + g-FACTOR --
     # Adapts an upcoming paper's six-sphere design. sphere_topology
     # toggles the paper's 6-sphere build; κ/λc/βF are the paper's dominant
     # architectural levers (κ = cross-sphere coupling, λc = crystallised
     # capacity, βF = CTC coherence strength). fitness_g_weight is the
-    # OPT-IN weight of the population g-factor in fitness (0 = g measured &
-    # logged but selection-neutral — the honest default; raise it to let
-    # NAS actively optimise for a strong positive manifold). See
-    # docs/G_FACTOR_METHODOLOGY.md and CHANGELOG_v179.
-    'neural.sphere_topology':                   ['sensory_association_motor', 'chc6'],
+    # weight of the population g-factor in fitness.
+    #
+    # v190 (v5.05) SEARCH-SPACE FOCUS — two changes from v189:
+    #   1. sphere_topology LOCKED to ['chc6']. The v189 8h run sampled both
+    #      topologies (~50/50) but sensory_association_motor cleared the
+    #      floors in only 7/67 trials (10%) vs chc6's 30/96 (31%), and its
+    #      best fitness (6.003) trailed chc6's (6.422). chc6 is the paper's
+    #      six-sphere build and the source of the strong positive manifold
+    #      we want, so the whole trial budget now goes to it — no waste on
+    #      the losing topology.
+    #   2. fitness_g_weight PINNED at 1.5 (was sampled uniform 0..1). With a
+    #      random per-trial weight, g was inconsistent selection pressure —
+    #      a strong-g architecture that drew g_weight≈0.05 got ~0 g credit
+    #      and missed the top. Fixing it at 1.5 makes g a genuine, CO-EQUAL
+    #      objective alongside the two trinary components (m1 1.5 + neutral
+    #      1.5): every trial is now rewarded up to 1.5 for a HEALTHY positive
+    #      manifold (PC1≈0.27, positive mean-r — see the g_health block in
+    #      fitness()). Trinary fidelity, survival, heritability, sm-coupling
+    #      and the lock-in penalty are all unchanged and still apply.
+    # See docs/G_FACTOR_METHODOLOGY.md and CHANGELOG_v179 / CHANGELOG_v190.
+    'neural.sphere_topology':                   ['chc6'],
     'neural.cross_sphere_coupling':             ('uniform', 0.0, 3.0),
     'neural.cryst_capacity':                    ('uniform', 0.5, 2.5),
     'neural.free_energy_beta':                  ('uniform', 0.3, 2.0),
-    'operating_ranges.fitness_g_weight':        ('uniform', 0.0, 1.0),
+    'operating_ranges.fitness_g_weight':        1.5,   # v190 — pinned (was uniform 0..1)
     
     # -- GENETIC LOTTERY: per-NxEr trait diversity at birth (v162) --
     # Each NxEr at birth samples its OWN value from these ranges. This
@@ -189,7 +282,68 @@ NAS_TRIAL_CONFIG = {
     'auto_start':        True,    # don't wait for SPACE
     'auto_save':         False,   # no auto-save side files
     'save_full_logs':    False,
+    # v186 (v5.01) — pin max_rounds=1 so each trial is ONE continuous round.
+    # Background: prior to v186 max_rounds was unset (default None →
+    # infinite). If a trial's NxErs all died mid-trial, the game
+    # auto-restarted with champions; restart_game_with_champions() calls
+    # data_logger.reset() which wipes time_series. The trial's fitness
+    # then reflected only whatever happened AFTER the most recent restart,
+    # NOT the full 8h trial budget. This was invisible from outside
+    # because there was no per-trial round count in the log.
+    # With max_rounds=1 the trial ends naturally at the first extinction
+    # (recorded as went_extinct=True / extinction_tick=T in the NAS log)
+    # and that's an honest signal of a fragile architecture. Robust
+    # architectures keep some population alive and run the full budget.
+    'max_rounds':        1,
 }
+
+
+# v193 (v5.08) — SEED-AVERAGED TRIALS (the noise fix). The v161–v192
+# longitudinal analysis showed single-trial metrics are noisy estimators of an
+# architecture's behaviour: trial 4's IDENTICAL architecture read M1=0.086 in
+# the v191 run and M1=0.140 in the v192 run (a 63% swing) purely from the game
+# seed, and its neutral fraction moved 0.797→0.668. Selection on a single
+# stochastic sample means rankings closer than ~0.5 fitness are partly luck.
+# v193 evaluates each sampled architecture NAS_TRIAL_REPEATS times with
+# distinct, well-separated seeds and selects on the per-metric MEDIAN (robust
+# to a single crashed/outlier run), logging the per-seed spread (M1_std,
+# fitness_std) so the noise — and each architecture's reliability — is visible.
+# Cost: the wall budget buys NAS_TRIAL_REPEATS× fewer DISTINCT architectures,
+# but each is measured robustly. Tune via --repeats or NEURAXON_NAS_REPEATS;
+# set to 1 to recover exact v192 single-trial behaviour.
+NAS_TRIAL_REPEATS = 3
+
+# v194 (v5.09) — how the per-architecture wall budget relates to the repeats.
+#   'subdivide' (DEFAULT): the wall the user sets is the budget PER ARCHITECTURE;
+#       each of the R repeats runs wall/R. Cost-neutral vs a single v192 trial of
+#       the same wall — the NAS explores the SAME number of architectures, each
+#       measured as R shorter independent runs (median'd). This is the fix for
+#       the v193.0 throughput collapse, where 'multiply' made each architecture
+#       R× more expensive and a single long-running architecture could consume
+#       the whole budget (the first v193 8h run logged exactly ONE trial: its 3
+#       repeats summed to 10.3 h).
+#   'multiply': each repeat runs the FULL wall (R× per-architecture cost). Use
+#       only for deep single-architecture characterisation, not for search.
+NAS_REPEATS_MODE = 'subdivide'
+
+
+def _get_trial_repeats() -> int:
+    """Number of seed-repeats per architecture (>=1). Env override:
+    NEURAXON_NAS_REPEATS. Falls back to the module default."""
+    import os as _os
+    try:
+        r = int(_os.environ.get('NEURAXON_NAS_REPEATS', NAS_TRIAL_REPEATS))
+        return max(1, r)
+    except (TypeError, ValueError):
+        return max(1, NAS_TRIAL_REPEATS)
+
+
+def _get_repeats_mode() -> str:
+    """'subdivide' (default) or 'multiply'. Env: NEURAXON_NAS_REPEATS_MODE."""
+    import os as _os
+    m = _os.environ.get('NEURAXON_NAS_REPEATS_MODE', NAS_REPEATS_MODE)
+    return m if m in ('subdivide', 'multiply') else 'subdivide'
+
 
 
 # =============================================================================
@@ -625,8 +779,10 @@ def make_strategy(name: str, rng: random.Random, **kwargs) -> _SearchStrategy:
 # =============================================================================
 # WORKER — runs in a subprocess
 # =============================================================================
-def _trial_worker(args: Tuple) -> Dict[str, Any]:
-    """Run one Game-of-Life trial in headless mode with the given arch.
+def _run_single_trial(args: Tuple) -> Dict[str, Any]:
+    """Run ONE Game-of-Life trial in headless mode with the given arch and
+    seed. (v193: this is one seed-repeat; _trial_worker runs several of these
+    per architecture and aggregates — see _aggregate_reps.)
     
     This runs inside a multiprocessing subprocess. All imports happen
     inside the function so each worker has fresh pygame/architecture
@@ -636,7 +792,17 @@ def _trial_worker(args: Tuple) -> Dict[str, Any]:
     Returns a dict with: trial_id, arch, metrics, error (or None),
     wall_seconds_actual, n_samples.
     """
-    arch_dict, trial_id, wall_seconds, seed, out_dir = args
+    # v194 — accept an optional rep index + count (6/7-tuple) so seed-repeats
+    # nest under one per-trial folder; stay backward-compatible with the
+    # 5-tuple (single-trial) form.
+    if len(args) >= 7:
+        arch_dict, trial_id, wall_seconds, seed, out_dir, rep_idx, n_reps = args[:7]
+    elif len(args) == 6:
+        arch_dict, trial_id, wall_seconds, seed, out_dir, rep_idx = args
+        n_reps = 1
+    else:
+        arch_dict, trial_id, wall_seconds, seed, out_dir = args
+        rep_idx, n_reps = 0, 1
     result = {
         'trial_id': trial_id, 'arch': arch_dict, 'metrics': None,
         'error': None, 'wall_seconds_actual': 0.0, 'n_samples': 0,
@@ -661,8 +827,16 @@ def _trial_worker(args: Tuple) -> Dict[str, Any]:
             json.dump(arch_dict, f, indent=2)
         os.environ['NEURAXON_ARCH'] = arch_path
         
-        # cd into a per-trial directory so save files don't clutter
-        trial_dir = os.path.join(out_dir, f'trial_{trial_id:03d}')
+        # cd into a per-trial directory so save files don't clutter.
+        # v194 — when there are multiple seed-repeats, nest them under ONE
+        # per-trial folder (trial_022/rep0, rep1, rep2) instead of three
+        # sibling 'trial_022_s<seed>' dirs, so the layout reads as one trial
+        # with R repeats rather than several trials sharing a number. A single
+        # repeat keeps the flat 'trial_022' name.
+        if n_reps > 1:
+            trial_dir = os.path.join(out_dir, f'trial_{trial_id:03d}', f'rep{rep_idx}')
+        else:
+            trial_dir = os.path.join(out_dir, f'trial_{trial_id:03d}')
         os.makedirs(trial_dir, exist_ok=True)
         os.chdir(trial_dir)
         
@@ -756,6 +930,30 @@ def _trial_worker(args: Tuple) -> Dict[str, Any]:
             final_alive = float(alive_series[-1]) if alive_series else 0.0
             start_alive = float(alive_series[0]) if alive_series else 0.0
             peak_alive = max((float(v) for v in alive_series), default=0.0)
+
+            # v192 (v5.07) — HONEST, NEVER-TRIMMED survival summary. The
+            # surv_alive_count time-series above is trimmed to the last
+            # max_history_length (=10000) samples (v185+ memory bound),
+            # which drops the early high-population phase of a multi-hour
+            # trial. peak_alive / the checkpoint mean computed from the
+            # trimmed series therefore reflect only the recent window —
+            # the root cause of the v191 8h run scoring every trial 0.0
+            # (trials that sustained ~10 NxErs early showed peak_alive=1
+            # after the early samples were trimmed, then hit the population
+            # floor). SurvivabilityTracker maintains O(1) un-trimmed
+            # scalars over the WHOLE trial; prefer them when available and
+            # fall back to the trimmed series for old result dicts / tests.
+            true_peak_alive = peak_alive
+            mean_alive_ever = None
+            try:
+                _surv = getattr(log, 'survivability', None)
+                if _surv is not None and getattr(_surv, 'alive_samples_ever', 0) > 0:
+                    true_peak_alive = float(max(peak_alive, _surv.max_alive_ever))
+                    mean_alive_ever = float(_surv.alive_sum_ever) / float(_surv.alive_samples_ever)
+                    # the tracker's last sample is the honest final population
+                    final_alive = float(getattr(_surv, 'last_alive_count', final_alive))
+            except Exception:
+                pass
             
             # v168 (v4.76) — multi-checkpoint survival sampling.
             # Old v161-v167 fitness used `final_alive` only, which credits
@@ -786,11 +984,23 @@ def _trial_worker(args: Tuple) -> Dict[str, Any]:
                 # Short trial — degrade to final_alive
                 alive_q1 = alive_q2 = alive_q3 = alive_q4 = final_alive
                 alive_mean_checkpoints = final_alive
-            
+
+            # v192 (v5.07) — prefer the honest, never-trimmed time-average of
+            # the population as the sustained-survival signal. The trimmed
+            # checkpoint mean above only sees the recent window; mean_alive_ever
+            # is the true Σalive/Σsamples over the WHOLE trial, so a trial that
+            # held ~10 then crashed reads a moderate mean (not 1), and one that
+            # never grew reads ~1. Keep the checkpoint mean as a fallback.
+            if mean_alive_ever is not None:
+                alive_mean_checkpoints = mean_alive_ever
+
             result['metrics'] = {
                 'final_alive':       final_alive,
                 'start_alive':       start_alive,
-                'peak_alive':        peak_alive,
+                # v192 — TRUE historical peak (un-trimmed), not the recent-window max
+                'peak_alive':        true_peak_alive,
+                'peak_alive_trimmed': peak_alive,   # what the old code saw (diagnostic)
+                'mean_alive_ever':   (mean_alive_ever if mean_alive_ever is not None else alive_mean_checkpoints),
                 # v168 — checkpoint alive counts for sustained-survival fitness
                 'alive_q1':          alive_q1,
                 'alive_q2':          alive_q2,
@@ -798,6 +1008,41 @@ def _trial_worker(args: Tuple) -> Dict[str, Any]:
                 'alive_q4':          alive_q4,
                 'alive_mean_checkpoints': alive_mean_checkpoints,
                 'M1_last':           last_mean('M1_excitatory_fraction'),
+                # v189 (v5.04) — thread the buffer-state ("neutral", state=0)
+                # fraction through to fitness. compute_m1_trinary_distribution
+                # has logged this since v161 (line 195 of research_probes.py)
+                # but it was never pulled into the metrics dict, so fitness
+                # had no view of the trinary balance — only the excitatory
+                # fraction (M1) and the inferred M5 branching ratio. v188
+                # exposed the cost: trial 46 reached fitness 6.61 with M1 in
+                # band, but the live game showed state=0 collapsed to 4.1%
+                # of hidden samples (paper target: ~68%). The trinary
+                # architecture had degraded to a +1/-1 binary oscillator
+                # with no rest band, and 2h trials couldn't see it because
+                # the lock-in develops over multiple hours. Adding this
+                # column lets the fitness function reward the rest band
+                # directly, and lets the NAS CSV log the value for
+                # post-hoc analysis without re-running.
+                'M1_neutral_last':   last_mean('M1_neutral_fraction'),
+                'M1_inh_last':       last_mean('M1_inhibitory_fraction'),
+                # v191 (v5.06) — the remaining healthy-band metrics are now
+                # extracted so the fitness "band completeness" term (and the
+                # NAS CSV) can see the FULL healthy profile, not just the
+                # subset v161-v190 used. compute_*_metrics in the logger has
+                # produced all of these since the early Mx series, but only
+                # M1/M6/M9/M10 (+streak/sm/locked/expl) were ever threaded
+                # into the trial metrics dict — so the search had no gradient
+                # toward M2 gate / M3 PAC / M5 branching / M7 zero-input MI /
+                # input saturation. The v190 winner t110 sat in band on
+                # neutral and survival but its M5/M7 were never part of
+                # selection; v191 makes the whole healthy_bands dict the
+                # objective so the NAS finds the architecture where ALL
+                # metrics land in band (the "right model").
+                'M2_last':           last_mean('M2_mean_gate'),
+                'M3_last':           last_mean('M3_pac_modulation_idx'),
+                'M5_last':           last_mean('M5_branching_ratio'),
+                'M7_last':           last_mean('M7_zero_input_mi_ratio'),
+                'input_sat_last':    last_mean('input_saturation_fraction'),
                 'M6_last':           last_mean('M6_spontaneous_fraction'),
                 'M9_last':           last_mean('M9_transfer_ratio'),
                 'M10_last':          last_mean('M10_heritability_r'),
@@ -823,6 +1068,36 @@ def _trial_worker(args: Tuple) -> Dict[str, Any]:
                 'fitness_g_weight':  float(
                     (arch_dict.get('operating_ranges', {}) or {})
                     .get('fitness_g_weight', 0.0) or 0.0),
+                # v186 (v5.01) — round-visibility. With max_rounds=1 (the
+                # default in NAS_TRIAL_CONFIG) total_rounds is 1, but we
+                # query it from config so manual overrides surface in the
+                # log. went_extinct = True iff surv_alive_count reached 0
+                # at any sample during the trial. extinction_tick = the
+                # first tick at which that happened (or -1 if never).
+                'total_rounds':      int(getattr(config, '_current_round', 1) or 1),
+                'went_extinct':      bool(alive_series and min(alive_series) <= 0),
+                # v191 (v5.06) — min_alive makes the "limping" case visible.
+                # went_extinct only fires on a LITERAL zero-population game-
+                # over; the v190 8h run had 0/128 extinctions yet 70/128
+                # trials were population-floored (peak_alive < 8) — they
+                # limped at a tiny non-zero population for the full budget,
+                # indistinguishable in went_extinct from a healthy run.
+                # min_alive (the trough of the alive series) separates
+                # "ran full budget healthy" from "ran full budget barely
+                # alive" without re-running the trial.
+                'min_alive':         (float(min(alive_series)) if alive_series else 0.0),
+                # v191 — thread the architecture's healthy_bands target
+                # ranges into the metrics dict so fitness() can score band
+                # completeness against the SAME ranges the dashboard uses
+                # (kept in sync with architectures/default.json). Falls back
+                # to None → fitness uses its built-in paper defaults.
+                'healthy_bands':     (arch_dict.get('healthy_bands') or None),
+                'extinction_tick':   (
+                    int(ts.get('ticks', [-1])[
+                        next((i for i, v in enumerate(alive_series) if v <= 0),
+                             len(alive_series) - 1)
+                    ]) if alive_series and min(alive_series) <= 0 else -1
+                ),
             }
         
         # Cleanly shut down logger so resources release before subprocess exits
@@ -842,24 +1117,327 @@ def _trial_worker(args: Tuple) -> Dict[str, Any]:
     return result
 
 
-# =============================================================================
-# FITNESS FUNCTION
-# =============================================================================
+def _aggregate_reps(reps: List[Dict[str, Any]], arch_dict: Dict[str, Any],
+                    trial_id: int, n_repeats: int) -> Dict[str, Any]:
+    """v193 — combine NAS_TRIAL_REPEATS seed-repeats of one architecture into a
+    single robust result. Metrics are aggregated by MEDIAN (robust to one
+    crashed/outlier run); per-seed spread is recorded so the noise is visible.
+    Selection then runs on the median metrics (the caller computes
+    fitness(result['metrics'])), making the leaderboard reflect the
+    architecture's typical behaviour rather than one lucky/unlucky sample."""
+    import statistics as _st
+    ok = [r for r in reps if r.get('metrics')]
+    agg = {
+        'trial_id': trial_id, 'arch': arch_dict, 'metrics': None,
+        'error': None,
+        'wall_seconds_actual': sum(r.get('wall_seconds_actual', 0.0) for r in reps),
+        'n_samples': sum(r.get('n_samples', 0) for r in reps),
+    }
+    if not ok:
+        # every repeat errored/empty — surface the first error
+        agg['error'] = next((r.get('error') for r in reps if r.get('error')),
+                             'all_repeats_failed')
+        return agg
+
+    # Median per numeric metric across the OK repeats.
+    keys = set()
+    for r in ok:
+        keys.update(r['metrics'].keys())
+    median_metrics: Dict[str, Any] = {}
+    for k in keys:
+        vals = [r['metrics'].get(k) for r in ok
+                if isinstance(r['metrics'].get(k), (int, float))]
+        if vals:
+            median_metrics[k] = _st.median(vals)
+    # Carry through non-numeric metrics (e.g. healthy_bands dict) from the
+    # first OK repeat so fitness() can still read them.
+    for k in keys:
+        if k not in median_metrics and ok[0]['metrics'].get(k) is not None:
+            median_metrics[k] = ok[0]['metrics'][k]
+
+    # Per-seed spread / reliability indicators (computed, not fatal if missing).
+    def _spread(metric_key):
+        vals = [r['metrics'].get(metric_key) for r in ok
+                if isinstance(r['metrics'].get(metric_key), (int, float))]
+        return (_st.pstdev(vals) if len(vals) > 1 else 0.0), vals
+
+    m1_std, _ = _spread('M1_last')
+    neut_std, _ = _spread('M1_neutral_last')
+    streak_std, _ = _spread('mean_streak_last')
+    # Per-repeat fitness spread — the headline reliability signal. fitness() is
+    # defined later in this module but resolvable at call time.
+    fit_vals = []
+    for r in ok:
+        try:
+            fit_vals.append(fitness(r['metrics']))
+        except Exception:
+            pass
+    fit_mean = (_st.mean(fit_vals) if fit_vals else 0.0)
+    fit_std = (_st.pstdev(fit_vals) if len(fit_vals) > 1 else 0.0)
+
+    median_metrics['n_repeats'] = float(n_repeats)
+    median_metrics['n_repeats_ok'] = float(len(ok))
+    median_metrics['M1_std'] = m1_std
+    median_metrics['M1_neutral_std'] = neut_std
+    median_metrics['mean_streak_std'] = streak_std
+    median_metrics['fitness_mean_reps'] = fit_mean
+    median_metrics['fitness_std_reps'] = fit_std
+
+    agg['metrics'] = median_metrics
+    # If any repeat errored (but not all), note it without failing the trial.
+    agg['error'] = next((r.get('error') for r in reps if r.get('error')), None)
+    return agg
+
+
+def _trial_worker(args: Tuple) -> Dict[str, Any]:
+    """v193 — evaluate ONE architecture as NAS_TRIAL_REPEATS seed-repeats and
+    return the robust (median) aggregate. Drop-in for the Pool dispatch: still
+    one apply_async per architecture, one result to the saver. With repeats=1
+    this is exactly the v192 single-trial behaviour (median of one).
+    v194 — in 'subdivide' mode (default) the per-architecture wall is split
+    across the repeats (each runs wall/R), so seed-averaging is COST-NEUTRAL vs
+    a single v192 trial and the search keeps its breadth. 'multiply' mode runs
+    each repeat at the full wall (R× cost) for deep single-arch work.
+    args = (arch_dict, trial_id, wall_seconds, seed, out_dir)."""
+    arch_dict, trial_id, wall_seconds, seed, out_dir = args
+    R = _get_trial_repeats()
+    mode = _get_repeats_mode()
+    # subdivide: each repeat gets wall/R (floor 6 s = 0.1 min, matching the
+    # per-trial limit floor); multiply: each repeat gets the full wall.
+    per_rep_wall = wall_seconds
+    if mode == 'subdivide' and R > 1:
+        per_rep_wall = max(6.0, wall_seconds / float(R))
+    reps = []
+    for r in range(R):
+        # Well-separated seeds (distinct large stride) so repeats are
+        # genuinely independent draws, not adjacent RNG states.
+        rep_seed = seed + r * 2654435761 % (2 ** 31)
+        reps.append(_run_single_trial(
+            (arch_dict, trial_id, per_rep_wall, rep_seed, out_dir, r, R)))
+    return _aggregate_reps(reps, arch_dict, trial_id, R)
+def _band_score(val: float, lo: float, hi: float, margin_frac: float = 1.0) -> float:
+    """v191 (v5.06) — graded in-band score for a metric.
+
+    Returns 1.0 when lo <= val <= hi, and ramps linearly to 0 over a margin
+    of `margin_frac * (hi - lo)` on each side outside the band. A gentle
+    margin (default 1.0 = one band-width) means an out-of-band metric still
+    contributes partial credit proportional to how close it is, giving the
+    search a gradient rather than a cliff. Used by the band-completeness
+    term so every healthy_bands metric pulls selection toward its target.
+    """
+    try:
+        val = float(val); lo = float(lo); hi = float(hi)
+    except (TypeError, ValueError):
+        return 0.0
+    if lo > hi:
+        lo, hi = hi, lo
+    if lo <= val <= hi:
+        return 1.0
+    width = max(1e-9, hi - lo)
+    m = max(1e-9, margin_frac * width)
+    if val < lo:
+        return max(0.0, 1.0 - (lo - val) / m)
+    return max(0.0, 1.0 - (val - hi) / m)
+
+
+# v191 (v5.06) — paper-derived default target bands, used by the
+# band-completeness term when the trial metrics dict carries no
+# `healthy_bands` (e.g. legacy result dicts / unit tests). Mirrors
+# architectures/default.json["healthy_bands"]. The trinary triad (M1,
+# neutral, inhibitory) is scored separately by its own tent rewards;
+# these are the SECONDARY health metrics whose collective in-band score
+# forms the band-completeness component.
+_PAPER_BANDS = {
+    'M2_mean_gate':              (0.40, 0.85),
+    'M3_pac_modulation_idx':     (0.005, 0.10),
+    'M5_branching_ratio':        (0.92, 1.10),
+    'M6_spontaneous_fraction':   (0.10, 0.45),
+    'M7_zero_input_mi_ratio':    (0.40, 1.20),
+    'M9_transfer_ratio':         (0.85, 1.30),
+    'input_saturation_fraction': (0.0, 0.30),
+    'input_locked_fraction':     (0.0, 0.20),
+    'exploration_trigger_rate':  (0.01, 0.40),
+}
+
+# Maps each band-completeness metric to the trial-metrics key that carries
+# its last-20%-mean value (set in run_one_trial's result['metrics']).
+_BAND_METRIC_KEYS = {
+    'M2_mean_gate':              'M2_last',
+    'M3_pac_modulation_idx':     'M3_last',
+    'M5_branching_ratio':        'M5_last',
+    'M6_spontaneous_fraction':   'M6_last',
+    'M7_zero_input_mi_ratio':    'M7_last',
+    'M9_transfer_ratio':         'M9_last',
+    'input_saturation_fraction': 'input_sat_last',
+    'input_locked_fraction':     'locked_last',
+    'exploration_trigger_rate':  'expl_rate_last',
+}
+
+
+def _compute_band_completeness(metrics: Dict[str, Any]) -> float:
+    """v191 (v5.06) — mean graded in-band score over the nine SECONDARY
+    healthy-band metrics (M2/M3/M5/M6/M7/M9/saturation/lock/exploration).
+
+    Read against the architecture's own `healthy_bands` if present, else
+    the paper defaults. Shared by fitness() (as the 2.0-weighted
+    band-completeness component) and the CSV writer (logged per trial so
+    the full healthy profile is visible without re-running). The trinary
+    triad (M1, neutral, inhibitory) is NOT included here — it is scored by
+    its three dedicated tent rewards. Returns 0.0 if no metric is present.
+    """
+    bands = metrics.get('healthy_bands') or {}
+    band_scores = []
+    for band_key, mkey in _BAND_METRIC_KEYS.items():
+        if mkey not in metrics:
+            continue
+        lo_hi = None
+        if isinstance(bands, dict) and band_key in bands:
+            try:
+                rng = bands[band_key]
+                lo_hi = (float(rng[0]), float(rng[1]))
+            except (TypeError, ValueError, IndexError):
+                lo_hi = None
+        if lo_hi is None:
+            lo_hi = _PAPER_BANDS.get(band_key)
+        if lo_hi is None:
+            continue
+        band_scores.append(_band_score(metrics.get(mkey, 0.0), lo_hi[0], lo_hi[1]))
+    return (sum(band_scores) / len(band_scores)) if band_scores else 0.0
+
+
 def fitness(metrics: Optional[Dict[str, float]]) -> float:
     """Combine trial metrics into a single fitness score (higher = better).
     
-    Components (weights tunable):
-    - Final alive count (high weight — robust populations matter most)
-    - M10 heritability (medium — selection signal)
-    - Inverse mean_state_streak (medium — lock-in penalty — the v155 finding)
-    - M1 in-band bonus (low — keeps networks in operating regime)
-    - sensory_motor_corr non-zero (low — input-output coupling)
-    
-    Returns float; -1.0 for failed trials.
+    Components (v191 / v5.06 — ceiling 13.0):
+      surv               2.0   population survival (mean-of-checkpoints)
+      M10 heritability   1.5   selection signal (abs(M10_peak))
+      streak             1.0   lock-in penalty (1 - mean_streak/100)
+      --- TRINARY TRIAD (the paper's defining +1/0/-1 property) = 4.5 ---
+      M1   (+1) tent     1.5   peak 0.22
+      neutral (0) tent   1.5   peak 0.68 (upper side → 0 at 0.85)
+      inh  (-1) tent     1.5   peak 0.10 (v191 — completes the triad)
+      ------------------------------------------------------------------
+      sm_corr            0.5   sensory→motor coupling
+      band_completeness  2.0   mean in-band score over the nine SECONDARY
+                               healthy_bands metrics (M2/M3/M5/M6/M7/M9/
+                               saturation/lock/exploration) — v191, the
+                               "all the metrics found in NAS" objective
+      g_health         gw≤1.5  population g (gated on a healthy positive
+                               manifold near PC1≈0.27); pinned 1.5 in v190
+
+    A model that is paper-faithful on the full trinary triad AND lands
+    every secondary band AND survives AND shows a healthy positive
+    manifold reaches the 13.0 ceiling (verified test_v191). The whole
+    healthy_bands dict is now the objective, so the NAS selects the
+    "right model" where ALL metrics — not just M1/neutral — sit in band.
+
+    v191 (v5.06) over v190:
+      1. TRINARY TRIAD completed — explicit inhibitory tent (target 0.10),
+         weight 1.5, matching M1 and neutral. The joint optimum of the
+         three tents is exactly the paper mix 0.22 / 0.68 / 0.10, and the
+         binary-oscillator regime (inhibitory≈0.65) now earns ~0 on it.
+      2. BAND COMPLETENESS (2.0) — every secondary healthy_bands metric
+         now drives selection (was: M2/M3/M5/M7/saturation invisible).
+      3. The E/I ADAPTATION-BALANCE lever (adaptation_target_*_multiplier)
+         is wired into the dynamics and added to SEARCH_SPACE — the
+         mechanism that lets the search reach 22% +1 without collapsing
+         the rest band (the v190 M1-vs-rest tension the prior fitness
+         could not resolve). See CHANGELOG_v191.
+
+    Returns float; -1.0 for failed trials, 0.0 for degenerate trials
+    (peak_alive < 8, or M1 < 0.08 — the silence floor).
     """
     if metrics is None:
         return -1.0
-    
+
+    # v187 (v5.02) — POPULATION FLOOR. A "population" of one isolated
+    # NxEr cannot demonstrate heritability, sensorimotor coupling, or any
+    # of the multi-individual metrics; its sm_corr=1.0 and M1-by-luck are
+    # mathematical artefacts of a sample of one. The v186 NAS log showed
+    # 11/39 trials collapsing to peak_alive=1 yet earning fitness 4.5-5.5
+    # via these spurious signals.
+    #
+    # v188 (v5.03) — RAISED from 3 to 8. The v187 floor at 3 still let
+    # trial 28 (peak_alive=5) reach rank 3 with fitness 5.46 — a 5-NxEr
+    # "population" can't sustain generational evolution. Raising to 8
+    # forces the search toward architectures that simultaneously hit M1
+    # AND sustain a real reproducing population. 8 is the minimum where
+    # there's room for multiple breeding pairs + their offspring lineage
+    # to be statistically distinguishable. Re-scoring the v187 NAS log
+    # against the new floor: of the 56 v187 healthy trials, 8 trials had
+    # peak_alive in [3, 7] (now floored to 0); the top-of-list churn is
+    # mild but the trial-28 family (peak=5, M1 in band but fragile) no
+    # longer competes against trials 93/105 (peak 41/46, the genuinely
+    # robust architectures).
+    #
+    # v192 (v5.07) — GRADED POPULATION VIABILITY (was: hard floor peak<8 → 0).
+    # Two compounding bugs made the v191 8h NAS score EVERY trial 0.0:
+    #   (1) peak_alive was read from the in-RAM time_series, which is trimmed
+    #       to the last max_history_length (=10000) samples (v185+). A
+    #       multi-hour trial produces far more than 10000 samples, so the
+    #       early high-population phase is trimmed away and peak_alive reads
+    #       the recent (crashed) window — ~1 even for trials that sustained
+    #       ~10 NxErs for hours. v192 fixes this at the source: the NAS now
+    #       reads SurvivabilityTracker.max_alive_ever (never trimmed) into
+    #       metrics['peak_alive'], so the value below is the TRUE peak.
+    #   (2) the floor zeroed the ENTIRE fitness, so once every trial's
+    #       (artefactual) peak was < 8 the leaderboard was all-zero and the
+    #       optimiser had no gradient. Even with the honest peak, a hard
+    #       floor still throws away the trinary distribution + all band info
+    #       the moment a population is small — antithetical to "find the
+    #       model where ALL metrics are in band."
+    # Fix: a graded viability MULTIPLIER. peak ≥ 8 → 1.0 (IDENTICAL to v191,
+    # so viable trials and the 13.0/14.0 ceiling are unchanged); peak ≤ 1 →
+    # 0.10 (heavily penalised but not zeroed, so a tiny-population trial is
+    # still RANKED by its trinary fidelity); linear ramp between. Combined
+    # with the honest survival signal (mean_alive_ever) this gives the search
+    # a continuous gradient toward sustainable populations instead of a cliff.
+    peak_alive = metrics.get('peak_alive', 0.0)
+    if peak_alive >= 8.0:
+        pop_viability = 1.0
+    elif peak_alive <= 1.0:
+        pop_viability = 0.10
+    else:
+        pop_viability = 0.10 + 0.90 * (peak_alive - 1.0) / 7.0
+
+    # v190 (v5.05) — M1 FLOOR (excitatory-firing floor). The v189 8h
+    # extended NAS (163 trials) exposed a "quiescent trap": the four
+    # highest-fitness trials all fired < 5% excitatory (M1 0.009-0.050,
+    # paper target 0.22). They won on survival + heritability + g-factor
+    # while contributing ~0 from the M1 component — a near-silent network
+    # maxes survival (less metabolic cost = less death) and accumulates
+    # clean heritability, so the 1.5-weight M1 reward couldn't overcome
+    # the survival advantage of silence. A network firing < 8% excitatory
+    # is not demonstrating the paper's trinary dynamics regardless of how
+    # well it survives; it's a quiet binary (rest/inhibit) oscillator.
+    # Same pattern as the population floor: below the threshold, the
+    # architecture is disqualified (fitness 0), not merely penalised.
+    # 0.08 is well below the band floor (0.18) — it only excludes genuine
+    # silence, not architectures that are merely below-target. Re-scoring
+    # the v189 8h log: this floors trials 154/119/5/132 (the silent
+    # top-4), promoting trial 120 (M1=0.181, L1-to-paper=0.115) to the
+    # top — exactly the paper-faithful architecture we want to select.
+    # v193 (v5.08) — GRADED M1 silence floor (was a hard cliff: M1<0.08 → 0).
+    # The longitudinal v161–v192 analysis showed the hard cutoff sat exactly
+    # where the best architectures cluster: in the v191 8h run trial 4
+    # (M1=0.086) scored 6.99 while its near-twin trial 5 (M1=0.077, and a
+    # MORE dynamic rest band) scored 0 — a 0.009 M1 margin producing the whole
+    # fitness. And the single closest-to-paper trinary ever found (a v189 trial
+    # at 0.224/0.658/0.118, L1=0.044) was zeroed too. The cliff both inverts
+    # selection at the boundary and destroys the gradient there. v193 makes it
+    # a graded multiplier (applied with pop_viability at the return): M1≥0.08 →
+    # ×1.0 (identical to v192 for every non-silent trial, so the ceiling and
+    # all viable rankings are unchanged), M1≤0.03 → ×0.05 (genuine silence,
+    # heavily suppressed but still RANKED), linear between. Silence stays
+    # uncompetitive; the boundary cliff is gone.
+    m1_floor_val = metrics.get('M1_last', 0.0)
+    if m1_floor_val >= 0.08:
+        m1_viability = 1.0
+    elif m1_floor_val <= 0.03:
+        m1_viability = 0.05
+    else:
+        m1_viability = 0.05 + 0.95 * (m1_floor_val - 0.03) / (0.08 - 0.03)
+
     # Component 1 — population survival (normalised to 0-1)
     # v168 (v4.76) — use mean of 4 checkpoint samples (25/50/75/100% of trial)
     # instead of just final_alive. Old fitness credited a "transient crash and
@@ -911,10 +1489,87 @@ def fitness(metrics: Optional[Dict[str, float]]) -> float:
     streak = metrics.get('mean_streak_last', 0.0)
     streak_score = max(0.0, 1.0 - streak / 100.0)
     
-    # Component 4 — M1 excitatory fraction in band [0.18, 0.28]
+    # Component 4 — M1 excitatory fraction, target 0.22 (paper-derived).
+    # v187 (v5.02) GRADED REWARD. Pre-v187 was binary:
+    #     m1_in_band = 1.0 if 0.18 <= m1 <= 0.30 else 0.0
+    # This had no gradient: search couldn't tell whether moving from
+    # m1=0.05 toward 0.18 was progress, nor whether m1=0.32 was close to
+    # the band. Across 743 v161 + 30 v185 + 39 v186 trials, the only
+    # configurations reaching the band were the degenerate N=1 ones
+    # (where M1 is whatever the single NxEr's neurons happen to do).
+    # The tent function below peaks at 1.0 at m1=0.22 (paper target)
+    # and falls linearly to 0 at m1=0 or m1=0.44. Combined with the
+    # population floor above, this directs search toward architectures
+    # that genuinely sustain ~22% excitatory firing across a real
+    # population, not just lucky single-NxEr quiescence.
     m1 = metrics.get('M1_last', 0.0)
-    m1_in_band = 1.0 if 0.18 <= m1 <= 0.30 else 0.0
-    
+    M1_TARGET = 0.22
+    m1_score = max(0.0, 1.0 - abs(m1 - M1_TARGET) / M1_TARGET)
+
+    # Component 4b — M1_neutral_fraction (state=0, "buffer"), target 0.68
+    # (paper-derived). v189 (v5.04). Added to fix the v188 "rest band
+    # collapse" pathology: trial 46 (v188 best, fitness 6.61) had M1 in
+    # band (0.22) but the live game showed state=0 occupying only 4.1%
+    # of hidden samples — the paper target is 68%. The trinary
+    # architecture degenerates into a +1/-1 binary oscillator with no
+    # rest band; M5 branching ratio doesn't catch this, mean_state_streak
+    # catches partial lock-in but not the alternation regime, and M1
+    # alone is satisfied by ANY 22% excitatory firing rate including
+    # 22% +1 / 78% -1 / 0% neutral.
+    #
+    # Tent peaks at 1.0 at neutral=0.68 (paper). Asymmetric in
+    # consequence: the lower side falls 0.68 wide (zero at 0%), the
+    # upper side falls only 0.32 wide (zero at 100%) — a quiescent
+    # network (all neurons in rest) gets harshly penalised but
+    # progressively, while collapse-to-binary (neutral≈0) hits the
+    # floor immediately. Combined with the M1 component (which rewards
+    # +1 firing), the joint optimum is exactly the paper trinary
+    # distribution: ~22% +1 / ~68% 0 / ~10% −1 (inhibitory implied by
+    # the remainder). Weight 1.5 matches the M1 component because the
+    # rest-band collapse is as severe a paper-fidelity failure as M1
+    # being out of band.
+    neutral = metrics.get('M1_neutral_last', 0.0)
+    NEUTRAL_TARGET = 0.68
+    if neutral <= NEUTRAL_TARGET:
+        # Below target: linear ramp 0 → 1 over [0, 0.68]
+        neutral_score = neutral / NEUTRAL_TARGET
+    else:
+        # Above target: v190 (v5.05) — upper side TIGHTENED. Was
+        # `(neutral - 0.68) / (1.0 - 0.68)` (fall to 0 at neutral=1.0),
+        # which let an over-quiet network at neutral=0.88 still score
+        # 0.375. That's how the v189 quiescent winners (neutral 0.86-0.88)
+        # kept meaningful neutral credit. v190 falls to 0 at neutral=0.85
+        # — a network resting >85% of the time is too quiet for paper
+        # trinary (target rest band 68%, with 22% excitatory + 10%
+        # inhibitory firing). Combined with the M1 floor above, the
+        # over-quiescent corner of the search is now doubly penalised.
+        NEUTRAL_UPPER_ZERO = 0.85
+        neutral_score = max(0.0, 1.0 - (neutral - NEUTRAL_TARGET) / (NEUTRAL_UPPER_ZERO - NEUTRAL_TARGET))
+
+    # v193 (v5.08) — DYNAMISM GATE on the rest-band reward. This is the single
+    # highest-leverage finding of the v161–v192 longitudinal analysis. The
+    # neutral fraction alone cannot distinguish a DYNAMIC rest band (neurons
+    # cycling through state 0 between firings — the paper's intent) from a
+    # FROZEN one (neurons parked at 0 for hundreds of ticks). Since the v189
+    # rest-band reward was added, the search has been won by progressively
+    # FREEZING networks that park neurons at 0 to farm neutral credit while
+    # their live +1 firing decays toward silence: the v191 champion froze to
+    # mean_state_streak≈307, the v192 champion to ≈67, and the best survivors
+    # sat at streak 250–14000. Frozen rest is not the paper's trinary dynamics;
+    # it is the quiescent/lock-in trap in disguise. So the neutral reward is
+    # now multiplied by a dynamism factor: full credit when the rest band
+    # actually cycles (streak ≤ STREAK_DYNAMIC), zero when it is frozen
+    # (streak ≥ STREAK_FROZEN), linear between. A genuinely dynamic paper-
+    # faithful network (streak ~2–15, neutral ~0.68) is unaffected — the 13.0
+    # ceiling is preserved — while the freeze-for-rest-band exploit is closed.
+    # On the v192 run this widens the dynamic winner's (trial 14, streak 67)
+    # lead over the frozen runner-up (trial 4, streak 300) from 0.53 to ~1.3.
+    STREAK_DYNAMIC = 15.0
+    STREAK_FROZEN = 120.0
+    neutral_dynamism = max(0.0, min(1.0,
+                           (STREAK_FROZEN - streak) / (STREAK_FROZEN - STREAK_DYNAMIC)))
+    neutral_score *= neutral_dynamism
+
     # Component 5 — sensory→motor coupling (v165 redesigned)
     # Why peak instead of last: v164 added neural.sensorimotor_coupling
     # which biases input→output edge probability. The architectural fix
@@ -930,13 +1585,58 @@ def fitness(metrics: Optional[Dict[str, float]]) -> float:
     sm = abs(metrics.get('sm_corr_peak',
                           metrics.get('sm_corr_last', 0.0)))
     sm_score = min(1.0, sm * 5.0)  # 0.2 corr = full points
-    
+
+    # Component 4c — M1_inhibitory_fraction (state=-1), target 0.10
+    # (paper-derived). v191 (v5.06). COMPLETES THE TRINARY TRIAD. Pre-v191
+    # the fitness rewarded only +1 (M1) and the rest band (neutral); the
+    # inhibitory fraction was implicit (≈ 1 - M1 - neutral) and never scored.
+    # The cost showed in the v190 8h run: the binary-oscillator regime
+    # (M1≈0.24, neutral≈0.12, INHIBITORY≈0.65) was penalised only via its
+    # collapsed neutral — its runaway inhibition went unpunished, so it
+    # still scored ~3.7-5.0. And even the rest-band-healthy winner t110
+    # fired 23% inhibitory (vs the paper's 10%) with no fitness pressure to
+    # correct it. The trinary distribution is the paper's DEFINING property
+    # (Neuraxon v2.0 Eq. 2: +1 / 0 / -1), so all three states must be
+    # rewarded explicitly. Tent peaks at 1.0 at inhibitory=0.10, falls to 0
+    # at inhibitory=0 (lower) and inhibitory=0.30 (upper). Weight 1.5 ==
+    # the M1 and neutral weights: the joint optimum of the three tents is
+    # now EXACTLY the paper trinary mix 0.22 / 0.68 / 0.10, and the binary
+    # regime (inhibitory≈0.65) earns 0 here on top of ~0 neutral.
+    inh = float(metrics.get('M1_inh_last', 0.0))
+    INH_TARGET = 0.10
+    INH_UPPER_ZERO = 0.30
+    if inh <= INH_TARGET:
+        inh_score = max(0.0, inh / INH_TARGET)
+    else:
+        inh_score = max(0.0, 1.0 - (inh - INH_TARGET) / (INH_UPPER_ZERO - INH_TARGET))
+
+    # Component 7 — BAND COMPLETENESS (v191, v5.06). The headline change for
+    # "all the metrics found in NAS so we find the right model." v161-v190
+    # threaded only M1/neutral/M10/streak/sm (+g) into fitness, so the
+    # search had NO gradient toward the other healthy_bands metrics — M2
+    # gate, M3 PAC, M5 branching ratio, M6 spontaneous, M7 zero-input MI,
+    # M9 transfer ratio, input saturation, input lock, exploration. An
+    # architecture could top the leaderboard while sitting out of band on
+    # most of them (the v190 winner was never selected on its M5/M7 at
+    # all). This term is the MEAN graded in-band score over those nine
+    # secondary metrics (the trinary triad M1/0/-1 is scored separately
+    # above), read against the architecture's own healthy_bands (falling
+    # back to the paper defaults). Weight 2.0: a model healthy on
+    # EVERYTHING earns the full 2.0; one good only on the triad + survival
+    # tops out ~2.0 lower. This makes "land every metric in band" the
+    # explicit optimisation target without letting any single secondary
+    # metric dominate the trinary triad.
+    band_completeness = _compute_band_completeness(metrics)
+
     score = (
-        3.0 * surv +         # 0-3
-        1.5 * m10 +          # 0-1.5
-        1.5 * streak_score + # 0-1.5
-        0.5 * m1_in_band +   # 0-0.5
-        0.5 * sm_score       # 0-0.5
+        2.0 * surv +         # 0-2   survival (v190: down from 3.0)
+        1.5 * m10 +          # 0-1.5 (heritability — abs(M10_peak))
+        1.0 * streak_score + # 0-1.0 (lock-in penalty)
+        1.5 * m1_score +     # 0-1.5 trinary triad: +1 fraction, target 0.22
+        1.5 * neutral_score +# 0-1.5 trinary triad: rest band, target 0.68
+        1.5 * inh_score +    # 0-1.5 trinary triad: -1 fraction, target 0.10 (v191)
+        0.5 * sm_score +     # 0-0.5 (sensory→motor coupling)
+        2.0 * band_completeness  # 0-2.0 all secondary healthy bands (v191)
     )
 
     # Component 6 (v179, v4.87) — OPT-IN population g-factor term.
@@ -963,7 +1663,21 @@ def fitness(metrics: Optional[Dict[str, float]]) -> float:
         g_health = pc1_health * manifold_gate          # ∈ [0,1]
         score += gw * g_health                          # 0 .. gw
 
-    return float(score)
+    # v192 (v5.07) — apply the graded population-viability multiplier. For a
+    # viable trial (true peak ≥ 8) this is ×1.0, so the score and the ceiling
+    # are IDENTICAL to v191. For a small/crashed population it scales the score
+    # down toward 0.10× (peak=1) rather than zeroing it, so the leaderboard
+    # keeps a continuous gradient over the trinary distribution + bands instead
+    # of collapsing to all-zeros the way the v191 8h run did.
+    # v192 (v5.07) — apply the graded population-viability multiplier; v193
+    # (v5.08) — also apply the graded M1 silence multiplier. Both are ×1.0 for
+    # a viable, non-silent trial (true peak ≥ 8 and M1 ≥ 0.08), so the score and
+    # the 13.0 ceiling are IDENTICAL to v191 for every architecture that clears
+    # both bars. Small/crashed populations and near-silent networks are scaled
+    # down toward 0.10×/0.05× rather than zeroed, so the leaderboard keeps a
+    # continuous gradient over the trinary distribution + bands instead of
+    # collapsing to all-zeros or cliff-edged ties.
+    return float(score * pop_viability * m1_viability)
 
 
 
@@ -1007,13 +1721,29 @@ def _write_csv_header(csv_path: Path):
             'trial_id', 'completed_at_iso', 'fitness',
             'final_alive', 'peak_alive',
             'alive_q1', 'alive_q2', 'alive_q3', 'alive_mean',
-            'M1', 'M6', 'M9',
+            'M1', 'M1_neutral', 'M1_inh',   # v189 — trinary balance visibility
+            # v191 (v5.06) — the remaining healthy_bands metrics + the
+            # band-completeness composite, so the full healthy profile is
+            # in the log (the "all metrics in NAS" deliverable).
+            'M2', 'M3', 'M5', 'M7', 'input_sat', 'band_complete',
+            'M6', 'M9',
             'M10', 'M10_peak',
             'mean_streak_last', 'mean_streak_first',
             'locked', 'surv_score', 'expl_rate',
             'sm_corr', 'sm_corr_peak', 'sm_corr_mean',
             'g_pc1', 'g_pc1_peak', 'g_posman', 'g_meanr', 'g_l1l2',
             'n_samples', 'wall_actual_s', 'error',
+            # v186 (v5.01) — round-visibility. With NAS_TRIAL_CONFIG's
+            # max_rounds=1, total_rounds is always 1 and went_extinct
+            # captures whether the trial hit game-over before the budget.
+            'total_rounds', 'went_extinct', 'extinction_tick', 'min_alive',
+            # v192 (v5.07) — honest-peak diagnostic columns (the value the old
+            # trimmed code saw, and the honest time-average), finally persisted.
+            'peak_alive_trimmed', 'mean_alive_ever',
+            # v193 (v5.08) — seed-repeat reliability: how many repeats, and the
+            # per-seed spread of M1 and of fitness. Large fitness_std ⇒ the
+            # architecture's score is noisy / unreliable.
+            'n_repeats', 'n_repeats_ok', 'M1_std', 'fitness_std_reps',
             'arch_summary', 'is_global_best',
         ])
 
@@ -1033,7 +1763,20 @@ def _append_csv_row(csv_path: Path, result: Dict, is_global_best: bool):
         m.get('alive_q1', ''), m.get('alive_q2', ''),
         m.get('alive_q3', ''),
         f"{m.get('alive_mean_checkpoints', 0):.2f}",
-        f"{m.get('M1_last', 0):.4f}", f"{m.get('M6_last', 0):.4f}",
+        f"{m.get('M1_last', 0):.4f}",
+        # v189 (v5.04) — emit the full trinary balance to the log so it's
+        # post-hoc analysable. M1_inh + M1_neutral + M1 ≈ 1 by construction;
+        # we log two for legibility and the third is implicit.
+        f"{m.get('M1_neutral_last', 0):.4f}",
+        f"{m.get('M1_inh_last', 0):.4f}",
+        # v191 (v5.06) — secondary healthy_bands metrics + band-completeness
+        f"{m.get('M2_last', 0):.4f}",
+        f"{m.get('M3_last', 0):.4f}",
+        f"{m.get('M5_last', 0):.4f}",
+        f"{m.get('M7_last', 0):.4f}",
+        f"{m.get('input_sat_last', 0):.4f}",
+        f"{_compute_band_completeness(m):.4f}",
+        f"{m.get('M6_last', 0):.4f}",
         f"{m.get('M9_last', 0):.4f}", f"{m.get('M10_last', 0):.4f}",
         f"{m.get('M10_peak', 0):.4f}",
         f"{m.get('mean_streak_last', 0):.2f}",
@@ -1051,6 +1794,22 @@ def _append_csv_row(csv_path: Path, result: Dict, is_global_best: bool):
         f"{m.get('g_l1l2_last', 0):.4f}",
         result['n_samples'], f"{result['wall_seconds_actual']:.1f}",
         result['error'] or '',
+        # v186 (v5.01) — round-visibility columns. With max_rounds=1
+        # (NAS_TRIAL_CONFIG default) total_rounds is always 1; the trial
+        # ends at first extinction (went_extinct=1, extinction_tick set)
+        # or at wall budget (went_extinct=0, extinction_tick=-1).
+        m.get('total_rounds', 1),
+        1 if m.get('went_extinct', False) else 0,
+        m.get('extinction_tick', -1),
+        m.get('min_alive', ''),   # v191 — separates "full-budget limping" from healthy
+        # v192 — honest-peak diagnostics
+        m.get('peak_alive_trimmed', ''),
+        f"{m.get('mean_alive_ever', ''):.3f}" if isinstance(m.get('mean_alive_ever'), (int, float)) else '',
+        # v193 — seed-repeat reliability
+        int(m.get('n_repeats', 1)),
+        int(m.get('n_repeats_ok', 1)),
+        f"{m.get('M1_std', 0):.4f}",
+        f"{m.get('fitness_std_reps', 0):.4f}",
         arch_summary_string(result['arch']),
         1 if is_global_best else 0,
     ]
@@ -1124,7 +1883,7 @@ def _save_arch_json(arch: Dict[str, Any], path: Path, rank: int,
     # New _meta — completely replaces template _meta with NAS-run info
     template['_meta'] = {
         'name': f'nas_best_t{trial_id:03d}',
-        'version': 'NxonArchNAS v0.4 (v162)',
+        'version': 'NxonArchNAS v1.4 (v195)',
         'description': (
             f'Architecture found by NAS — trial {trial_id}, fitness {fitness_val:.4f}. '
             'Plug-and-play compatible with architectures/default.json: drop this file '
@@ -1377,6 +2136,19 @@ class _NASScheduler:
             print(f"[NAS] Strategy: {self.strategy.describe()}")  # v164
             print(f"[NAS] wall_seconds/trial={self.wall_seconds}  "
                   f"workers={self.workers}")
+            # v194 — make the seed-repeat budget math explicit at startup.
+            _R = _get_trial_repeats()
+            _mode = _get_repeats_mode()
+            if _R > 1:
+                if _mode == 'subdivide':
+                    _per = max(6.0, self.wall_seconds / float(_R))
+                    print(f"[NAS] repeats={_R} ({_mode}): wall PER ARCHITECTURE "
+                          f"={self.wall_seconds}s → {_per:.0f}s/repeat × {_R} "
+                          f"(cost-neutral vs single-trial; selection on the median)")
+                else:
+                    print(f"[NAS] repeats={_R} ({_mode}): {self.wall_seconds}s/repeat "
+                          f"× {_R} = {self.wall_seconds * _R}s PER ARCHITECTURE "
+                          f"({_R}× cost — deep single-arch mode, NOT for broad search)")
             print(f"[NAS] Output dir: {self.out_path}")
             print(f"[NAS] CSV log:    {self.csv_path}")
             print(f"[NAS] Best arch:  {self.out_path / 'nas_best.json'}")
@@ -1594,7 +2366,7 @@ def run_search(num_trials: int = 8,
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Neuraxon Architecture Search v0.5 — streaming scheduler '
+        description='Neuraxon Architecture Search v1.0 — streaming scheduler '
                     'with threaded saver and pluggable search strategy. '
                     'Continuous by default.')
     parser.add_argument('--trials', type=int, default=8,
@@ -1606,6 +2378,17 @@ def main():
                         help='Parallel processes (default: cpu_count - 1)')
     parser.add_argument('--seed', type=int, default=42,
                         help='RNG seed for architecture sampling (default: 42)')
+    parser.add_argument('--repeats', type=int, default=None,
+                        help='v193 — seed-repeats per architecture; selection uses '
+                             'the per-metric median to fight measurement noise '
+                             f'(default: {NAS_TRIAL_REPEATS}; 1 = v192 single-trial). '
+                             'See --repeats-mode for how the wall budget is shared.')
+    parser.add_argument('--repeats-mode', choices=['subdivide', 'multiply'], default=None,
+                        help="v194 — how --wall-seconds relates to repeats. "
+                             "'subdivide' (default): wall is PER ARCHITECTURE, each "
+                             "repeat runs wall/repeats (cost-neutral vs v192, keeps "
+                             "search breadth). 'multiply': each repeat runs the full "
+                             "wall (repeats× cost; deep single-arch characterisation).")
     parser.add_argument('--out-dir', default=None,
                         help='Output directory (default: nas_runs/<timestamp>)')
     parser.add_argument('--quiet', action='store_true',
@@ -1668,6 +2451,21 @@ def main():
                              '(default 6.0). Higher → more likely to dominate the '
                              'elite pool until real evaluations complete.')
     args = parser.parse_args()
+
+    # v193 — propagate --repeats. mp uses 'spawn', so a mutated module global
+    # would NOT reach the worker subprocesses; the environment IS copied at
+    # spawn time, and _get_trial_repeats() reads NEURAXON_NAS_REPEATS first
+    # (falling back to the module default), so setting the env var is the one
+    # mechanism that reaches both the parent and every worker.
+    if args.repeats is not None:
+        os.environ['NEURAXON_NAS_REPEATS'] = str(max(1, args.repeats))
+    elif 'NEURAXON_NAS_REPEATS' not in os.environ:
+        os.environ['NEURAXON_NAS_REPEATS'] = str(NAS_TRIAL_REPEATS)
+    # v194 — repeats budget mode (subdivide | multiply), env-routed for spawn.
+    if args.repeats_mode is not None:
+        os.environ['NEURAXON_NAS_REPEATS_MODE'] = args.repeats_mode
+    elif 'NEURAXON_NAS_REPEATS_MODE' not in os.environ:
+        os.environ['NEURAXON_NAS_REPEATS_MODE'] = NAS_REPEATS_MODE
     
     # v170 — load seed architectures if specified
     seed_archs = None

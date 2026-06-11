@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.5.0 neuron (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 185
+# Neuraxon Game of Life v.5.05 neuron (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 190
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -103,6 +103,19 @@ class Neuraxon:
         self._post_spike_mp_reset = float(getattr(params, 'post_spike_mp_reset', 0.0))
         # Clamp to valid range [0, 1]
         self._post_spike_mp_reset = max(0.0, min(1.0, self._post_spike_mp_reset))
+        # v191 (v5.06) — E/I adaptation-balance + autoreceptor kinetics now
+        # read from params (were hardcoded). Defaults reproduce v190 exactly.
+        # The 0.55 base (== the v149 adaptation ceiling, matching the firing
+        # threshold so adaptation cancels drive AT threshold) is multiplied
+        # by the excitatory / inhibitory factor depending on which state the
+        # neuron is currently firing.
+        self._adapt_target_exc_mult = float(getattr(params, 'adaptation_target_excitatory_multiplier', 1.5))
+        self._adapt_target_inh_mult = float(getattr(params, 'adaptation_target_inhibitory_multiplier', 1.0))
+        # guard against degenerate / negative multipliers
+        self._adapt_target_exc_mult = max(0.0, min(4.0, self._adapt_target_exc_mult))
+        self._adapt_target_inh_mult = max(0.0, min(4.0, self._adapt_target_inh_mult))
+        self._autoreceptor_tau_ticks = max(1.0, float(getattr(params, 'autoreceptor_tau_ticks', 150.0)))
+        self._autoreceptor_rate_coeff = max(0.0, float(getattr(params, 'autoreceptor_rate_coeff', 0.35)))
         
         self.circle_id = None
         self.fitness_score = 0.0
@@ -548,10 +561,16 @@ class Neuraxon:
         # with repeated firing. In real cortex, the timescale is
         # 50-200 ms, scaled to our tick rate gives τ ≈ 10-20 ticks.
         # The previous 40-tick τ was too slow for that biology.
+        # v191 (v5.06) — the excitatory / inhibitory multipliers are now
+        # READ FROM PARAMS (were hardcoded 1.5 / 1.0). Default values
+        # reproduce v190 exactly; the NAS now searches them so it can lower
+        # the excitatory brake and let +1 firing reach the paper target
+        # WITHOUT collapsing the rest band (held by refractory/AHP). See the
+        # config.py docstring + CHANGELOG_v191 for the full rationale.
         if self.trinary_state == 1:
-            adaptation_target = 0.55 * 1.5  # excitatory firing: stronger brake
+            adaptation_target = 0.55 * self._adapt_target_exc_mult  # excitatory firing brake
         elif self.trinary_state == -1:
-            adaptation_target = 0.55 * 1.0  # inhibitory firing: normal brake
+            adaptation_target = 0.55 * self._adapt_target_inh_mult  # inhibitory firing brake
         else:
             adaptation_target = 0.0
         # v178 (v4.86) — was hardcoded `dt / 20.0`; now operating_ranges.
@@ -568,7 +587,10 @@ class Neuraxon:
         # This creates proper negative feedback: high activity → high autoreceptor → harder to fire
         # Previous bug: tracked trinary_state sign, causing correlation issues
         activity_for_autoreceptor = abs(self.trinary_state)  # 0 or 1
-        self.autoreceptor += dt / 150.0 * (-self.autoreceptor + 0.35 * activity_for_autoreceptor)
+        # v191 (v5.06) — tau / rate read from params (were hardcoded
+        # `dt / 150.0` and `0.35`). Defaults reproduce v190 exactly.
+        self.autoreceptor += dt / self._autoreceptor_tau_ticks * (
+            -self.autoreceptor + self._autoreceptor_rate_coeff * activity_for_autoreceptor)
         
         # NEW v2.30: Energy-Aware Firing Threshold
         # BIOINSPIRED: ATP depletion impairs Na+/K+-ATPase pump efficiency

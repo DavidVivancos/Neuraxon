@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.5.0 game loop (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 185
+# Neuraxon Game of Life v.5.05 game loop (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 190
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -506,6 +506,19 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
     config._current_round = game_index
     config._game_id = "nxon2_" + "".join([str(random.randint(0, 9)) for _ in range(9)])
 
+    # v186 (v5.01) — wire the logger's streaming-export context so that
+    # KeyMetrics + MembraneDiag trim-flushes have a destination from
+    # tick 1. Without this the first trim event (around tick 10k under
+    # the default cap) would have to silently drop its slice. The save
+    # methods are stream-aware too: they finalise the on-disk file by
+    # appending the in-memory tail, so the saved file is the complete
+    # run regardless of how many trims happened.
+    try:
+        get_data_logger().set_export_context(config._game_id, ".")
+    except Exception as _exc:
+        # Streaming is optional — never let it block game start.
+        print(f"[game_loop] streaming-export wiring warning: {_exc}")
+
     all_time_best: Dict[str, List[NxEr]] = {'food_found': [], 'food_taken': [], 'explored': [], 'time_lived_s': [], 'mates_performed': [], 'fitness_score': [], 'g_factor': []}
 
     # v4.52 PERF (#StaticFoodSet): persistent set of live food positions —
@@ -921,6 +934,22 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
             _sbs = _arch_get('operating_ranges', 'sensory_boost_scale', None)
             if _sbs is not None:
                 p.sensory_boost_scale = max(0.05, float(_sbs))
+            # v191 (v5.06) — E/I adaptation-balance + autoreceptor kinetics.
+            # Same backward-compat contract: absent key keeps the config
+            # default (which equals the pre-v191 hardcoded value), so a
+            # default / legacy run is bit-identical to v190.
+            _ame = _arch_get('operating_ranges', 'adaptation_target_excitatory_multiplier', None)
+            if _ame is not None:
+                p.adaptation_target_excitatory_multiplier = max(0.0, min(4.0, float(_ame)))
+            _ami = _arch_get('operating_ranges', 'adaptation_target_inhibitory_multiplier', None)
+            if _ami is not None:
+                p.adaptation_target_inhibitory_multiplier = max(0.0, min(4.0, float(_ami)))
+            _att = _arch_get('operating_ranges', 'autoreceptor_tau_ticks', None)
+            if _att is not None:
+                p.autoreceptor_tau_ticks = max(1.0, float(_att))
+            _arr = _arch_get('operating_ranges', 'autoreceptor_rate_coeff', None)
+            if _arr is not None:
+                p.autoreceptor_rate_coeff = max(0.0, float(_arr))
         except Exception as _exc2:
             # Any failure → keep the randomised/config values (pre-v178
             # behaviour). Never crash the spawn.
@@ -1960,6 +1989,15 @@ def GameOfLife(NxWorldSize: int = 100, NxWorldSea: float = 0.60, NxWorldRocks: f
         game_index += 1
         config._current_round = game_index
         config._game_id = "nxon2_" + "".join([str(random.randint(0, 9)) for _ in range(9)])
+        # v186 (v5.01) — re-wire the streaming-export context for the new
+        # round. Each round gets its own game_id, so each round writes
+        # its own KeyMetrics / MembraneDiag stream file. The prior round's
+        # files are already on disk and finalised by the auto-save at
+        # round-end (line ~2367), so nothing is lost.
+        try:
+            get_data_logger().set_export_context(config._game_id, ".")
+        except Exception as _exc:
+            print(f"[game_loop] streaming-export rewire warning: {_exc}")
         effects.clear()
         births_count = 0
         deaths_count = 0

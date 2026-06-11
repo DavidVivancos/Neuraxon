@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v5.0 UI Widgets (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 185
+# Neuraxon Game of Life v5.05 UI Widgets (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 190
 # Based on the Paper "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos https://vivancos.com/  & Dr. Jose Sanchez  https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
 # https://www.researchgate.net/publication/397331336_Neuraxon
 # Play the Lite Version of the Game of Life at https://huggingface.co/spaces/DavidVivancos/NeuraxonLife

@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.5.0 architecture loader (Internal version 185)
+# Neuraxon Game of Life v.5.10 architecture loader (Internal version 195)
 # v155 introduces JSON-driven architecture parameterisation. See
 # architectures/README.md for usage.
 import json

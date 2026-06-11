@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.5.0 logger (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 185
+# Neuraxon Game of Life v.5.06 logger (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 191
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -155,6 +155,22 @@ class SurvivabilityTracker:
         self._original_ids_locked: bool = False
         self.original_alive_count: int = 0      # how many founders are still alive
         self.original_total: int = 0             # how many founders there were
+        # v192 (v5.07) — HONEST, NEVER-TRIMMED survival summary. The
+        # time_series['surv_alive_count'] list is trimmed to the last
+        # max_history_length (=10000) samples for memory (v185+), dropping
+        # the OLDEST ~1000 samples per trim. In a multi-hour NAS trial that
+        # produces far more than 10000 samples, the early high-population
+        # phase is trimmed away, so peak_alive computed from the trimmed
+        # series reflects only the recent (often crashed) window — the v191
+        # 8h run showed peak_alive=1 for trials that had genuinely sustained
+        # ~10 NxErs earlier, which the population floor then zeroed. These
+        # three running scalars summarise the WHOLE trial in O(1) memory and
+        # are never trimmed, so the NAS can read the TRUE peak and the
+        # time-averaged sustained population.
+        self.max_alive_ever: int = 0            # true historical peak population
+        self.alive_sum_ever: float = 0.0        # Σ alive_count over all samples
+        self.alive_samples_ever: int = 0        # # of samples (for the mean)
+        self.last_alive_count: int = 0          # most recent alive_count (true final)
         # v170 — full per-NxEr lifespan log (for distribution analysis).
         # Each entry: (nxer_id, birth_tick, death_tick, was_original)
         self._lifespan_log: list = []
@@ -190,6 +206,12 @@ class SurvivabilityTracker:
         report 'originals still alive' separately from total population."""
         self.last_tick_seen = tick
         self.alive_count = len(alive_nxers)
+        # v192 (v5.07) — update the never-trimmed honest survival summary.
+        if self.alive_count > self.max_alive_ever:
+            self.max_alive_ever = self.alive_count
+        self.alive_sum_ever += self.alive_count
+        self.alive_samples_ever += 1
+        self.last_alive_count = self.alive_count
         
         # v170 — lock originals on first sample
         if not self._original_ids_locked:
@@ -342,8 +364,8 @@ class DataLogger:
         self.game_metadata = {
             'start_timestamp': datetime.now().isoformat(),
             'log_level': self.log_level,
-            'version': '5.0',                     # v184
-            'internal_version': 185,               # v152
+            'version': '5.10',                     # v184
+            'internal_version': 195,               # v152
             'research_probes_available': _RESEARCH_PROBES_AVAILABLE,
             'research_probes_import_error': _RESEARCH_PROBES_IMPORT_ERROR,
         }
@@ -1135,6 +1157,166 @@ class DataLogger:
     _DEAD_NXER_GC_GRACE: int = 3        # # of trims an NxEr's series may sit
                                         # idle before being garbage-collected
 
+    # v186 (v5.01) — Membrane-diag is now bounded with the same trim+stream
+    # pattern. Set generous because each row is small (one neuron sample)
+    # and the file is consumed as a flat table.
+    _MEMBRANE_DIAG_CAP: int = 50000     # rows kept in RAM; older rows
+                                        # stream to disk on overflow
+
+    # v186 (v5.01) — Streaming-export schema. Fixed superset of columns so
+    # the stream file written incrementally during the run has a stable
+    # header. Custom column subsets passed to save_key_metrics() at save
+    # time are projected from this superset for the in-memory tail.
+    _STREAM_KMETRICS_KEYS: tuple = (
+        # the 10 paper-fidelity headline metrics
+        'M1_excitatory_fraction', 'M2_mean_gate', 'M3_pac_modulation_idx',
+        'M4_temporal_divergence', 'M5_branching_ratio',
+        'M6_spontaneous_fraction', 'M7_zero_input_mi_ratio',
+        'M8_sensory_vs_association_dissociation', 'M9_transfer_ratio',
+        'M10_heritability_r',
+        # diagnostics
+        'stuck_fraction_at_pos1', 'stuck_fraction_at_neg1',
+        'stuck_fraction_15', 'mean_state_streak',
+        'input_active_fraction', 'input_drive_pressure',
+        'sensory_motor_corr', 'input_saturation_fraction',
+        'pop_mean_idle_seconds', 'exploration_trigger_rate',
+        'motor_neutral_fraction', 'input_locked_fraction',
+        'input_variance_mean', 'surv_score', 'surv_alive_count',
+        'surv_original_count', 'g_pc1_fraction', 'g_positive_manifold',
+        'g_mean_offdiag_r', 'g_lambda1_over_lambda2',
+    )
+
+    def set_export_context(self, game_id: str, out_dir: str = ".") -> None:
+        """v186 (v5.01) — set the destination context for streaming export
+        files. Called by game_loop at game start, and at every round-
+        restart (so the new round's stream file uses the new game_id).
+
+        Must be called BEFORE the first trim-with-overflow fires; otherwise
+        the trimmed rows have nowhere to stream and would be lost in RAM
+        when the buffer rolled over. The logger constructor doesn't know
+        the game_id (chicken-and-egg with config), so this is a separate
+        wiring step. Safe to call multiple times — the path is recomputed
+        each call, and stream files for prior game_ids are left intact.
+        """
+        gid = (game_id or "unknown").replace('/', '_').replace('\\', '_')
+        self._export_game_id = gid
+        self._export_dir = out_dir or "."
+        # Reset stream cursors so the new game_id starts a fresh file.
+        self._stream_kmetrics_path = os.path.join(
+            self._export_dir, f"{gid}__KeyMetrics.txt")
+        self._stream_kmetrics_last_tick = -1
+        self._stream_kmetrics_header_written = False
+        self._stream_mdiag_path = os.path.join(
+            self._export_dir, f"{gid}__MembraneDiag.txt")
+        self._stream_mdiag_last_row = -1
+        self._stream_mdiag_header_written = False
+
+    def _ensure_stream_attrs(self) -> None:
+        """Initialise streaming attrs to defaults if set_export_context was
+        never called (back-compat for headless tests that construct a
+        DataLogger directly and never wire it to a game session).
+        """
+        if not hasattr(self, '_export_game_id'):
+            self._export_game_id = None
+            self._export_dir = None
+            self._stream_kmetrics_path = None
+            self._stream_kmetrics_last_tick = -1
+            self._stream_kmetrics_header_written = False
+            self._stream_mdiag_path = None
+            self._stream_mdiag_last_row = -1
+            self._stream_mdiag_header_written = False
+
+    def _stream_kmetrics_rows(self, start_idx: int, end_idx: int) -> None:
+        """Append time_series rows [start_idx, end_idx) to the on-disk
+        KeyMetrics stream file. Writes the header on first call. Safe to
+        no-op when no export context is set.
+        """
+        self._ensure_stream_attrs()
+        if self._stream_kmetrics_path is None:
+            return
+        if not hasattr(self, 'time_series'):
+            return
+        ts = self.time_series
+        ticks = ts.get('ticks') or []
+        if start_idx >= end_idx or end_idx > len(ticks):
+            return
+        timestamps = ts.get('timestamps') or []
+        try:
+            new_file = not self._stream_kmetrics_header_written
+            with open(self._stream_kmetrics_path,
+                      'w' if new_file else 'a',
+                      encoding='utf-8') as f:
+                if new_file:
+                    f.write("# Neuraxon Game of Life v5.10 "
+                            "— Key metrics export (streaming)\n")
+                    f.write(f"# game_id={self._export_game_id}\n")
+                    f.write("# NOTE: this file is written incrementally "
+                            "while the game runs (every trim event "
+                            "flushes the oldest rows here). It IS the "
+                            "complete export — no separate finalise step "
+                            "needed. RAM is bounded by max_history_length "
+                            "but disk records the FULL run.\n")
+                    f.write("# format=tab-separated, header row, one row "
+                            "per full-analytics tick\n")
+                    cols = ['tick', 'wallclock_seconds'] + list(self._STREAM_KMETRICS_KEYS)
+                    f.write('\t'.join(cols) + '\n')
+                    self._stream_kmetrics_header_written = True
+                for i in range(start_idx, end_idx):
+                    cells = [str(ticks[i]),
+                             f"{timestamps[i]:.3f}" if i < len(timestamps) else "0.000"]
+                    for k in self._STREAM_KMETRICS_KEYS:
+                        seq = ts.get(k, [])
+                        v = seq[i] if i < len(seq) else 0.0
+                        cells.append(f"{float(v):.6f}")
+                    f.write('\t'.join(cells) + '\n')
+                if end_idx > 0 and ticks:
+                    self._stream_kmetrics_last_tick = ticks[end_idx - 1]
+        except Exception as exc:
+            print(f"[DataLogger] stream KeyMetrics append failed: {exc}")
+
+    def _stream_mdiag_rows(self, start_idx: int, end_idx: int) -> None:
+        """Append membrane-diag rows [start_idx, end_idx) to the on-disk
+        stream file. Writes the header on first call.
+        """
+        self._ensure_stream_attrs()
+        if self._stream_mdiag_path is None:
+            return
+        rows = getattr(self, '_membrane_diag_rows', None) or []
+        if start_idx >= end_idx or end_idx > len(rows):
+            return
+        try:
+            new_file = not self._stream_mdiag_header_written
+            cols = ['tick', 'nxer_id', 'neuron_id', 'layer', 'mp', 'adapt',
+                    'autoreceptor', 'trinary_state', 'firing_rate_avg',
+                    'state_streak', 'energy_level']
+            with open(self._stream_mdiag_path,
+                      'w' if new_file else 'a',
+                      encoding='utf-8') as f:
+                if new_file:
+                    f.write("# Neuraxon Game of Life v5.10 "
+                            "— Membrane diagnostics (streaming)\n")
+                    f.write(f"# game_id={self._export_game_id}\n")
+                    f.write("# NOTE: this file is written incrementally "
+                            "as _membrane_diag_rows rolls over (cap "
+                            f"{self._MEMBRANE_DIAG_CAP} rows). RAM is "
+                            "bounded; disk records the FULL run.\n")
+                    f.write(f"# sampled every {self._membrane_diag_sample_every} ticks, "
+                            f"first 3 hidden + first 3 input neurons of first 3 "
+                            f"alive NxErs each sample (v176 — layer column)\n")
+                    f.write('\t'.join(cols) + '\n')
+                    self._stream_mdiag_header_written = True
+                for i in range(start_idx, end_idx):
+                    row = rows[i]
+                    line = '\t'.join(
+                        (f"{row.get(c):.6f}"
+                         if isinstance(row.get(c), float)
+                         else str(row.get(c, 'input' if c == 'layer' else '')))
+                        for c in cols)
+                    f.write(line + '\n')
+                self._stream_mdiag_last_row = end_idx - 1
+        except Exception as exc:
+            print(f"[DataLogger] stream MembraneDiag append failed: {exc}")
+
     def _trim_list_in_place(self, lst, max_len: int) -> bool:
         """Drop the oldest excess of `lst` when it has reached max_len.
 
@@ -1145,11 +1327,11 @@ class DataLogger:
 
         Trim target: 90% of max_len. In steady-state (caller appends ~1
         sample/tick and trims every tick) this drops exactly cap//10
-        per call — identical to the pre-v185 time_series rule. If the
-        list is FAR over (catch-up after max_history_length is reduced
-        at runtime, or after a logger-level change resurfaces a long-
-        idle buffer) we drop all excess in one call instead of bleeding
-        it out one chunk per tick over thousands of ticks.
+        per call. If the list is FAR over (catch-up after
+        max_history_length is reduced at runtime, or after a logger-level
+        change resurfaces a long-idle buffer) we drop all excess in one
+        call instead of bleeding it out one chunk per tick over thousands
+        of ticks.
         """
         if max_len <= 0:
             return False
@@ -1175,11 +1357,18 @@ class DataLogger:
         snap_cap = max(10, cap // self._SNAPSHOT_CAP_FACTOR)
 
         # 1) Global time_series (was the only buffer trimmed prior to v185).
+        #    v186: BEFORE the trim deletes the oldest slice, stream it to
+        #    disk so the on-disk KeyMetrics export remains COMPLETE for
+        #    the full run. Without this the file only contains whatever
+        #    the bounded RAM buffer happens to hold at save time — exactly
+        #    the truncation problem the user flagged after seeing
+        #    "earliest retained tick = 2001" in a 7.6-hour run.
         if hasattr(self, 'time_series') and self.time_series.get('ticks'):
             if len(self.time_series['ticks']) >= cap:
                 target = max(0, (cap * 9) // 10)
                 drop = len(self.time_series['ticks']) - target
                 if drop > 0:
+                    self._stream_kmetrics_rows(0, drop)
                     for key in self.time_series:
                         v = self.time_series[key]
                         if isinstance(v, list) and len(v) > drop:
@@ -1870,11 +2059,20 @@ class DataLogger:
                                 'energy_level': float(getattr(n, 'energy_level', 0.0)),
                             })
                             sampled += 1
-                # Keep memory bounded — drop oldest rows past 20k. Bumped
-                # window slightly since we now log ~2x rows per sample tick
-                # (hidden + input).
-                if len(self._membrane_diag_rows) > 30000:
-                    self._membrane_diag_rows = self._membrane_diag_rows[-22000:]
+                # v186 (v5.01) — Memory-bound + stream-to-disk. Prior to
+                # v186 this discarded the oldest 8k rows (drop down to 22k
+                # whenever the buffer crossed 30k), silently losing data.
+                # Now we stream the dropped slice to the on-disk
+                # MembraneDiag file so the export remains COMPLETE for the
+                # full run while RAM stays bounded. Cap raised to 50k since
+                # streaming makes drops cheap (cap is purely a RAM ceiling
+                # — disk has the full record).
+                if len(self._membrane_diag_rows) >= self._MEMBRANE_DIAG_CAP:
+                    target = max(0, (self._MEMBRANE_DIAG_CAP * 9) // 10)
+                    drop = len(self._membrane_diag_rows) - target
+                    if drop > 0:
+                        self._stream_mdiag_rows(0, drop)
+                        del self._membrane_diag_rows[:drop]
             
             # pop_mean_idle_seconds: mean wallclock idle time across
             # alive NxErs. Computed from last_move_tick. Surfaces the
@@ -2607,15 +2805,35 @@ class DataLogger:
         distribution there was the sensory drive, not network dynamics.
         v176 samples hidden neurons (where refractory/AHP runs) too.
 
+        v186 (v5.01): cooperates with the streaming export — if a stream
+        file already exists for this game_id (because rows have rolled
+        over during the run), we just APPEND the in-memory tail to it.
+        Otherwise we fall back to the pre-v186 single-shot write. Either
+        way the returned file is the complete record.
+
         Returns the saved path, or None if no rows were captured.
         """
-        if not self._membrane_diag_rows:
+        self._ensure_stream_attrs()
+        if not self._membrane_diag_rows and not self._stream_mdiag_header_written:
             return None
         gid = (game_id or "unknown").replace('/', '_').replace('\\', '_')
+        # Honour the streaming path if export context was wired and
+        # rolling has already happened — otherwise pick a sensible default.
+        if (self._stream_mdiag_path
+                and self._stream_mdiag_header_written
+                and self._export_game_id == gid):
+            # Stream file is already correct; flush the in-memory tail
+            # (rows index 0 .. end; trim has already moved older rows out).
+            self._stream_mdiag_rows(0, len(self._membrane_diag_rows))
+            # Clear the tail so subsequent save_membrane_diagnostics() calls
+            # don't double-write.
+            self._membrane_diag_rows = []
+            return os.path.abspath(self._stream_mdiag_path)
+        # Fall-back: short run, no streaming ever happened. Write once.
         filename = os.path.join(out_dir, f"{gid}__MembraneDiag.txt")
         try:
             with open(filename, 'w', encoding='utf-8') as f:
-                f.write("# Neuraxon Game of Life v5.0 — Membrane diagnostics\n")
+                f.write("# Neuraxon Game of Life v5.10 — Membrane diagnostics\n")
                 f.write(f"# game_id={gid}\n")
                 f.write(f"# rows={len(self._membrane_diag_rows)}\n")
                 f.write(f"# sampled every {self._membrane_diag_sample_every} ticks, "
@@ -2672,7 +2890,7 @@ class DataLogger:
         filename = os.path.join(out_dir, f"{gid}__LifespanLog.txt")
         try:
             with open(filename, 'w', encoding='utf-8') as f:
-                f.write("# Neuraxon Game of Life v5.0 — Per-NxEr lifespan log\n")
+                f.write("# Neuraxon Game of Life v5.10 — Per-NxEr lifespan log\n")
                 f.write(f"# game_id={gid}\n")
                 f.write(f"# deaths={len(log)}  survivors_listed={len(alive_rows)}\n")
                 f.write(f"# founders_at_start={surv.original_total}\n")
@@ -2761,12 +2979,44 @@ class DataLogger:
         all_export_keys = headline_keys + diagnostic_keys
         n = len(ts['ticks'])
         timestamps = ts.get('timestamps', [])
-        header = ['tick', 'wallclock_seconds'] + all_export_keys
         gid = (game_id or "unknown").replace('/', '_').replace('\\', '_')
+
+        # v186 (v5.01) — stream-aware finalisation. If trim has already
+        # rolled rows to disk, the streaming file IS the export. We just
+        # need to append the in-memory tail (rows past
+        # _stream_kmetrics_last_tick). If no streaming happened (short run),
+        # fall back to the single-shot write that matches pre-v186 output
+        # — same format, same headline+diagnostic columns the caller asked
+        # for, no surprise schema change.
+        self._ensure_stream_attrs()
+        if (self._stream_kmetrics_path
+                and self._stream_kmetrics_header_written
+                and self._export_game_id == gid):
+            # Find the in-memory rows whose tick is greater than what the
+            # stream has already seen — append only those.
+            last_tick = self._stream_kmetrics_last_tick
+            try:
+                start_idx = 0
+                ticks_list = ts['ticks']
+                # ticks_list is monotonically non-decreasing → linear scan
+                # from end is cheaper than bisect for typical 9k samples.
+                for i in range(len(ticks_list) - 1, -1, -1):
+                    if ticks_list[i] <= last_tick:
+                        start_idx = i + 1
+                        break
+                if start_idx < n:
+                    self._stream_kmetrics_rows(start_idx, n)
+            except Exception as exc:
+                print(f"[DataLogger] save_key_metrics tail-append failed: {exc}")
+            return os.path.abspath(self._stream_kmetrics_path)
+
+        # Fall-back path: no trim has streamed yet, so the in-memory buffer
+        # IS the full run. Single-shot write, same format as before.
+        header = ['tick', 'wallclock_seconds'] + all_export_keys
         filename = os.path.join(out_dir, f"{gid}__KeyMetrics.txt")
         try:
             with open(filename, 'w', encoding='utf-8') as f:
-                f.write("# Neuraxon Game of Life v5.0 — Key metrics export\n")
+                f.write("# Neuraxon Game of Life v5.10 — Key metrics export\n")
                 f.write(f"# game_id={gid}\n")
                 f.write(f"# samples={n}\n")
                 f.write("# format=tab-separated, header row, one row per "

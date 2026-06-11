@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.5.0 config (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 185
+# Neuraxon Game of Life v.5.05 config (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 190
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -218,6 +218,30 @@ class NetworkParameters:
     adaptation_tau_ticks: float = 20.0       # was hardcoded `dt / 20.0`
     autoreceptor_coefficient: float = 0.1    # was hardcoded `0.1 * autoreceptor` on theta_eff
     sensory_boost_scale: float = 1.0         # was hardcoded `tanh(x)` (scale 1.0)
+    # v191 (v5.06) — four more constants the neuron model previously
+    # hardcoded, now configurable so the architecture's operating_ranges
+    # section actually takes effect. Defaults equal the EXACT pre-v191
+    # hardcoded values (neuron.py: adaptation_target = 0.55 * 1.5 for
+    # excitatory firing and 0.55 * 1.0 for inhibitory; autoreceptor
+    # update `dt / 150.0 * (-autoreceptor + 0.35 * activity)`) and match
+    # architectures/default.json, so legacy / pure-default runs are
+    # bit-identical to v190. See CHANGELOG_v191.
+    #
+    # adaptation_target_*_multiplier is the E/I ADAPTATION-BALANCE lever.
+    # The 1.5× excitatory factor was added in v149 to brake a +1 lock-in
+    # pathology that the v171 refractory + v172 AHP machinery now handles
+    # STRUCTURALLY. With that lock-in already prevented, the residual 1.5×
+    # excitatory brake actively suppresses +1 firing relative to -1 —
+    # the root cause of the inhibitory skew + sub-target M1 the v190 8h NAS
+    # exposed (M1 plateaued ~0.15 vs the paper's 0.22 even in the rest-band
+    # -healthy winners). Lowering the excitatory multiplier toward 1.0 (or
+    # below) lets +1 reach the paper target WITHOUT collapsing the rest
+    # band, because the rest band is held by refractory/AHP, not by the
+    # adaptation brake. v191 wires it and adds it to the NAS search space.
+    adaptation_target_excitatory_multiplier: float = 1.5
+    adaptation_target_inhibitory_multiplier: float = 1.0
+    autoreceptor_tau_ticks: float = 150.0    # was hardcoded `dt / 150.0`
+    autoreceptor_rate_coeff: float = 0.35    # was hardcoded `0.35 * activity`
     # v179 (v4.87) — CHC six-sphere topology + g-factor. Defaults reproduce
     # the legacy 3-sphere behaviour EXACTLY: sphere_topology defaults to the
     # v178 builder, the κ/λc/βF levers are 1.0 (identity) and only consulted

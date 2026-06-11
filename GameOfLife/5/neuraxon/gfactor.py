@@ -1,4 +1,4 @@
-# Neuraxon Game of Life v.5.0 gfactor (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 185
+# Neuraxon Game of Life v.5.05 gfactor (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 190
 """
 g-factor measurement for the Game of Life — v179 (v4.87).
 
