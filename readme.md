@@ -35,7 +35,7 @@
 
 **Core implementation:** [`MultiNeuraxon2.py`](https://github.com/DavidVivancos/Neuraxon/blob/main/MultiNeuraxon2.py)
 
-**Neuraxon Game of Life 5.0 Research Version Mulit Nxon 2.0 (Based on Neuraxon 2.0)  + First g factor introduced:** (https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/5)
+**Neuraxon Game of Life 5.1 Research Version Mulit Nxon 2.0 (Based on Neuraxon 2.0)  + First g factor introduced:** (https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/5)
 
 **Neuraxon Live -> Nxon GoL Server + Client V 1.048 :** ([https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/NxonLive](https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/NxonLive))
 
