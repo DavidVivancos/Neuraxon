@@ -1,5 +1,8 @@
 # Neuraxon Game of Life Researh Version<br>
 CHANGE LOG:<br>
+June 10th 2026:<br>
+Neuraxon Game of Life v.5.10 (Research Version):(Multi - Neuraxon 2.0 Compliant) Internal version 195 ( serveral updates NAS & Trinary  expanded ) + New Brain base model
+
 May 30th 2026:<br>
 Multi Neuraxon Game of Life 5 — client / server ersion 5-v1.29 / GoL Server V 1.048 > Including Editor, Extend world map upto 1200x 2400 raw , + new brain base model based on latest Game Of Life research v192
 
