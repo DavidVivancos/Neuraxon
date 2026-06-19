@@ -100,6 +100,12 @@ class App:
         return self._no_cache(web.FileResponse(
             os.path.join(STATIC, "builder.html")))
 
+    async def kaleido_page(self, req):
+        """v1.48 — NxonKaleido (was NxonCaliedo): the standalone
+        brain-connectivity viewer, rendered entirely client-side."""
+        return self._no_cache(web.FileResponse(
+            os.path.join(STATIC, "kaleido.html")))
+
     async def _hidden_404(self, req):
         """When admin_path is customised, the default /admin URL must
         not reveal the panel — return a generic 404 page so scanners
@@ -113,7 +119,21 @@ class App:
             return web.json_response(
                 {"error": "viewer capacity reached"}, status=503)
         ws = web.WebSocketResponse(heartbeat=30)
-        await ws.prepare(req)
+        try:
+            await ws.prepare(req)
+        except asyncio.CancelledError:
+            self.sessions.close(token)
+            raise
+        except Exception:
+            # v1.42 — a client (often a stale browser tab reconnecting the
+            # instant the server reboots) frequently drops the socket
+            # mid-handshake; aiohttp then raises ClientConnectionResetError
+            # ("Cannot write to closing transport") from the header write.
+            # That is normal connection churn, not a server fault. Release
+            # the viewer slot and return quietly instead of letting it
+            # bubble up as an "Error handling request" traceback.
+            self.sessions.close(token)
+            return ws
         self._ws.add(ws)
         try:
             await ws.send_json({"type": "hello", "token": token})
@@ -133,17 +153,55 @@ class App:
         hz = float(self.gs.cfg.get("broadcast_hz", 10))
         period = 1.0 / hz
         while True:
-            snap = self.gs.snapshot()
-            if snap and self._ws:
-                payload = json.dumps({"type": "world", "data": snap})
-                dead = []
-                for ws in list(self._ws):
+            # FAST PATH: if the snapshot worker subprocess is enabled
+            # and has produced bytes, send those directly — the JSON
+            # encoding ran on a different core. If the worker is
+            # disabled or hasn't published yet, fall through to the
+            # in-process JSON build.
+            payload_bytes = self.gs.latest_bytes()
+            payload_str = None
+            if payload_bytes is None:
+                snap = self.gs.snapshot()
+                if snap and self._ws:
+                    payload_str = json.dumps({"type": "world",
+                                              "data": snap})
+            if (payload_bytes or payload_str) and self._ws:
+                # aiohttp's send_str expects a string. If we have raw
+                # bytes from the worker (UTF-8 JSON), decode here. The
+                # decode is cheap relative to the encode work that just
+                # ran on another core, and lets us keep send_str()
+                # which the clients already handle.
+                if payload_str is None:
+                    payload_str = payload_bytes.decode("utf-8")
+                # v1.42 — fan the frame out to every viewer CONCURRENTLY,
+                # with a per-send timeout. Previously this was a sequential
+                # `for ws: await ws.send_str(...)`, so a single slow or
+                # backpressured viewer (mobile, distant, or a tab that
+                # stopped reading) stalled the whole broadcast loop until
+                # its write drained. Because WS handshakes (`ws.prepare`)
+                # run on this same event loop, that stall also delayed NEW
+                # connections — so under load the console could fail to
+                # connect even though the engine was healthy. We now send
+                # concurrently and bound each send: a client that can't
+                # accept a frame within the timeout is dropped (it will
+                # reconnect) rather than holding up everyone else and the
+                # handshakes. Worst-case loop cycle is the timeout, not
+                # infinity.
+                clients = list(self._ws)
+
+                async def _send_one(_ws, _s):
                     try:
-                        await ws.send_str(payload)
-                    except Exception:
-                        dead.append(ws)
-                for d in dead:
-                    self._ws.discard(d)
+                        await asyncio.wait_for(_ws.send_str(_s),
+                                               timeout=1.0)
+                        return None
+                    except Exception as _e:
+                        return _e
+
+                results = await asyncio.gather(
+                    *(_send_one(ws, payload_str) for ws in clients))
+                for ws, res in zip(clients, results):
+                    if res is not None:
+                        self._ws.discard(ws)
             await asyncio.sleep(period)
 
     async def api_world(self, req):
@@ -186,34 +244,72 @@ class App:
                 {"error": "registered-user capacity reached"},
                 status=503)
         overrides = coerce_overrides(d.get("params", {}))
-        # one live NxEr per browser session: if this token already
-        # owns a NxEr that is still alive, refuse and return it.
+        # v1.45 — up to max_nxers_per_user (default 3) live NxErs per
+        # browser owner-token, instead of exactly one. If this token is
+        # already at the cap, refuse and return the names it owns.
         otok = sanitize(d.get("owner", ""), 64)
-        if otok:
-            existing = self.gs.owner_live_name(otok)
-            if existing:
-                return web.json_response(
-                    {"error": "you already have a live NxEr",
-                     "name": existing, "owner": otok}, status=409)
-        else:
+        if not otok:
             import secrets
             otok = secrets.token_urlsafe(18)
+        limit = int(self.gs.cfg.get("max_nxers_per_user", 3))
+        owned = self.gs.owner_live_names(otok)
+        if len(owned) >= limit:
+            return web.json_response(
+                {"error": "you already have %d live NxErs (max %d)"
+                          % (len(owned), limit),
+                 "names": owned, "owner": otok}, status=409)
         name = self.gs.register_nxer(overrides, hash_pw(pw), None)
         if not name:
             return web.json_response(
                 {"error": "world is full — try again shortly"},
                 status=503)
-        self.gs.bind_owner_session(otok, name)
+        names = self.gs.bind_owner_session(otok, name)
         return web.json_response(
-            {"name": name, "owner": otok, "password": pw})
+            {"name": name, "owner": otok, "password": pw,
+             "names": names})
 
     async def api_session(self, req):
         """Auto-reconnect: given the browser's owner token, return the
-        NxEr it owns IFF still alive (no password needed)."""
+        NxErs it owns that are still alive (no password needed). v1.45 —
+        returns the full list (`names`) plus `name` for back-compat."""
         d = await self._json(req)
         tok = sanitize(d.get("owner", ""), 64)
-        name = self.gs.owner_session_name(tok)
-        return web.json_response({"name": name} if name else {})
+        names = self.gs.owner_session_names(tok)
+        return web.json_response(
+            {"names": names, "name": (names[0] if names else None)})
+
+    async def api_nxbrain(self, req):
+        """v1.48 — NxonKaleido: live brain topology for one NxEr. v1.51 —
+        fully lock-free: marks the NxEr wanted (by name) and reads the
+        cache the game loop fills. NEVER acquires the engine lock, so it
+        can't stall the event loop / the world WebSocket while a viewer
+        polls. The client renders everything; no server-side visual work."""
+        name = sanitize(req.query.get("name", ""), 16)
+        if not name:
+            return web.json_response({"error": "no name"}, status=400)
+        self.gs.request_topology(name)
+        c = self.gs.get_topology(name)
+        if c is None:
+            return web.json_response({"warming": True, "name": name})
+        if c.get("dead"):
+            return web.json_response(
+                {"error": "NxEr not alive", "name": name}, status=404)
+        return web.json_response(
+            {"name": c["name"], "tick": c["tick"],
+             "spheres": c["topo"]["spheres"], "links": c["topo"]["links"],
+             "events": c.get("events", [])})
+
+    async def api_mynxers(self, req):
+        """v1.45 — owner views for every live NxEr this browser token
+        owns (up to the per-user cap), so the client can track them all
+        in one panel."""
+        tok = sanitize(req.query.get("owner", ""), 64)
+        out = []
+        for nm in self.gs.owner_session_names(tok):
+            v = self.gs.get_owner_view(nm)
+            if v is not None:
+                out.append(v)
+        return web.json_response({"nxers": out})
 
     async def api_login(self, req):
         ip = self._ip(req)
@@ -224,6 +320,7 @@ class App:
         name = sanitize(d.get("name", ""), 16)
         pw = d.get("password", "")
         token = sanitize(d.get("token", ""), 64)
+        owner = sanitize(d.get("owner", ""), 64)
         nx = self.gs.find_nxer_by_name(name)
         if (nx is None or not nx.alive or not nx.password_hash
                 or nx.password_hash != hash_pw(pw)):
@@ -235,7 +332,19 @@ class App:
         if token and not self.sessions.promote_registered(token, name):
             return web.json_response(
                 {"error": "owner-session capacity reached"}, status=503)
-        return web.json_response({"ok": True, "name": name})
+        # v1.45 — also bind to this browser's owner token so a NxEr you
+        # log into is tracked alongside the ones you created, up to the
+        # per-user cap (already-owned names re-bind freely).
+        names = [name]
+        if owner:
+            limit = int(self.gs.cfg.get("max_nxers_per_user", 3))
+            owned = self.gs.owner_live_names(owner)
+            if name in owned or len(owned) < limit:
+                names = self.gs.bind_owner_session(owner, name)
+            else:
+                names = owned + [name]
+        return web.json_response({"ok": True, "name": name,
+                                  "names": names})
 
     async def api_mynxer(self, req):
         name = sanitize(req.query.get("name", ""), 16)
@@ -385,6 +494,14 @@ class App:
                 "uptime_hours": round(
                     eng.lifetime["uptime_seconds"] / 3600.0, 2),
             },
+            "brain_pool": (eng.pool.mode_info()
+                           if hasattr(eng.pool, "mode_info") else {}),
+            "perf": (eng.get_perf()
+                     if hasattr(eng, "get_perf") else {}),
+            "m12": getattr(eng, "_last_m12", {}),
+            "history": (eng.history.stats()
+                        if getattr(eng, "history", None) is not None
+                        else {"enabled": False}),
         })
 
     # ---- god --------------------------------------------------------
@@ -437,9 +554,18 @@ class App:
                        else "http://") + canon_host + req.rel_url.path_qs
                 return web.Response(status=308,
                                     headers={"Location": tgt})
-            # 2. http when https required -> 308 to https (skip WS:
-            #    the WS upgrade comes after the TLS handshake already)
-            if force_https and xfp == "http" and req.method == "GET":
+            # 2. http when https required -> 308 to https. MUST skip the
+            #    WebSocket upgrade: a WS handshake is a GET, browsers do
+            #    NOT follow redirects on it, and nginx already terminated
+            #    TLS — so a ws:// upgrade proxied here over plain http to
+            #    127.0.0.1 is expected. Redirecting it (which happens if
+            #    nginx omits X-Forwarded-Proto: https) silently breaks the
+            #    live stream. The previous code's comment claimed to skip
+            #    WS but the condition didn't — this is the fix.
+            is_ws_upgrade = (
+                req.headers.get("Upgrade", "").lower() == "websocket")
+            if (force_https and xfp == "http" and req.method == "GET"
+                    and not is_ws_upgrade):
                 tgt = ("https://" + (canon_host or host) +
                        req.rel_url.path_qs)
                 return web.Response(status=308,
@@ -457,6 +583,10 @@ class App:
         routes = [
             web.get("/", self.index),
             web.get("/static/builder.html", self.builder_page),
+            web.get("/kaleido.html", self.kaleido_page),
+            web.get("/static/kaleido.html", self.kaleido_page),
+            web.get("/caleido.html", self.kaleido_page),   # back-compat alias
+            web.get("/static/caleido.html", self.kaleido_page),
             web.get(admin_route, self.admin_page),
             web.get("/ws", self.ws),
             web.get("/api/world", self.api_world),
@@ -465,6 +595,8 @@ class App:
             web.post("/api/session", self.api_session),
             web.post("/api/login", self.api_login),
             web.get("/api/mynxer", self.api_mynxer),
+            web.get("/api/mynxers", self.api_mynxers),
+            web.get("/api/nxbrain", self.api_nxbrain),
             web.get("/api/mynxer/family", self.api_mynxer_family),
             web.get("/api/mynxer/child",  self.api_mynxer_child),
             web.get("/api/export", self.api_export),

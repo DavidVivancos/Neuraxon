@@ -24,6 +24,7 @@ import math
 import time
 import random
 import hashlib
+from collections import deque
 
 os.environ.setdefault("NEURAXON_HEADLESS", "1")
 
@@ -47,6 +48,11 @@ except Exception:
 
 from config import NetworkParameters            # noqa: E402
 from architecture import get_param as arch_get  # noqa: E402
+
+# v1.52 — learning loop: when True, make_params enables the substrate's
+# three-factor AGMP plasticity so dopamine bursts can consolidate learning.
+# Set from world_config by Engine.__init__ before any NxEr is built.
+_LEARNING_AGMP = False
 # brains are built inside BrainPool workers (see brain_pool.py)
 from neuraxon.gfactor import compute_population_g, MIN_AGENTS_FOR_G  # noqa: E402
 import neuraxon.gfactor as _gfactor  # noqa: E402
@@ -72,6 +78,34 @@ RANK_METRICS = ("food_found", "food_taken", "explored",
 COUNTER_METRICS = frozenset(("food_found", "food_taken", "explored",
                              "time_lived", "mates_performed",
                              "fitness"))
+
+# v1.44 — target bands for the offline-GoL M-metrics we can faithfully
+# record online (subset of research_probes.TARGET_BANDS). Used only to
+# tag each logged value in-band/out-of-band; not enforced anywhere.
+# M3 (PAC), M4 (multi-timescale weights) and M9 (compositional) are NOT
+# recorded online — M3 needs a 200-tick per-brain oscillator window, M4
+# needs weight-increment history and is moot with AGMP off, and M9 needs
+# signed/multi-level sight+song channels (online sight/song are binary).
+M_BANDS = {
+    "M1_E":            (0.18, 0.28),
+    "M1_I":            (0.08, 0.15),
+    "M1_N":            (0.60, 0.78),
+    "M2_mean_gate":    (0.40, 0.85),
+    "M2_gate_xlink_std": (0.05, 0.45),
+    "M5_branching":    (0.92, 1.10),
+    "M6_acw_heterogeneity": (3.0, 60.0),
+    "M7_zero_input_ratio":  (0.40, 1.20),
+    "M8_sensory_vs_assoc":  (0.0, 1.0),   # sensory should sit >= association
+    "M10_heritability_r":   (0.20, 1.00),
+    "M10_lesion_retention": (0.70, 1.10),
+}
+
+
+def _m_in_band(key, val):
+    b = M_BANDS.get(key)
+    if b is None or val is None:
+        return None
+    return 1 if (b[0] <= val <= b[1]) else 0
 
 
 # --------------------------------------------------------------------
@@ -138,8 +172,21 @@ class NxEr:
         self.net = _NetShim()
         self.stats = Stats()
         self.visited = {self._cell(pos)}
+        # v1.36 — explored is now a MONOTONIC counter (stats.explored)
+        # incremented on entering a genuinely-new cell, while `visited`
+        # is an LRU-bounded recent-cell set used only as the novelty
+        # filter. This uncaps the explored metric (was frozen at 5000)
+        # and means camping a food cluster no longer inflates it.
+        self._visit_q = deque([self._cell(pos)])
+        self._last_move_dir = (0, 0)   # momentum for exploration
         self.known_food_ids = set()
         self.last_sing_level = 0.0
+        # Brain output cache. Initialized here so the Phase C hot loop
+        # can use direct attribute access (`nx._last_out`) instead of
+        # `getattr(nx, "_last_out", default)`. The default `(motors,
+        # branching)` matches the historic getattr fallback.
+        self._last_out = ([0] * 7, 1.0)
+        self._last_sensory = None
         # stable per-NxEr colour, exactly Lite's randomColor():
         # rgb with each channel in [30,235]. Sent in public_view so
         # every client renders the same colours (and they match Lite).
@@ -156,9 +203,12 @@ class NxEr:
         # lineage
         self.parents = list(parents)
         self.offspring_ids = []
+        self.nas_trial = None        # v1.51 — set on system-spawned NAS explorers
         # behaviour bookkeeping
         self.last_move_tick = 0
+        self.last_steal_tick = -10000  # v1.46 — theft cooldown gate
         self.last_eat_tick = -10000   # so first eat is allowed immediately
+        self._da_accum = 0.0          # v1.52 — reward (dopamine) banked since last brain step
         # After each bite the hunger-toward-food floor is suppressed
         # until this tick — so the NxEr wanders away from a food
         # source for a while before being dragged back. Mirrors the
@@ -248,7 +298,12 @@ class NxEr:
 # is range-clamped server-side (min,max). The brain topology is ALWAYS
 # the CHC g-capable 6-sphere architecture — it is NOT user-selectable.
 USER_TUNABLE = {
-    "num_hidden_neurons":          (4,    48,   int),
+    # v1.39 — cap user-created brains at 24 hidden neurons (was 48).
+    # A 48-neuron brain is ~2x the per-step compute of the trial-53
+    # arch's 24, so an unmanaged user NxEr could be twice as expensive
+    # as an autonomous one; capping keeps every NxEr's brain cost on
+    # the same budget, which matters on the path to 1000s of NxErs.
+    "num_hidden_neurons":          (4,    24,   int),
     "connection_probability":      (0.05, 0.6,  float),
     "learning_rate":               (0.001, 0.05, float),
     "spontaneous_firing_rate":     (0.0,  0.12, float),
@@ -277,6 +332,79 @@ def _params_to_dict(p):
         if isinstance(v, (int, float, str, bool)) or v is None:
             out[k] = v
     return out
+
+
+# v1.34 — optional per-birth genetic operator. Perturbs the heritable
+# neural traits by ±strength (relative), clamped to physiological ranges.
+# Crucially includes firing_threshold_inhibitory (the v195 E/I lever),
+# which verbatim inheritance left frozen. Enabled only when
+# offspring_mutation_strength > 0; default keeps the historic behaviour.
+_MUTABLE = {
+    # key: (lo, hi) clamp
+    "firing_threshold_excitatory": (0.25, 0.80),
+    "firing_threshold_inhibitory": (-1.30, -0.30),
+    "post_spike_mp_reset": (0.0, 1.0),
+    "intrinsic_timescale_default": (5.0, 40.0),
+    "learning_rate": (0.0005, 0.08),
+    "connection_probability": (0.10, 0.60),
+    "sensorimotor_coupling": (0.0, 3.5),
+}
+
+
+def _mutate_params(pd, strength):
+    out = dict(pd)
+    for k, (lo, hi) in _MUTABLE.items():
+        v = out.get(k)
+        if not isinstance(v, (int, float)):
+            continue
+        scale = abs(v) if v != 0 else (hi - lo) * 0.1
+        nv = v + random.uniform(-strength, strength) * scale
+        if nv < lo:
+            nv = lo
+        elif nv > hi:
+            nv = hi
+        out[k] = nv
+    # refractory is an int tick count — mutate discretely
+    r = out.get("refractory_period_ticks")
+    if isinstance(r, (int, float)) and random.random() < strength * 3:
+        out["refractory_period_ticks"] = max(0, min(8, int(r)
+                                                    + random.choice((-1, 1))))
+    return out
+
+
+def _apply_heritable(params_obj, pd):
+    """Force the heritable neural traits from a parent/mutated dict onto
+    a NetworkParameters object, BYPASSING the USER_TUNABLE whitelist that
+    make_params() applies. This is the inheritance path: without it,
+    make_params() resets non-tunable traits (notably
+    firing_threshold_inhibitory — the v195 E/I lever) to the arch value
+    every birth, which is exactly why it was frozen across generations.
+    Only used when offspring_mutation_strength > 0, so default behaviour
+    is unchanged."""
+    for k in _MUTABLE:
+        v = pd.get(k)
+        if not isinstance(v, (int, float)) or not hasattr(params_obj, k):
+            continue
+        try:
+            cur = getattr(params_obj, k)
+            setattr(params_obj, k, int(round(v))
+                    if isinstance(cur, int) and not isinstance(cur, bool)
+                    else float(v))
+        except (TypeError, ValueError):
+            pass
+    # refractory + the timescale alias make_params keeps in sync
+    r = pd.get("refractory_period_ticks")
+    if isinstance(r, (int, float)) and hasattr(params_obj,
+                                               "refractory_period_ticks"):
+        try:
+            params_obj.refractory_period_ticks = int(round(r))
+        except (TypeError, ValueError):
+            pass
+    ts = pd.get("intrinsic_timescale_default")
+    if isinstance(ts, (int, float)):
+        if hasattr(params_obj, "membrane_time_constant"):
+            params_obj.membrane_time_constant = max(5.0, min(60.0, float(ts)))
+    return params_obj
 
 
 def make_params(overrides=None):
@@ -354,6 +482,19 @@ def make_params(overrides=None):
                     setattr(p, k, float(max(lo, min(hi, float(v)))))
             except (TypeError, ValueError):
                 pass
+    # mngol5 v1.41 — optional global AGMP override, read from the env so it
+    # reaches the worker processes too (they build the brains). AGMP runs a
+    # full per-synapse plasticity pass every step but is gated by phasic
+    # dopamine, which sits at baseline because the reward/learning loop is
+    # not wired — so it burns CPU on unfocused weight drift, not learning.
+    # Disabling it makes the brain step materially cheaper; the trinary
+    # firing distribution is held by SEPARATE homeostatic scaling, so the
+    # core science readout is preserved. Reversible when the loop ships.
+    _agmp = os.environ.get("MNGOL5_AGMP")
+    if _agmp is not None:
+        p.agmp_enabled = (_agmp == "1")
+    elif _LEARNING_AGMP:
+        p.agmp_enabled = True        # v1.52 — learning loop on by config
     p.sphere_topology = "chc6"   # never overridable
     return p
 
@@ -409,31 +550,60 @@ class World:
                         self.terrain[(x, y)] = 2
                     else:
                         self.terrain[(x, y)] = 0
+        self._finalize_flat()
 
     def in_pole(self, y):
         """True for the unreachable polar bands (top & bottom rows)."""
         return y < self._pole or y >= self.size - self._pole
 
+    def _finalize_flat(self):
+        """Build a flat bytearray of terrain codes indexed by y*N + x.
+        At 2500 alive NxErs the per-tick code calls is_sea() / passable()
+        thousands of times — dict.get((x,y), 0) is one of the hottest
+        operations on the main core. The flat array is read via direct
+        integer indexing which is roughly 5× faster than the dict and
+        also frees the int(x), int(y) defensive conversions (positions
+        are integers everywhere). At this point we also DROP the dict:
+        every hot caller uses `_t` and the legacy method shims read it
+        too, so the dict was duplicate memory (an N=2400 earth-map dict
+        is ~250 MB on PyPy; the bytearray is 5.7 MB)."""
+        N = self.size
+        ba = bytearray(N * N)
+        for (x, y), v in self.terrain.items():
+            ba[y * N + x] = v
+        self._t = ba
+        self._N = N
+        # release the dict; subsequent reads go through self._t
+        self.terrain = None
+
     def passable(self, x, y):
-        if not (0 <= x < self.size and 0 <= y < self.size):
+        N = self._N
+        if not (0 <= x < N and 0 <= y < N):
             return False
-        if self.in_pole(y):
+        if y < self._pole or y >= N - self._pole:
             return False
-        return self.terrain.get((int(x), int(y)), 0) != 2
+        return self._t[y * N + x] != 2
 
     def is_sea(self, x, y):
-        return self.terrain.get((int(x), int(y)), 0) == 1
+        N = self._N
+        if not (0 <= x < N and 0 <= y < N):
+            return False
+        return self._t[y * N + x] == 1
 
     def terrain_rows(self):
         """Compact terrain for the client: one char per cell per row.
-        '.' sea · ',' land · '#' rock. Sent once over REST (static)."""
+        '.' sea · ',' land · '#' rock. Sent once over REST (static).
+        Reads from the flat bytearray (the legacy `terrain` dict was
+        dropped to save memory)."""
+        N = self._N
+        t = self._t
+        CHARS = b",.#"      # 0=land, 1=sea, 2=rock
         out = []
-        for y in range(self.size):
-            row = []
-            for x in range(self.size):
-                t = self.terrain.get((x, y), 0)
-                row.append("#" if t == 2 else ("." if t == 1 else ","))
-            out.append("".join(row))
+        for y in range(N):
+            base = y * N
+            # one bytes slice → translate to chars in a single C call
+            out.append(bytes(CHARS[t[base + x]] for x in range(N))
+                       .decode("ascii"))
         return out
 
 
@@ -445,6 +615,15 @@ class Engine:
         """All derived/runtime state. Called by BOTH __init__ and the
         crash-restore path so the two can never drift out of sync
         (this is what caused the missing _cell_size on restart)."""
+        # v1.34 — science history logger (set by GameServer after init;
+        # None means logging disabled). The engine only ever ENQUEUES
+        # records (cheap); a background thread does the file I/O.
+        if not hasattr(self, "history"):
+            self.history = None
+        # baseline for per-interval rate deltas (births/deaths/matings)
+        self._hist_prev = None
+        self._hist_last_tick = 0
+        self._obit_rate = float(cfg.get("obituary_sample_rate", 1.0))
         self.dt = 1.0 / float(cfg.get("global_time_steps", 30))
         # max_atrophy: the new NAS arch sets this to ~11.8, which makes
         # a NxEr that is idle for even half a second burn food ~8x
@@ -475,6 +654,12 @@ class Engine:
         self.bio_explore_prob = float(
             arch_get("biology", "explore_probability", 0.23))
         self.bio_base_drain = float(cfg.get("base_food_drain", 0.018))
+        # v1.49 — reproduction now requires a NxEr to be well-fed, i.e. a
+        # competent forager. Default 5 keeps the historic behaviour; the
+        # shipped world_config raises it so foraging skill (a brain task)
+        # gates reproduction, giving selection something brain-related to
+        # act on instead of pure spatial luck.
+        self.bio_mate_min_food = float(cfg.get("mate_min_food", 5))
         # Exploration tuning. hunger_threshold_pct < 1.0 keeps NxErs
         # in wandering mode while they still have appreciable food,
         # rather than the previous 0.85 which kept them perpetually
@@ -485,6 +670,26 @@ class Engine:
             cfg.get("hunger_threshold_pct", 0.55))
         self.bio_food_wander_ticks = int(
             cfg.get("food_wander_ticks", 40))
+        # v1.46 — three balance levers (all configurable):
+        #  * max_nxer_energy: hard cap on a NxEr's stored food. Without
+        #    it a few NxErs hoard thousands (seen: 7700+), which (a) makes
+        #    them giant theft targets and (b) defeats the idle-atrophy
+        #    drain (a 7700-food NxEr survives ~85k ticks even stuck), so
+        #    stuck hoarders never die. Capping restores both. "Full" in
+        #    the hunger model is ~60, so 150 still allows a 2.5x reserve.
+        #  * idle_death_ticks: a NxEr that hasn't MOVED in this many ticks
+        #    is culled outright (0 = disabled). Foraging NxErs move every
+        #    ~food_wander_ticks via the post-meal excursion, so only the
+        #    genuinely stuck (blocked at a mountain edge / packed cluster)
+        #    are caught. 1800 ticks ~= 90 s at 20 tps.
+        #  * steal_cooldown_ticks: min ticks between thefts by one NxEr.
+        #    Eating already has eat_cooldown_ticks (20); stealing had
+        #    NONE, so theft was strictly better than foraging and ran away
+        #    (seen: 21 827 stolen vs ~760 foraged). Matching the eat
+        #    cooldown puts theft on equal footing with foraging.
+        self.bio_energy_cap = float(cfg.get("max_nxer_energy", 150.0))
+        self.bio_idle_death_ticks = int(cfg.get("idle_death_ticks", 1800))
+        self._steal_cd = int(cfg.get("steal_cooldown_ticks", 20))
         self._cell_size = max(4, int(cfg["world_size"]) // 24)
         self._food_grid = {}
         self._food_at = {}
@@ -498,9 +703,27 @@ class Engine:
         self._events = []          # [{t,x,y}] visual FX, cleared each tick
         # full-population rank pool (id -> best value, per metric)
         self._rank_pool = {m: {} for m in RANK_METRICS}
+        # v1.43 — id+value of the current all-time record-holder per
+        # metric, captured the moment a LIVE NxEr breaks the record so
+        # the game server can export its full brain before it dies.
+        self._record_breakers = {}
         self._rank_index = {m: {} for m in RANK_METRICS}
         self._rank_top = {m: [] for m in RANK_METRICS}
         self._nxer_names = {}        # id -> name (survives pruning)
+        # v1.44 — main-process M-metric accumulators (behavioural metrics
+        # computed from the sensory/motor vectors the act loop already
+        # has; reset each history sample). M7 self-sustained activity:
+        # motor amplitude in zero-external-drive vs driven windows.
+        self._m12_on = bool(self.cfg.get("m12_metrics_enabled", True))
+        self._m7_zero_sum = 0.0
+        self._m7_zero_n = 0
+        self._m7_drv_sum = 0.0
+        self._m7_drv_n = 0
+        # M10 heritability: parent-avg fitness recorded at a child's birth
+        # (persists across samples; paired with the child's current
+        # fitness at report time). Capped to bound memory.
+        if not hasattr(self, "_herit_pending"):
+            self._herit_pending = {}   # child_id -> parent_avg_fitness
         self._food_dirty = True
         if not hasattr(self, "_g_cache"):
             self._g_cache = {"pc1": 0.0, "pos_manifold": 0.0,
@@ -509,12 +732,62 @@ class Engine:
         from .brain_pool import BrainPool
         ew = cfg.get("engine_workers", 0)
         if not ew or int(ew) <= 0:
-            ew = max(1, (os.cpu_count() or 1) - 1)
+            # Auto-detect. os.cpu_count() reports SYSTEM cpus which can
+            # be wrong inside containers/cgroups; sched_getaffinity is
+            # the CPUs THIS process may actually use. Prefer it, fall
+            # back to cpu_count, floor at 1.
+            ncpu = None
+            try:
+                ncpu = len(os.sched_getaffinity(0))
+            except (AttributeError, OSError):
+                ncpu = os.cpu_count()
+            ncpu = ncpu or 1
+            ew = max(1, ncpu - 1)
+            if ew <= 1 and (os.cpu_count() or 1) > 2:
+                # affinity said 1 but the box clearly has more cores —
+                # something pinned us; use cpu_count instead so we don't
+                # silently degrade to single-core in-process mode.
+                ew = max(1, (os.cpu_count() or 1) - 1)
+            print("[Engine] engine_workers auto-resolved to %d "
+                  "(sched_affinity=%s cpu_count=%s)" % (
+                      ew,
+                      (len(os.sched_getaffinity(0))
+                       if hasattr(os, "sched_getaffinity") else "n/a"),
+                      os.cpu_count()))
         nb = cfg.get("brain_builders", 0)
         nb = int(nb) if nb and int(nb) > 0 else None
+        # mngol5 v1.41 — publish the AGMP setting to the environment BEFORE
+        # the workers spawn so they inherit it (brains are built inside the
+        # workers, in a separate process from this one). v1.52: the learning
+        # loop REQUIRES AGMP (it's how dopamine consolidates eligibility
+        # traces), so learning_enabled forces it on even if the older
+        # agmp_enabled flag is false. With learning off, agmp_enabled (default
+        # True) still controls the reward-less plasticity pass.
+        _agmp_on = (cfg.get("agmp_enabled", True)
+                    or cfg.get("learning_enabled", True))
+        os.environ["MNGOL5_AGMP"] = "1" if _agmp_on else "0"
+        if not _agmp_on:
+            print("[Engine] AGMP plasticity DISABLED via config "
+                  "(cheaper brain step; reversible)")
         self.pool = BrainPool(
             int(ew), num_builders=nb,
-            step_timeout=float(cfg.get("worker_step_timeout", 5.0)))
+            step_timeout=float(cfg.get("worker_step_timeout", 5.0)),
+            reserved_builder_cores=int(
+                cfg.get("reserved_builder_cores", 2)),
+            pin_main_process=bool(cfg.get("pin_main_process", False)))
+        # v1.39 — per-phase timing (EWMA, in ms) so we can SEE where the
+        # tick budget goes on the path to 1000s of NxErs: Phase A (sense),
+        # Phase B (brain pool round-trip), Phase C (act+metabolism), and
+        # the whole tick. Surfaced in the admin console + history log.
+        self._perf = {"a_ms": 0.0, "b_ms": 0.0, "c_ms": 0.0,
+                      "tick_ms": 0.0, "due": 0, "alpha": 0.1}
+        # v1.39 opt-in slim broadcast — foods/colors are near-static, so
+        # when slim_broadcast is on we send the 1800-item food list and
+        # the per-NxEr colour only periodically (the client caches them),
+        # leaving per-frame frames to the fundamentals (id/pos/flags).
+        self._last_food_bcast = 0.0
+        self._last_food_count = -1
+        self._last_color_bcast = 0.0
 
     def __init__(self, cfg, name_allocator):
         self.cfg = cfg
@@ -551,10 +824,34 @@ class Engine:
         self._uptime_t0 = time.time()
         self._g_cache = {"pc1": 0.0, "pos_manifold": 0.0,
                          "mean_r": 0.0, "lambda_ratio": 1.0, "n": 0}
+        # v1.51 — embedded NAS. Every NxEr the SYSTEM spawns (founders,
+        # anti-extinction respawns, and the steady explorer trickle) gets a
+        # freshly sampled architecture so we can measure which brains do
+        # best; only mating offspring inherit genetics. Each explorer's
+        # architecture + lifetime outcomes are logged once, at death.
+        self._nas_enabled = bool(cfg.get("nas_explore_enabled", True))
+        self._nas_interval = int(cfg.get("nas_explore_interval_ticks", 500))
+        self._nas_trial_seq = 0
+        # v1.52 — learning loop. AGMP plasticity already runs in the
+        # substrate every step; the only missing piece is a reward that
+        # bursts phasic dopamine so the eligibility traces consolidate.
+        # We compute a per-NxEr reward on eating / mating, accumulate it
+        # between brain steps (LOD-safe), and raise dopamine on the next
+        # step. Disabled => behaviour is exactly as before (no plasticity).
+        global _LEARNING_AGMP
+        self._learning = bool(cfg.get("learning_enabled", True))
+        _LEARNING_AGMP = self._learning
+        self._da_base = float(cfg.get("dopamine_baseline", 0.15))
+        self._da_max = float(cfg.get("dopamine_burst_max", 0.85))
+        self._reward_eat_da = float(cfg.get("reward_eat_dopamine", 0.5))
+        self._reward_mate_da = float(cfg.get("reward_mate_dopamine", 0.7))
         self._init_runtime(cfg)
         self._spawn_food(self._effective_food_cap())
         for _ in range(int(cfg["starting_nxers"])):
-            self._spawn_nxer()
+            if self._nas_enabled:
+                self._spawn_explorer()
+            else:
+                self._spawn_nxer()
 
     # ---- spawning ---------------------------------------------------
     def _free_cell(self, want_land=True, want_sea=True):
@@ -634,6 +931,24 @@ class Engine:
             self.lifetime["total_managed_registrations"] += 1
         return nx
 
+    def _nas_sample(self):
+        """v1.51 — draw one architecture from the search space (the same
+        knobs the offline NAS tuned for trial-53). Uniform over each range
+        so explorers cover the space; mating then recombines whatever
+        survives."""
+        return {k: round(random.uniform(lo, hi), 5)
+                for k, (lo, hi) in _MUTABLE.items()}
+
+    def _spawn_explorer(self):
+        """System-spawned NxEr carrying a sampled architecture, tagged so
+        its lifetime outcome is logged at death for the NAS dataset."""
+        arch = self._nas_sample()
+        nx = self._spawn_nxer(params=make_params(arch))
+        if nx is not None:
+            self._nas_trial_seq += 1
+            nx.nas_trial = {"id": self._nas_trial_seq, "arch": arch}
+        return nx
+
     def register_user_nxer(self, param_overrides, password_hash,
                            owner_token, name=None):
         """Create a user-owned NxEr (name assigned server-side, or a
@@ -680,43 +995,73 @@ class Engine:
 
     def _sense(self, nx):
         """10 sensory channels (mirrors the Lite convention).
-        Uses the spatial hash → scales to thousands of NxErs."""
+        Uses the spatial hash → scales to thousands of NxErs.
+
+        Hot-loop micro-optimisations (these mattered at 2500+ alive):
+        - Read terrain via the flat bytearray `world._t` directly
+          (one indexed memory access vs `world.is_sea()` method call +
+          dict.get + tuple boxing).
+        - Bind `food_grid.get`, `can_sea`, `can_land`, `N` etc as
+          locals so the hot inner loops don't re-resolve attributes."""
         x, y = nx.pos
-        hunger = max(-1.0, min(1.0, 1.0 - nx.food / 60.0))
+        hunger = 1.0 - nx.food / 60.0
+        if hunger < -1.0: hunger = -1.0
+        elif hunger > 1.0: hunger = 1.0
         cs = self._cell_size
-        cx, cy = x // cs, y // cs
+        cx = x // cs
+        cy = y // cs
+        # locals (re-resolved-once vs per-iteration attribute lookups)
+        world = self.world
+        t = world._t
+        N = world._N
+        fg_get = self._food_grid.get
+        ng_get = self._nxer_grid.get
+        can_sea = nx.can_sea
+        can_land = nx.can_land
+        my_id = nx.id
         # nearest food: scan only the 3x3 neighbouring buckets, and
-        # skip food on terrain this NxEr cannot enter (so a land-only
-        # NxEr never gets a "go sea" direction that would just wedge
-        # it against the shore).
+        # skip food on terrain this NxEr cannot enter.
         best_d, fdx, fdy = 1e9, 0.0, 0.0
         for gx in (cx - 1, cx, cx + 1):
             for gy in (cy - 1, cy, cy + 1):
-                for fx, fy in self._food_grid.get((gx, gy), ()):
-                    f_sea = self.world.is_sea(fx, fy)
-                    if (f_sea and not nx.can_sea) or \
-                            (not f_sea and not nx.can_land):
+                bucket = fg_get((gx, gy))
+                if not bucket:
+                    continue
+                for fx, fy in bucket:
+                    # inline: is sea? = `t[fy*N+fx] == 1`
+                    f_sea = (0 <= fx < N and 0 <= fy < N
+                             and t[fy * N + fx] == 1)
+                    if (f_sea and not can_sea) or \
+                            (not f_sea and not can_land):
                         continue
-                    d = (fx - x) ** 2 + (fy - y) ** 2
+                    dx = fx - x; dy = fy - y
+                    d = dx * dx + dy * dy
                     if d < best_d:
                         best_d = d
-                        fdx = (1 if fx > x else -1 if fx < x else 0)
-                        fdy = (1 if fy > y else -1 if fy < y else 0)
+                        fdx = (1 if dx > 0 else -1 if dx < 0 else 0)
+                        fdy = (1 if dy > 0 else -1 if dy < 0 else 0)
         sight = 1.0 if best_d < 25 else 0.0
         smell = 1.0 / (1.0 + math.sqrt(best_d)) if best_d < 1e8 else 0.0
-        terrain = 1.0 if self.world.is_sea(x, y) else 0.0
+        # terrain channel — inline the lookup
+        terrain = 1.0 if (0 <= x < N and 0 <= y < N
+                          and t[y * N + x] == 1) else 0.0
         # nearest neighbour: only the local + adjacent buckets
         nb = 0.0
+        all_nxers = self.nxers
         for gx in (cx - 1, cx, cx + 1):
             for gy in (cy - 1, cy, cy + 1):
-                for oid in self._nxer_grid.get((gx, gy), ()):
-                    if oid == nx.id:
+                bucket = ng_get((gx, gy))
+                if not bucket:
+                    continue
+                for oid in bucket:
+                    if oid == my_id:
                         continue
-                    o = self.nxers.get(oid)
-                    if o and abs(o.pos[0] - x) <= 2 \
-                            and abs(o.pos[1] - y) <= 2:
-                        nb = 1.0
-                        break
+                    o = all_nxers.get(oid)
+                    if o is not None:
+                        op = o.pos
+                        if abs(op[0] - x) <= 2 and abs(op[1] - y) <= 2:
+                            nb = 1.0
+                            break
                 if nb:
                     break
             if nb:
@@ -727,11 +1072,98 @@ class Engine:
         return [hunger, fdx, fdy, terrain, sight, smell,
                 daynight, proprio, nb, song]
 
+    def _nearest_mate_dir(self, nx):
+        """v1.36 — unit step toward the nearest ELIGIBLE mate within the
+        3×3 spatial-grid neighbourhood (opposite sex, off cooldown,
+        food>=5, not a parent/child), or None. Only called for well-fed
+        off-cooldown NxErs, so the neighbourhood scan is rare + cheap.
+        This is what lets a sated NxEr actively court instead of camping
+        food — 'seek a mate if the time allows'."""
+        cs = self._cell_size
+        cx, cy = nx.pos[0] // cs, nx.pos[1] // cs
+        best = None
+        bestd = 1 << 30
+        for gx in (cx - 1, cx, cx + 1):
+            for gy in (cy - 1, cy, cy + 1):
+                for oid in self._nxer_grid.get((gx, gy), ()):
+                    if oid == nx.id:
+                        continue
+                    o = self.nxers.get(oid)
+                    if (o is not None and o.alive
+                            and o.is_male != nx.is_male
+                            and self.tick >= o.mate_cooldown_until
+                            and o.food >= self.bio_mate_min_food
+                            and o.id not in nx.parents
+                            and nx.id not in o.parents):
+                        ddx = o.pos[0] - nx.pos[0]
+                        ddy = o.pos[1] - nx.pos[1]
+                        d = ddx * ddx + ddy * ddy
+                        if d < bestd:
+                            bestd = d
+                            best = o
+        if best is None:
+            return None
+        ddx = best.pos[0] - nx.pos[0]
+        ddy = best.pos[1] - nx.pos[1]
+        return ((0 if ddx == 0 else (1 if ddx > 0 else -1)),
+                (0 if ddy == 0 else (1 if ddy > 0 else -1)))
+
+    def _explore_dir(self, nx):
+        """v1.36 — momentum + novelty exploration. Prefer continuing in
+        the current heading (so excursions cover ground instead of
+        oscillating), but steer toward a not-recently-visited enterable
+        cell; fall back to any enterable cell. Returns (dx, dy) or None.
+        This is the 'exploration is rewarded' drive for well-fed NxErs
+        and the search behaviour for hungry NxErs with no food in sight."""
+        px, py = nx.pos[0], nx.pos[1]
+        ld = nx._last_move_dir
+        # 65% of the time, keep heading if it leads somewhere novel
+        if (ld != (0, 0) and random.random() < 0.65):
+            tx, ty = px + ld[0], py + ld[1]
+            if self._can_enter(nx, tx, ty) and (tx, ty) not in nx.visited:
+                return ld
+        # otherwise prefer a novel (unvisited) enterable neighbour
+        dirs = list(DIR_OFFSETS)
+        random.shuffle(dirs)
+        for d in dirs:
+            tx, ty = px + d[0], py + d[1]
+            if self._can_enter(nx, tx, ty) and (tx, ty) not in nx.visited:
+                return d
+        # all neighbours visited/blocked — keep heading, else any open cell
+        if ld != (0, 0) and self._can_enter(nx, px + ld[0], py + ld[1]):
+            return ld
+        for d in dirs:
+            if self._can_enter(nx, px + d[0], py + d[1]):
+                return d
+        return None
+
     def _act(self, nx, outs):
         """7 motor channels → world actions. Trinary {-1,0,1}."""
         if len(outs) < 7:
             outs = list(outs) + [0] * (7 - len(outs))
         mvx, mvy, social, mate, give, rest, sing = outs[:7]
+        # v1.44 — M7 self-sustained activity (Nengo-distinguishing signal):
+        # motor amplitude when the NxEr has NO external drive vs when it
+        # is externally driven. External-drive channels in _last_sensory
+        # are fdx,fdy,sight,smell,nb,song (idx 1,2,4,5,8,9); hunger and
+        # day/night are internal and excluded so a quiet-patch NxEr counts
+        # as zero-input. Free — reuses the sensory + motor vectors already
+        # in hand. (Logged at history cadence; see history_sample.)
+        if self._m12_on:
+            s = getattr(nx, "_last_sensory", None)
+            if s is not None and len(s) >= 10:
+                drive = 0
+                for i in (1, 2, 4, 5, 8, 9):
+                    if s[i] != 0:
+                        drive += 1
+                mamp = (abs(mvx) + abs(mvy) + abs(social) + abs(mate)
+                        + abs(give) + abs(rest) + abs(sing)) / 7.0
+                if drive == 0:
+                    self._m7_zero_sum += mamp
+                    self._m7_zero_n += 1
+                elif drive >= 3:
+                    self._m7_drv_sum += mamp
+                    self._m7_drv_n += 1
         # Singing indicator. The brain's `sing` motor output rarely
         # fires with the current NAS arch, so singing is driven by
         # EVENTS instead (eating, mating, rare spontaneous) — matching
@@ -747,47 +1179,49 @@ class Engine:
         # rare spontaneous song (Lite has a ~0.2% spontaneous path)
         if nx.last_sing_level == 0.0 and random.random() < 0.0015:
             nx.last_sing_level = 1.0
-        # ---- idle-exploration safety net (NAS biology) -------------
-        # If the brain has produced no movement for idle_explore_s and
-        # the dice say so, inject a random heading. v152+ mechanism
-        # stops well-fed-but-stuck NxErs from starving in place.
-        idle_s = (self.tick - nx.last_move_tick) * self.dt
-        forced = False
-        if (idle_s >= self.bio_idle_explore_s
-                and random.random() < self.bio_explore_prob):
-            d = random.choice(DIR_OFFSETS)
-            mvx, mvy = d[0], d[1]
-            rest = 0
-            forced = True
-        # ---- STANDALONE hunger reflex (matches offline v189
-        # dopamine-driven foraging). When hungry AND the sensors
-        # report a food direction, override the brain's (usually
-        # random) motor output and step TOWARD the food.
-        #
-        # Two knobs in world_config.json control how exploratory
-        # NxErs are:
-        #   * hunger_threshold_pct (default 0.55): the NxEr only
-        #     seeks food when food < threshold * start_food. At 0.55
-        #     with start_food=120 the threshold is 66 — so a fresh
-        #     NxEr wanders freely under brain control until it
-        #     metabolises down to ~half full, instead of being
-        #     anchored to food cells from the moment it's slightly
-        #     peckish.
-        #   * food_wander_ticks (default 40): after every bite the
-        #     floor is suppressed for this many ticks so the NxEr
-        #     walks away under brain control before being dragged
-        #     back. 40 ticks ≈ 2 s @ 20 tps gives a visible random
-        #     walk excursion of ~6-8 cells before they orbit back
-        #     for the next bite.
+        # ---- v1.36 BEHAVIOURAL PRIORITY -----------------------------
+        # Replaces the old idle-explore safety net + hunger-only floor.
+        # The brain's motor output is still the default, but a drive
+        # overrides it: hungry NxErs forage (or search if no food is in
+        # sight); well-fed NxErs court an eligible mate if one is near,
+        # otherwise explore. Because a well-fed NxEr now ALWAYS has an
+        # explore/court drive, the "camp the food cluster" and
+        # "well-fed-but-stuck starves in place" behaviours both go away,
+        # and exploration + mate-seeking are actively rewarded.
+        #   hunger_threshold_pct (0.55): food < threshold ⇒ hungry.
+        #   food_wander_ticks (40): after a bite, foraging-toward-food
+        #     is suppressed this long so the NxEr leaves the source and
+        #     explores instead of orbiting it.
         li = nx._last_sensory
-        if (li is not None
-                and nx.food < (self.bio_start_food
-                               * self.bio_hunger_threshold)
-                and (li[1] or li[2])
-                and self.tick >= nx.wander_until_tick):
-            mvx, mvy = int(li[1]), int(li[2])
-            rest = 0
-            forced = True
+        forced = False
+        hungry = nx.food < (self.bio_start_food * self.bio_hunger_threshold)
+        food_sensed = li is not None and (li[1] or li[2])
+        if hungry:
+            if food_sensed and self.tick >= nx.wander_until_tick:
+                mvx, mvy = int(li[1]), int(li[2])      # forage to food
+                rest = 0
+                forced = True
+            else:
+                ed = self._explore_dir(nx)             # search for food
+                if ed is not None:
+                    mvx, mvy = ed
+                    rest = 0
+                    forced = True
+        else:
+            md = None
+            if self.tick >= nx.mate_cooldown_until and nx.food >= self.bio_mate_min_food:
+                md = self._nearest_mate_dir(nx)
+            if md is not None:
+                mvx, mvy = md                          # court: move to mate
+                nx.mating_intent_until_tick = self.tick + 60
+                rest = 0
+                forced = True
+            else:
+                ed = self._explore_dir(nx)             # explore
+                if ed is not None:
+                    mvx, mvy = ed
+                    rest = 0
+                    forced = True
         if rest == 1 and not forced:
             nx.food -= 0.005          # resting costs less
             return
@@ -815,10 +1249,22 @@ class Engine:
                 nx.pos = [nxp, nyp]
                 self._occupied[target] = nx.id
                 nx.heading = _dir_index(dx, dy)
+                nx._last_move_dir = (dx, dy)
                 nx.last_move_tick = self.tick
                 if target not in nx.visited:
+                    # v1.36 — explored is a MONOTONIC counter; `visited`
+                    # is an LRU-bounded (~5000) recent-cell set used only
+                    # as the novelty filter. Entering genuinely-new
+                    # ground increments explored without bound, so the
+                    # metric keeps rewarding roaming (was frozen at
+                    # 5000), while camping — where the NxEr stays within
+                    # its recent set — no longer increments it.
+                    nx.stats.explored += 1
                     nx.visited.add(target)
-                    nx.stats.explored = len(nx.visited)
+                    q = nx._visit_q
+                    q.append(target)
+                    if len(q) > 5000:
+                        nx.visited.discard(q.popleft())
         # eat any food on the new cell (O(1) via position index). Two
         # rate-limits matching the user's expectation:
         #   * the food source has `remaining = 25` and only depletes
@@ -843,6 +1289,8 @@ class Engine:
                 nx.food += 1.0
                 nx.stats.food_found += 1
                 self.lifetime["total_food_eaten"] += 1
+                if self._learning:        # v1.52 — dopamine reward on food
+                    nx._da_accum += self._reward_eat_da
                 # sing on DISCOVERY of a new food source (like Lite's
                 # "first-time food" trigger), not on every bite — keeps
                 # singing discrete rather than a constant choir.
@@ -889,22 +1337,28 @@ class Engine:
         #       is what kept "Stolen" at 0: brand-new brains never
         #       output social==1 reliably, so without this floor the
         #       behaviour never appears in the leaderboard.
+        # v1.46 — theft is now rate-limited like eating (steal_cooldown_
+        # ticks). Both paths below respect it so one NxEr can't drain a
+        # neighbour every single tick.
+        can_steal = (self.tick - nx.last_steal_tick) >= self._steal_cd
         if social == 1 or give == 1:
             for o in _neighbours():
                 if give == 1 and nx.food > 10:
                     nx.food -= 1
                     o.food += 1
-                elif social == 1 and o.food > 1:
+                elif social == 1 and can_steal and o.food > 1:
                     o.food -= 1
                     nx.food += 1
                     nx.stats.food_taken += 1
+                    nx.last_steal_tick = self.tick
                 break
-        elif nx.food < 5:
+        elif nx.food < 5 and can_steal:
             for o in _neighbours():
                 if o.food > 5 and random.random() < 0.30:
                     o.food -= 1
                     nx.food += 1
                     nx.stats.food_taken += 1
+                    nx.last_steal_tick = self.tick
                     break
         # mating — overhauled to match the v189 offline reference so
         # mating actually happens. Now:
@@ -918,17 +1372,27 @@ class Engine:
         #   * mating only triggers when BOTH parties are within their
         #     intent windows in the same tick, opposite sex, food>=5,
         #     not on cooldown, not parent/child. Each pays 1 food.
-        opposite_neighbour = any(
-            o.is_male != nx.is_male for o in _neighbours())
-        if mate == 1 or (opposite_neighbour and random.random() < 0.003):
+        # Stochastic mating-intent floor. Original code computed
+        # `opposite_neighbour = any(o.is_male != nx.is_male for o in
+        # _neighbours())` UNCONDITIONALLY for every NxEr, then almost
+        # always discarded the result (the 0.003 dice make 99.7% of the
+        # scans wasted work). At 2500+ alive that single line was a
+        # measurable fraction of main-thread time. Now we only scan
+        # neighbours on the rare tick when the dice actually triggers.
+        if mate == 1:
             nx.mating_intent_until_tick = self.tick + 60
+        elif random.random() < 0.003:
+            for o in _neighbours():
+                if o.is_male != nx.is_male:
+                    nx.mating_intent_until_tick = self.tick + 60
+                    break
         if (nx.mating_intent_until_tick > self.tick
                 and self.tick >= nx.mate_cooldown_until
-                and nx.food >= 5):
+                and nx.food >= self.bio_mate_min_food):
             for o in _neighbours():
                 if (o.is_male != nx.is_male
                         and self.tick >= o.mate_cooldown_until
-                        and o.food >= 5
+                        and o.food >= self.bio_mate_min_food
                         and o.mating_intent_until_tick > self.tick
                         and o.id not in nx.parents
                         and nx.id not in o.parents):
@@ -940,6 +1404,9 @@ class Engine:
         a.last_sing_level = 1.0          # courtship/celebration song
         b.last_sing_level = 1.0
         b.stats.mates_performed += 1
+        if self._learning:               # v1.52 — dopamine reward on mating
+            a._da_accum += self._reward_mate_da
+            b._da_accum += self._reward_mate_da
         a.food -= 1                       # offline cost
         b.food -= 1
         cd = int(self.cfg.get("mate_cooldown_ticks", 90))
@@ -970,11 +1437,29 @@ class Engine:
             c_sea  = a.can_sea  or b.can_sea
         if not (c_land or c_sea):
             c_land = True
-        # child inherits a parent's params (no genetic op needed here —
-        # the substrate's own plasticity drives adaptation)
+        # child inherits a parent's params. By default this is a verbatim
+        # copy (the substrate's own plasticity drives within-life
+        # adaptation). v1.34: an OPTIONAL genetic operator — set
+        # "offspring_mutation_strength" > 0 in world_config.json to let
+        # heritable neural traits (INCLUDING firing_threshold_inhibitory,
+        # the v195 E/I lever, which was previously frozen at the founder
+        # value) mutate per birth. With the new history logger this lets
+        # you watch whether free evolution rediscovers or abandons the
+        # NAS-found trinary corner. Default 0.0 = unchanged behaviour.
+        base_parent = a.params if random.random() < 0.5 else b.params
+        child_pd = _params_to_dict(base_parent)
+        mut = float(self.cfg.get("offspring_mutation_strength", 0.0))
+        if mut > 0.0:
+            child_pd = _mutate_params(child_pd, mut)
+            child_params = make_params(child_pd)
+            # carry the mutated heritable traits past the USER_TUNABLE
+            # filter so firing_threshold_inhibitory et al. actually
+            # inherit + evolve (otherwise make_params resets them).
+            _apply_heritable(child_params, child_pd)
+        else:
+            child_params = make_params(child_pd)
         child = self._spawn_nxer(
-            params=make_params(_params_to_dict(
-                a.params if random.random() < 0.5 else b.params)),
+            params=child_params,
             parents=(a.id, b.id),
             terrain_caps=(c_land, c_sea))
         if child:
@@ -982,11 +1467,37 @@ class Engine:
             b.offspring_ids.append(child.id)
             self.lifetime["total_matings"] += 1
             self.lifetime["total_births_mating"] += 1
+            # v1.44 — M10 heritability: record the parents' mean fitness at
+            # the moment of birth, keyed by child id. Paired with the
+            # child's own fitness at report time (history_sample). Capped
+            # so it can't grow without bound on a 24/7 server.
+            if self._m12_on:
+                try:
+                    pavg = 0.5 * (float(a.stats.fitness)
+                                  + float(b.stats.fitness))
+                    self._herit_pending[child.id] = pavg
+                    if len(self._herit_pending) > 6000:
+                        for k in list(self._herit_pending)[:1000]:
+                            del self._herit_pending[k]
+                except Exception:
+                    pass
             if len(self._events) < 200:
                 self._events.append({"k": "mate",
                                      "x": a.pos[0], "y": a.pos[1]})
                 self._events.append({"k": "birth", "x": child.pos[0],
                                      "y": child.pos[1]})
+            if self.history is not None:
+                p = child.params
+                self.history.lineage({
+                    "tick": self.tick, "id": child.id, "name": child.name,
+                    "parents": [a.id, b.id], "born_tick": self.tick,
+                    "is_male": child.is_male, "managed": child.is_managed,
+                    # snapshot the heritable E/I levers at birth so the
+                    # lineage file alone can reconstruct trait evolution
+                    "thr_inh": round(getattr(p, "firing_threshold_inhibitory", 0.0), 4),
+                    "thr_exc": round(getattr(p, "firing_threshold_excitatory", 0.0), 4),
+                    "refr": getattr(p, "refractory_period_ticks", 0),
+                })
 
     # ---- per-tick ---------------------------------------------------
     def _effective_food_cap(self):
@@ -1009,17 +1520,26 @@ class Engine:
     def step(self):
         self.tick += 1
         self.lifetime["total_ticks"] += 1
-        # peak watermarks (cheap; the next_food/respawn block runs
-        # less often than every tick on busy worlds, so do it here)
-        n_alive = sum(1 for a in self.nxers.values() if a.alive)
+        # SINGLE PASS to build the alive list and update peak
+        # watermarks — replaces three separate iterations over
+        # self.nxers.values() (alive count, managed-alive count,
+        # alive-list comprehension). At 2500 alive that's ~5000
+        # fewer Python-level iterations per tick.
+        order = []
+        n_alive = 0
+        n_managed = 0
+        for a in self.nxers.values():
+            if a.alive:
+                order.append(a)
+                n_alive += 1
+                if a.is_managed:
+                    n_managed += 1
         if n_alive > self.lifetime["peak_alive"]:
             self.lifetime["peak_alive"] = n_alive
-        n_managed_alive = sum(1 for a in self.nxers.values()
-                              if a.alive and a.is_managed)
-        if n_managed_alive > self.lifetime["peak_managed"]:
-            self.lifetime["peak_managed"] = n_managed_alive
+        if n_managed > self.lifetime["peak_managed"]:
+            self.lifetime["peak_managed"] = n_managed
         self._events = []
-        order = [nx for nx in self.nxers.values() if nx.alive]
+        _t0 = time.perf_counter()          # v1.39 perf: tick + Phase A start
 
         # --- Phase A: sense (read-only) — cheap pure-Python ----------
         self._build_spatial()
@@ -1029,46 +1549,123 @@ class Engine:
         # full fidelity; K=2 ≈ 2x fewer brain computations for a modest
         # behavioural change. The single biggest tunable speed lever
         # besides core count, and it never blocks the web server.
-        K = max(1, int(self.cfg.get("brain_step_every", 1)))
+        # brain_step_every (K): cuts how often each NxEr's brain is
+        # actually stepped. K=2 → each brain runs every other tick (the
+        # last motor output is reused), halving both _sense calls AND
+        # the brain-pool pipe traffic. This used to be a flat config;
+        # now it AUTO-SCALES with the alive population (the configured
+        # value is the FLOOR, auto-scaling only raises it). At 2500+
+        # alive the user reported main-core saturation and TPS in the
+        # ~1Hz range; bumping K from 1 → 2 brought TPS back to ~5Hz on
+        # the same world without visible behavioural change.
+        K_user = max(1, int(self.cfg.get("brain_step_every", 1)))
+        K_thresh = int(self.cfg.get("brain_step_auto_above_alive", 1500))
+        if K_thresh > 0 and n_alive > K_thresh:
+            auto_K = 2
+            if n_alive > K_thresh * 2.5:
+                auto_K = 3
+            if n_alive > K_thresh * 4:
+                auto_K = 4
+            K = max(K_user, auto_K)
+        else:
+            K = K_user
+        # v1.40 — stagger the LOD by each brain's index WITHIN its worker
+        # shard (id // n_shards), not by raw id. Brains live in worker
+        # `id % n_shards`, so staggering by raw id made the per-tick "due"
+        # set (ids in one residue class mod K) collide with the sharding
+        # whenever gcd(K, n_shards) > 1: e.g. K=5 with 10 workers put
+        # every due brain into just 2 of 10 workers, so 8 workers idled
+        # while 2 ran the whole batch serially — Phase B ballooned and
+        # raising K made it WORSE. Keying the stagger to id//n_shards
+        # steps an equal slice of EACH worker's own brains every tick, so
+        # all workers stay busy for any K. (Each brain still steps once
+        # per K ticks — identical behaviour, just load-balanced.)
+        n_shards = max(1, getattr(self.pool, "n", 1))
         batch = []
         due = []
+        mods = {}                      # v1.52 — id -> dopamine level (rewarded only)
+        learning = self._learning
+        da_base, da_max = self._da_base, self._da_max
         for nx in order:
             nx.stats.time_lived_s += self.dt
-            if K == 1 or (self.tick + nx.id) % K == 0:
+            if K == 1 or (self.tick + (nx.id // n_shards)) % K == 0:
                 sens = self._sense(nx)
                 nx._last_sensory = sens  # used by _act's hunger floor
                 batch.append((nx.id, sens))
                 due.append(nx)
+                # v1.52 — if this NxEr banked reward since its last brain
+                # step, raise phasic dopamine for THIS step so AGMP
+                # consolidates the eligibility traces, then clear the bank.
+                if learning and nx._da_accum > 0.0:
+                    mods[nx.id] = da_base + (nx._da_accum if nx._da_accum
+                                             < da_max else da_max)
+                    nx._da_accum = 0.0
 
         # --- Phase B: brains in PARALLEL across worker processes -----
         # While this blocks on pipe.recv() the GIL is free, so the
         # aiohttp web server stays responsive and clients keep loading.
-        results = self.pool.step(batch)
+        _tA = time.perf_counter()          # perf: Phase A done
+        results = self.pool.step(batch, mods if mods else None)
+        _tB = time.perf_counter()          # perf: Phase B done
         for nx in due:
             o = results.get(nx.id)
             if o is not None:
                 nx._last_out = o          # cache for the skipped ticks
 
         # --- Phase C: apply actions + metabolism (serial, cheap) ----
+        # Hoist hot attributes/methods as locals so the per-NxEr loop
+        # doesn't re-resolve `self.bio_*` / `self.dt` / `self._kill` /
+        # `self.tick` thousands of times.
+        bio_max = self.bio_max_atrophy
+        bio_ramp = self.bio_metab_ramp
+        bio_drain = self.bio_base_drain
+        energy_cap = self.bio_energy_cap          # v1.46
+        idle_death = self.bio_idle_death_ticks    # v1.46 (0 = off)
+        dt = self.dt
+        tick = self.tick
         for nx in order:
-            outs, br = getattr(nx, "_last_out", ([0] * 7, 1.0))
+            outs, br = nx._last_out         # initialized in NxEr.__init__
             self._act(nx, outs)
-            idle = max(0.0, (self.tick - nx.last_move_tick) * self.dt)
-            # soft metabolic ramp (NAS biology): drain rises with idle
-            # time but is capped by max_atrophy, and the base drain is
-            # gentle so an active NxEr comfortably outlives its food.
-            atrophy = min(self.bio_max_atrophy,
-                          1.0 + self.bio_metab_ramp * idle)
-            nx.food -= self.bio_base_drain * atrophy
+            if nx.food > energy_cap:        # v1.46 — cap hoarding
+                nx.food = energy_cap
+            idle_ticks = tick - nx.last_move_tick
+            if idle_death and idle_ticks > idle_death:
+                self._kill(nx, "idle")      # v1.46 — cull the stuck
+                continue
+            idle = idle_ticks * dt
+            if idle < 0.0:
+                idle = 0.0
+            atrophy = 1.0 + bio_ramp * idle
+            if atrophy > bio_max:
+                atrophy = bio_max
+            nx.food -= bio_drain * atrophy
             nx.net.branching_ratio = br
             nx.stats.branching = br
             if nx.food <= 0:
                 self._kill(nx)
-        # fitness & energy_efficiency are display/ranking-only (they do
-        # NOT affect simulation dynamics), so compute them at the rank
-        # cadence instead of every tick — a real per-tick saving over
-        # the whole population at scale.
-        if self.tick % int(self.cfg.get("rank_interval_ticks", 10)) == 0:
+        # v1.39 perf: fold this tick's phase timings into the EWMA (ms).
+        _tC = time.perf_counter()
+        _p = self._perf
+        _al = _p["alpha"]
+        _p["a_ms"] += _al * ((_tA - _t0) * 1000.0 - _p["a_ms"])
+        _p["b_ms"] += _al * ((_tB - _tA) * 1000.0 - _p["b_ms"])
+        _p["c_ms"] += _al * ((_tC - _tB) * 1000.0 - _p["c_ms"])
+        _p["tick_ms"] += _al * ((_tC - _t0) * 1000.0 - _p["tick_ms"])
+        _p["due"] = len(due)
+        # Heavy periodic ops auto-throttle at high N. `_update_g` does
+        # PCA-class numerical work over the full population (heavy on
+        # the main core at scale); `_update_all_time` iterates every
+        # alive NxEr × every metric and sorts. Stretch their cadence
+        # linearly with alive count so the main loop isn't blocked
+        # for hundreds of ms every K ticks at 2500+ alive.
+        rank_int = max(1, int(self.cfg.get("rank_interval_ticks", 10)))
+        g_int = max(1, int(self.cfg.get("g_interval_ticks", 30)))
+        heavy_thresh = int(self.cfg.get("heavy_ops_throttle_above_alive", 1500))
+        if heavy_thresh > 0 and n_alive > heavy_thresh:
+            mult = 1 + n_alive // heavy_thresh   # 2× at 1.5k, 3× at 3k…
+            rank_int *= mult
+            g_int *= mult
+        if self.tick % rank_int == 0:
             for nx in order:
                 if nx.alive:
                     nx.stats.energy_efficiency = max(
@@ -1083,22 +1680,33 @@ class Engine:
             deficit = cap - len(self.foods)
             self._spawn_food(min(
                 cap, len(self.foods) + max(2, deficit // 3)))
-        # population g (throttled)
-        if self.tick % int(self.cfg.get("g_interval_ticks", 30)) == 0:
+        # population g (throttled — uses the population-aware g_int
+        # computed above so heavy PCA work stretches with alive count)
+        if self.tick % g_int == 0:
             self._update_g()
         # anti-extinction respawn
         alive = [a for a in self.nxers.values() if a.alive]
         if len(alive) <= int(self.cfg.get("min_alive", 1)):
             for _ in range(int(self.cfg.get("respawn_batch", 8))):
-                self._spawn_nxer()
-        # update all-time ranking + prune very old corpses
+                if self._nas_enabled:
+                    self._spawn_explorer()
+                else:
+                    self._spawn_nxer()
+        # v1.51 — steady NAS explorer trickle: one fresh-architecture NxEr
+        # every nas_explore_interval_ticks, so the search keeps sampling
+        # without the explorers ever outnumbering the evolved population.
+        elif (self._nas_enabled and self._nas_interval > 0
+                and self.tick % self._nas_interval == 0
+                and len(alive) < int(self.cfg["max_nxers"])):
+            self._spawn_explorer()
         # all-time ranking is exact-enough at coarse cadence; rebuilding
         # + sorting it every tick is wasted serial work on the main core
-        if self.tick % int(self.cfg.get("rank_interval_ticks", 10)) == 0:
+        # (uses the population-aware rank_int from above)
+        if self.tick % rank_int == 0:
             self._update_all_time()
         self._prune_dead()
 
-    def _kill(self, nx):
+    def _kill(self, nx, cause="starved"):
         nx.alive = False
         self.lifetime["total_deaths"] += 1
         # free the cell so other NxErs (and respawns) can use it
@@ -1110,6 +1718,51 @@ class Engine:
                                  "x": nx.pos[0], "y": nx.pos[1]})
         nx.password_hash = None       # password only valid while alive
         nx.death_tick = self.tick
+        # v1.34 — compact obituary (off the hot path: enqueue only).
+        # Sampled by obituary_sample_rate so a mass die-off can't flood
+        # the queue. The all-time board keeps the TOP NxErs; this keeps
+        # the DISTRIBUTION (lifespans, causes, reproductive success).
+        if (self.history is not None
+                and random.random() < self._obit_rate):
+            st = nx.stats
+            p = nx.params
+            born = getattr(nx, "born_tick", 0)
+            self.history.obituary({
+                "tick": self.tick, "id": nx.id, "name": nx.name,
+                "born_tick": born, "death_tick": self.tick,
+                "lifespan_ticks": self.tick - born,
+                "cause": cause,        # v1.47 — "starved" | "idle"
+                "managed": nx.is_managed, "is_male": nx.is_male,
+                "n_offspring": len(nx.offspring_ids),
+                "food_found": round(st.food_found, 1),
+                "food_taken": round(st.food_taken, 1),
+                "mates": st.mates_performed,
+                "explored": st.explored,
+                "fitness": round(st.fitness, 3),
+                "g": round(getattr(st, "g_factor", 0.0), 3),
+                "thr_inh": round(getattr(p, "firing_threshold_inhibitory", 0.0), 4),
+                "thr_exc": round(getattr(p, "firing_threshold_excitatory", 0.0), 4),
+            })
+        # v1.51 — NAS dataset: every explorer logs its architecture and the
+        # outcomes it achieved, ONCE, here at death. Explorers are a small
+        # minority so this is not sampled (one compact line each), giving a
+        # clean architecture -> performance table without flooding the log.
+        nt = getattr(nx, "nas_trial", None)
+        if nt is not None and self.history is not None:
+            st = nx.stats
+            born = getattr(nx, "born_tick", 0)
+            self.history.write("nas_trials", {
+                "trial": nt["id"], "arch": nt["arch"],
+                "born_tick": born, "death_tick": self.tick,
+                "lifespan": self.tick - born, "cause": cause,
+                "n_offspring": len(nx.offspring_ids),
+                "food_found": round(st.food_found, 1),
+                "food_taken": round(st.food_taken, 1),
+                "mates": st.mates_performed,
+                "explored": st.explored,
+                "fitness": round(st.fitness, 3),
+                "g": round(getattr(st, "g_factor", 0.0), 3),
+            })
         self.pool.remove(nx.id)       # free the brain in its worker
 
     def export_model_for(self, nx):
@@ -1152,6 +1805,277 @@ class Engine:
                 print("[engine] population-g failed (g stays 0):",
                       repr(_e))
 
+    # ---- v1.34: science history sampling (called at low cadence by the
+    # server loop, NOT every tick; reads live objects fast, enqueues one
+    # record, never touches disk). pool.sample_firing() is one cheap
+    # round-trip per worker at this cadence. ------------------------------
+    def history_provenance(self, server_version, cfg):
+        if self.history is None:
+            return
+        rec = {"event": "boot", "tick": self.tick,
+               "server_version": server_version,
+               "started_at_unix": self.lifetime.get("started_at_unix"),
+               "arch": {}, "cfg": {}}
+        try:
+            import architecture as _arch
+            meta = {}
+            # _ARCH is rebuilt from KNOWN_KEYS and may drop _meta, so read
+            # it straight from the loaded arch file for a reliable stamp.
+            ap = getattr(_arch, "_ARCH_PATH", None)
+            if ap and os.path.exists(ap):
+                import json as _json
+                meta = (_json.load(open(ap)) or {}).get("_meta", {})
+            if not meta:
+                meta = (getattr(_arch, "_ARCH", {}) or {}).get("_meta", {})
+            rec["arch"] = {k: meta.get(k) for k in
+                           ("name", "trial_id", "fitness", "version")}
+        except Exception:
+            pass
+        for k in ("world_size", "earth_map", "max_nxers", "min_alive",
+                  "target_tps", "engine_workers", "base_food_drain",
+                  "max_atrophy", "metabolic_ramp_scale", "start_food",
+                  "brain_step_every", "offspring_mutation_strength"):
+            if k in cfg:
+                rec["cfg"][k] = cfg[k]
+        self.history.provenance(rec)
+
+    def compute_m12(self, alive):
+        """v1.44 — assemble the offline-GoL M-metrics we can faithfully
+        measure online, from (a) the worker science sample (M1/M2/M5/M6/
+        M8/M10-lesion — one ~1/min pass over the brains) and (b) the
+        main-process behavioural accumulators (M7) plus heritability
+        (M10-r). Returns a compact dict (each value plus an in_band flag
+        where a band is defined). M3 (PAC), M4 (weights) and M9
+        (compositional) are intentionally absent — see M_BANDS comment.
+        Cheap and low-volume: one extra worker round-trip + ~25 numbers
+        logged per history sample. Resets the M7 accumulators."""
+        import math
+        out = {}
+
+        # ---- worker science sample (brain-internal metrics) ----
+        sci = None
+        try:
+            sci = self.pool.sample_science()
+        except Exception:
+            sci = None
+        if sci:
+            nneu = sci.get("nneu", 0) or 0
+            if nneu > 0:
+                e = sci["e"] / nneu
+                i = sci["h"] / nneu
+                nt = sci["z"] / nneu
+                out["M1_E"] = round(e, 4)
+                out["M1_I"] = round(i, 4)
+                out["M1_N"] = round(nt, 4)
+                out["M1_deviation"] = round(abs(e - 0.22) + abs(i - 0.10)
+                                            + abs(nt - 0.68), 4)
+            # M5 branching
+            if sci.get("br_n", 0) > 0:
+                bn = sci["br_n"]
+                mean_br = sci["br_sum"] / bn
+                var = max(0.0, sci["br_sq"] / bn - mean_br * mean_br)
+                out["M5_branching"] = round(mean_br, 4)
+                out["M5_branching_std"] = round(math.sqrt(var), 4)
+                out["M5_subcritical_frac"] = round(sci["br_sub"] / bn, 3)
+                out["M5_supercritical_frac"] = round(sci["br_sup"] / bn, 3)
+            # M6 ACW heterogeneity (std of intrinsic timescale)
+            if sci.get("ts_n", 0) > 1:
+                tn = sci["ts_n"]
+                mean_ts = sci["ts_sum"] / tn
+                var = max(0.0, sci["ts_sq"] / tn - mean_ts * mean_ts)
+                out["M6_acw_mean"] = round(mean_ts, 3)
+                out["M6_acw_heterogeneity"] = round(math.sqrt(var), 3)
+            # M2 CTC gate (instantaneous mean + cross-link spread)
+            if sci.get("gate_n", 0) > 0:
+                gn = sci["gate_n"]
+                mean_g = sci["gate_sum"] / gn
+                var = max(0.0, sci["gate_sq"] / gn - mean_g * mean_g)
+                out["M2_mean_gate"] = round(mean_g, 4)
+                out["M2_gate_xlink_std"] = round(math.sqrt(var), 4)
+                out["M2_n_links"] = gn
+            # M8 sphere specialisation — sensory firing fraction minus
+            # association firing fraction (sensory should sit higher)
+            sa = (sci["sensory_act"] / sci["sensory_n"]
+                  if sci.get("sensory_n", 0) else None)
+            aa = (sci["assoc_act"] / sci["assoc_n"]
+                  if sci.get("assoc_n", 0) else None)
+            ma = (sci["motor_act"] / sci["motor_n"]
+                  if sci.get("motor_n", 0) else None)
+            if sa is not None:
+                out["M8_sensory_act"] = round(sa, 4)
+            if aa is not None:
+                out["M8_assoc_act"] = round(aa, 4)
+            if ma is not None:
+                out["M8_motor_act"] = round(ma, 4)
+            if sa is not None and aa is not None:
+                out["M8_sensory_vs_assoc"] = round(sa - aa, 4)
+            # M10 lesion robustness
+            if sci.get("dead_n", 0) > 0:
+                out["M10_dead_neuron_frac"] = round(
+                    sci["dead_sum"] / sci["dead_n"], 4)
+            ok = (sci["mamp_ok_sum"] / sci["mamp_ok_n"]
+                  if sci.get("mamp_ok_n", 0) else 0.0)
+            les = (sci["mamp_les_sum"] / sci["mamp_les_n"]
+                   if sci.get("mamp_les_n", 0) else None)
+            if les is not None and ok > 0.05:
+                out["M10_lesion_retention"] = round(les / ok, 3)
+            out["_n_brains_sampled"] = sci.get("n_brains", 0)
+
+        # ---- M7 self-sustained activity (behavioural accumulator) ----
+        if self._m7_zero_n > 0 and self._m7_drv_n > 0:
+            zero = self._m7_zero_sum / self._m7_zero_n
+            drv = self._m7_drv_sum / self._m7_drv_n
+            if drv > 1e-6:
+                out["M7_zero_input_ratio"] = round(zero / drv, 4)
+            out["M7_zero_motor_amp"] = round(zero, 4)
+            out["M7_driven_motor_amp"] = round(drv, 4)
+            out["M7_n_zero"] = self._m7_zero_n
+            out["M7_n_driven"] = self._m7_drv_n
+        # reset the M7 window for the next sample
+        self._m7_zero_sum = self._m7_drv_sum = 0.0
+        self._m7_zero_n = self._m7_drv_n = 0
+
+        # ---- M10 heritability (parent-avg fitness at birth vs child) ----
+        ps, cs = [], []
+        living = {a.id: a for a in alive}
+        for cid, pavg in self._herit_pending.items():
+            a = living.get(cid)
+            if a is not None:
+                try:
+                    ps.append(pavg)
+                    cs.append(float(a.stats.fitness))
+                except Exception:
+                    pass
+        if len(ps) >= 8:
+            n = len(ps)
+            mp = sum(ps) / n
+            mc = sum(cs) / n
+            cov = sum((p - mp) * (c - mc) for p, c in zip(ps, cs))
+            sp = math.sqrt(sum((p - mp) ** 2 for p in ps))
+            sc = math.sqrt(sum((c - mc) ** 2 for c in cs))
+            if sp * sc > 0:
+                out["M10_heritability_r"] = round(cov / (sp * sc), 4)
+            out["M10_heritability_pairs"] = n
+
+        # ---- in-band flags ----
+        bands = {}
+        for k, v in list(out.items()):
+            f = _m_in_band(k, v)
+            if f is not None:
+                bands[k] = f
+        if bands:
+            out["_in_band"] = bands
+            out["_in_band_count"] = sum(bands.values())
+            out["_band_total"] = len(bands)
+        return out
+
+    def history_sample(self):
+        if self.history is None:
+            return
+        import statistics as _st
+        alive = [a for a in self.nxers.values() if a.alive]
+        n = len(alive)
+        if n == 0:
+            return
+        n_man = sum(1 for a in alive if a.is_managed)
+
+        def _col(getter):
+            out = []
+            for a in alive:
+                try:
+                    v = getter(a)
+                    if isinstance(v, (int, float)):
+                        out.append(v)
+                except Exception:
+                    pass
+            return out
+
+        def _dist(vals):
+            if not vals:
+                return None
+            vals = sorted(vals)
+            m = len(vals)
+            def pct(p):
+                return vals[min(m - 1, int(p * m))]
+            return {"mean": round(_st.mean(vals), 4),
+                    "sd": round(_st.pstdev(vals), 4) if m > 1 else 0.0,
+                    "min": round(vals[0], 4), "max": round(vals[-1], 4),
+                    "p10": round(pct(0.10), 4), "p50": round(pct(0.50), 4),
+                    "p90": round(pct(0.90), 4)}
+
+        # heritable traits — the live mirror of the NAS search
+        traits = {}
+        for key, gp in (
+                ("thr_inh", lambda a: getattr(a.params, "firing_threshold_inhibitory", None)),
+                ("thr_exc", lambda a: getattr(a.params, "firing_threshold_excitatory", None)),
+                ("refr", lambda a: getattr(a.params, "refractory_period_ticks", None)),
+                ("ahp", lambda a: getattr(a.params, "post_spike_mp_reset", None)),
+                ("timescale", lambda a: getattr(a.params, "intrinsic_timescale_default", None)),
+                ("learning_rate", lambda a: getattr(a.params, "learning_rate", None))):
+            d = _dist(_col(gp))
+            if d:
+                traits[key] = {"mean": d["mean"], "sd": d["sd"]}
+
+        # trinary firing distribution (the v195 corner) — best effort
+        trinary = None
+        try:
+            fr = self.pool.sample_firing()
+            if fr is not None:
+                exc, neu, inh, nn = fr
+                trinary = {"M1_exc": round(exc, 4),
+                           "M1_neutral": round(neu, 4),
+                           "M1_inh": round(inh, 4),
+                           "neurons_sampled": nn,
+                           # signed distance from the paper corner
+                           "L1_to_paper": round(abs(exc - 0.22)
+                                                + abs(neu - 0.68)
+                                                + abs(inh - 0.10), 4),
+                           "excitation_dominant": bool(exc > inh)}
+        except Exception:
+            pass
+
+        # per-interval rates from lifetime-counter deltas
+        lt = self.lifetime
+        cur = {k: lt.get(k, 0) for k in
+               ("total_spawns", "total_births_mating", "total_deaths",
+                "total_matings", "total_food_eaten")}
+        rates = {}
+        prev = self._hist_prev
+        dticks = self.tick - self._hist_last_tick
+        if prev is not None and dticks > 0:
+            secs = dticks * self.dt
+            for k in cur:
+                per_min = (cur[k] - prev.get(k, cur[k])) / max(1e-6, secs) * 60.0
+                rates[k.replace("total_", "") + "_per_min"] = round(per_min, 2)
+        self._hist_prev = cur
+        self._hist_last_tick = self.tick
+
+        rec = {
+            "tick": self.tick,
+            "uptime_s": round(lt.get("uptime_seconds", 0.0), 1),
+            "alive": n, "managed": n_man, "tracked": len(self.nxers),
+            "food": len(self.foods),
+            "trinary": trinary,
+            "g": _dist(_col(lambda a: getattr(a.stats, "g_factor", 0.0))),
+            "fitness": _dist(_col(lambda a: a.stats.fitness)),
+            "lifespan_ticks": _dist(_col(
+                lambda a: self.tick - getattr(a, "born_tick", self.tick))),
+            "offspring": _dist(_col(lambda a: len(a.offspring_ids))),
+            "traits": traits,
+            "rates": rates,
+            "g_structure": getattr(self, "_g_cache", {}),
+            "pool_mode": self.pool.mode_info().get("mode"),
+            "perf": self.get_perf(),     # v1.39 per-phase tick timing (ms)
+        }
+        # v1.44 — offline-GoL M-metrics (M1/M2/M5/M6/M7/M8/M10 + heritability)
+        if self._m12_on:
+            try:
+                rec["m12"] = self.compute_m12(alive)
+                self._last_m12 = rec["m12"]
+            except Exception as _e:
+                rec["m12"] = {"_error": str(_e)}
+        self.history.sample(rec)
+
     def _update_all_time(self):
         """Update the full-population rank pool (id -> best value ever
         for each metric) and rebuild ONE deterministic sorted list per
@@ -1169,6 +2093,18 @@ class Engine:
                 pm = pool[m]
                 if a.id not in pm or v > pm[a.id]:
                     pm[a.id] = v
+                    self._nxer_names[a.id] = a.name
+                    # v1.43 — note that this live NxEr just set (or
+                    # raised) the all-time record for metric m. The
+                    # game server flushes these to state/best/ hourly by
+                    # exporting the FULL brain WHILE THE NXER IS STILL
+                    # ALIVE, so the true all-time champion's model is
+                    # archived even though it will usually be dead by the
+                    # time the hourly sweep runs. id is enough; the
+                    # server re-checks it's still alive and still #1.
+                    rec = self._record_breakers.get(m)
+                    if rec is None or v > rec[1]:
+                        self._record_breakers[m] = (a.id, v)
         # 2. bound memory — keep the CAP best entries per metric
         CAP = 8000
         for m in RANK_METRICS:
@@ -1228,26 +2164,85 @@ class Engine:
                 and a.stats.explored == 0
                 and a.is_managed)
 
+    def get_perf(self):
+        """v1.39 — per-phase tick timing (EWMA, ms) for the admin console
+        and history log. tps is the instantaneous tick_ms→Hz estimate."""
+        p = self._perf
+        tick_ms = p["tick_ms"]
+        return {
+            "tick_ms": round(tick_ms, 2),
+            "phase_a_sense_ms": round(p["a_ms"], 2),
+            "phase_b_brains_ms": round(p["b_ms"], 2),
+            "phase_c_act_ms": round(p["c_ms"], 2),
+            "brains_due_per_tick": p["due"],
+            "tps_est": round(1000.0 / tick_ms, 1) if tick_ms > 0.01 else 0.0,
+        }
+
     def world_snapshot(self):
         """Public, viewer-safe broadcast payload."""
+        slim = bool(self.cfg.get("slim_broadcast", False))
         alive_nx = [a for a in self.nxers.values() if a.alive]
         nx_pv = []
         for a in alive_nx:
             pv = a.public_view()
             if self._brain_building(a):
                 pv["b"] = 1            # brain still building (cue)
+            if slim:
+                pv.pop("c", None)      # colour sent via periodic roster
             nx_pv.append(pv)
-        return {
+        snap = {
             "tick": self.tick,
             "world": {"size": self.world.size},
             "nxers": nx_pv,
-            "foods": [{"x": f["pos"][0], "y": f["pos"][1]}
-                      for f in self.foods.values()],
             "alive": len(alive_nx),
             "g": self._g_cache,
             "events": self._events,
             "ranking": self.ranking(),
         }
+        if not slim:
+            snap["foods"] = [{"x": f["pos"][0], "y": f["pos"][1]}
+                             for f in self.foods.values()]
+            return snap
+        # --- slim: foods + colour roster only periodically -----------
+        now = time.time()
+        nf = len(self.foods)
+        if (now - self._last_food_bcast
+                >= float(self.cfg.get("food_refresh_secs", 1.0))
+                or nf != self._last_food_count):
+            snap["foods"] = [{"x": f["pos"][0], "y": f["pos"][1]}
+                             for f in self.foods.values()]
+            self._last_food_bcast = now
+            self._last_food_count = nf
+        # else: omit "foods" → client keeps its cached set
+        if (now - self._last_color_bcast
+                >= float(self.cfg.get("color_refresh_secs", 2.0))):
+            snap["colors"] = {a.id: a.color for a in alive_nx}
+            self._last_color_bcast = now
+        return snap
+
+    def world_snapshot_raw(self):
+        """COMPACT snapshot for the snapshot-worker subprocess.
+
+        Builds tuples instead of dicts: orders of magnitude cheaper
+        than `world_snapshot()` because tuples skip key-hashing and
+        dict-resize cost in Python. The worker rebuilds the full
+        dict-shaped payload on its own core. Tuple field order MUST
+        stay in sync with `server/snapshot_worker.py`.
+        """
+        raw = []
+        ap = raw.append
+        building = self._brain_building
+        for a in self.nxers.values():
+            if a.alive:
+                ap((a.id, a.name, a.pos[0], a.pos[1],
+                    True, a.is_managed, a.color,
+                    1 if a.last_sing_level > 0 else 0,
+                    1 if building(a) else 0))
+        raw_foods = [(f["pos"][0], f["pos"][1])
+                     for f in self.foods.values()]
+        return (self.tick, self.world.size,
+                raw, raw_foods, len(raw),
+                self._g_cache, self._events, self.ranking())
 
     def ranking(self):
         # cached — boards only change every rank_interval_ticks, but
@@ -1314,6 +2309,15 @@ class Engine:
             "all_time": self.all_time,
             "lifetime":  self.lifetime,
             "names_state": self.names.state(),
+            # v1.43 — persist the id->name map so all-time record-holders
+            # keep their names across a reboot (the board's "?" bug). Kept
+            # compact: only the ids that still appear in some rank pool.
+            "nxer_names": {
+                str(nid): self._nxer_names.get(nid)
+                for m in RANK_METRICS
+                for nid in self._rank_pool.get(m, {})
+                if self._nxer_names.get(nid)
+            },
             "foods": [{"id": k, "pos": v["pos"],
                        "remaining": v.get("remaining", 25)}
                       for k, v in self.foods.items()],

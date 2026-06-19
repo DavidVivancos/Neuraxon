@@ -26,6 +26,15 @@
   table{width:100%;border-collapse:collapse;font-size:11px}
   td{padding:4px 6px;border-bottom:1px solid #1a2030}
   td input{padding:5px}
+  /* v1.45 — mobile/tablet: stack the 3-col grid, tighten padding,
+     let wide tables scroll instead of overflowing the viewport. */
+  @media(max-width:720px){
+    body{padding:12px;max-width:100%}
+    .grid{grid-template-columns:1fr}
+    .tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+    table{font-size:10px;min-width:0}
+    button,input{min-height:42px;font-size:13px}
+  }
 </style>
 </head>
 <body>
@@ -47,6 +56,8 @@
     <div class="grid" id="load2" style="margin-top:10px"></div>
     <div class="sec" style="margin-top:14px">Machine (htop-style)</div>
     <div id="machine"></div>
+    <div class="sec" style="margin-top:14px">Brain pool (CPU parallelism)</div>
+    <div id="brainpool"></div>
   </div>
 
   <div class="card">
@@ -164,6 +175,31 @@ function renderStats(j){
     ['Avg lifespan (ticks)',fmt(D.avg_lifespan_ticks)],
     ['% births via mating',((D.share_births_via_mating||0)*100).toFixed(1)+'%'],
   ].map(([k,v])=>`<div class="kv"><span>${k}</span><b>${v}</b></div>`).join('');
+  // Brain pool parallelism — the key multi-core diagnostic
+  const BP=j.brain_pool||{};
+  const host=$('brainpool');
+  if(host){
+    if(!BP.mode){ host.innerHTML='<div class="sub">n/a</div>'; }
+    else if(BP.mode==='in_process'){
+      host.innerHTML=
+        '<div class="kv" style="color:#ff8080"><span>Mode</span>'
+        +'<b>⚠ IN-PROCESS (single core)</b></div>'
+        +`<div class="kv"><span>Brains in main process</span><b>${fmt(BP.brains_in_process)}</b></div>`
+        +`<div class="kv"><span>cpu_count</span><b>${BP.cpu_count}</b></div>`
+        +'<div class="sub" style="margin-top:8px;color:#ffb86c">'
+        +'All brains are stepping in the main thread on ONE core. Set '
+        +'<code>engine_workers</code> in <code>world_config.json</code> to '
+        +'(cores − 1) and restart to use every core.</div>';
+    }else{
+      host.innerHTML=
+        '<div class="kv" style="color:#7CFC9B"><span>Mode</span>'
+        +'<b>✓ PARALLEL</b></div>'
+        +`<div class="kv"><span>Step workers</span><b>${BP.step_workers_alive}/${BP.step_workers} alive</b></div>`
+        +`<div class="kv"><span>Builders</span><b>${fmt(BP.builders)}</b></div>`
+        +`<div class="kv"><span>cpu_count</span><b>${BP.cpu_count}</b></div>`
+        +`<div class="sub" style="margin-top:6px;color:#7d88a8">worker pids: ${(BP.worker_pids||[]).join(', ')}</div>`;
+    }
+  }
 }
 async function saveCfg(){
   const patch={}; EDITABLE.forEach(k=>{const e=$('cf-'+k); if(e){const n=+e.value; patch[k]=isNaN(n)?e.value:n;}});

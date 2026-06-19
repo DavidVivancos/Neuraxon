@@ -14,7 +14,7 @@
   :root{--bg:#06070d;--panel:#0e1018e6;--line:#26304a;--accent:#46c7ff;--gold:#ffcf4a}
   *{box-sizing:border-box;margin:0;padding:0;font-family:ui-monospace,Menlo,Consolas,monospace}
   body{background:var(--bg);color:#dfe7f5;overflow:hidden}
-  #cv{position:fixed;inset:0;display:block;outline:none}
+  #cv{position:fixed;inset:0;display:block;outline:none;touch-action:none}
   #loader{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#06070d;color:#46c7ff;font-size:15px;z-index:50}
   .panel{position:fixed;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;backdrop-filter:blur(6px)}
   #left{top:14px;left:14px;width:312px;max-height:94vh;overflow:auto}
@@ -52,6 +52,28 @@
   #modal .warn{font-size:11px;color:#ff9f6f;margin-top:14px;line-height:1.5}
   #modal button{margin-top:18px;width:auto;padding:9px 26px}
   #hint{position:fixed;bottom:10px;left:50%;transform:translateX(-50%);font-size:10px;color:#69748f;background:#08090eb3;padding:5px 12px;border-radius:6px}
+  /* v1.45 — mobile/tablet: a toggle bar (hidden on desktop) so the two
+     side panels never overlap on a narrow screen; only one is open at a
+     time, centred as a sheet. .mcollapse hides a panel ONLY under the
+     media query, so adding it on desktop is a harmless no-op. */
+  #mtoggle{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:45;display:none;gap:8px}
+  #mtoggle button{width:auto;margin:0;background:#0e1018e6;border:1px solid var(--line);border-radius:8px;padding:9px 14px;font-size:13px;backdrop-filter:blur(6px)}
+  #mtoggle button.on{background:#15324a;border-color:var(--accent);color:var(--accent)}
+  @media (max-width:820px){
+    #mtoggle{display:flex}
+    #left,#rank{width:min(94vw,360px);left:50%;right:auto;
+                transform:translateX(-50%);top:56px;max-height:78vh}
+    #left.mcollapse,#rank.mcollapse{display:none!important}
+    select,input,button{padding:10px;font-size:13px;min-height:42px}
+    .tabs{flex-wrap:wrap}
+    .tabs button{min-height:38px;font-size:11px}
+    .row{flex-wrap:wrap}
+    #modal .box{max-width:94vw;padding:24px 16px}
+    #modal .big{font-size:34px}
+    #modal .pw{font-size:24px}
+    h1{font-size:14px}
+    #hint{font-size:9px;bottom:6px;padding:4px 8px;max-width:94vw;text-align:center}
+  }
 </style>
 </head>
 <body>
@@ -59,7 +81,7 @@
 <canvas id="cv"></canvas>
 
 <div class="panel hide" id="left">
-  <h1>🧠 Neuraxon GoL Live — v 1.048</h1>
+  <h1>🧠 Neuraxon GoL Live — v 1.072</h1>
   <div class="credits"><strong>By <a href="https://vivancos.com/" target="_blank">David Vivancos</a> & <a href="https://josesanchezgarcia.com/" target="_blank">Jose Sanchez</a></strong></div>
   <div class="credits"><strong>for <a href="https://qubic.org/" target="_blank">Qubic</a> Science</strong></div>
   <div class="sub" id="conn">connecting…</div>
@@ -101,10 +123,14 @@
     <button class="gold" onclick="doLogin()">Enter</button>
     <div id="l-msg"></div>
     <div id="mine" class="hide">
+      <div id="owned-bar" class="tabs" style="flex-wrap:wrap;margin-bottom:6px"></div>
       <div class="sec">My NxEr: <span id="m-name"></span></div>
       <div class="row">
         <button onclick="locate()">🎯 Locate</button>
         <button onclick="exportNxer()">💾 Save model</button>
+      </div>
+      <div class="row">
+        <button style="flex:1" onclick="openKaleido()" title="Open a live 3D visualisation of this NxEr's brain connectivity in a new window (renders client-side; the game keeps running here)">🧠 NxonKaleido</button>
       </div>
       <div id="m-stats"></div>
       <div class="sec">My ranks</div>
@@ -135,6 +161,10 @@
 </div>
 
 <div id="hint">drag = orbit &middot; wheel = zoom &middot; <span id="sndbtn" style="cursor:pointer;color:#46c7ff;text-decoration:underline" onclick="toggleSound()">🔊 sound: off</span> &middot; 24/7 world</div>
+<div id="mtoggle">
+  <button id="mt-left" onclick="mToggle('left')">☰ Controls</button>
+  <button id="mt-rank" onclick="mToggle('rank')">🏆 Ranks</button>
+</div>
 
 <script type="module">
 import * as THREE from 'three';
@@ -145,7 +175,12 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 
 const $=id=>document.getElementById(id);
 let WS=null,TOKEN=null,SNAP=null,MY=null,TERRAIN=null,TERR_EPOCH=-1,PARAMS=null;
+let MY_NAMES=[];                 // v1.45 — all NxErs this browser owns (≤3)
 let MY_OFFSPRING=new Set();
+// v1.39 slim-broadcast: server may send per-NxEr colour only periodically
+// (in a `colors` roster) and omit the static food list on unchanged
+// frames. We cache both so rendering needs only the per-frame essentials.
+const COLORS={};
 window.tab=t=>{for(const k of['view','reg','login'])$('t-'+k).classList.toggle('hide',k!==t);};
 
 const cv=$('cv');
@@ -332,6 +367,7 @@ function buildPlanet(){
   camera.position.set(0,planetRadius*0.6,planetRadius*2.6);
   $('loader').classList.add('hide');
   $('left').classList.remove('hide');$('rank').classList.remove('hide');
+  mInit();
 }
 function syncEntities(){
   if(!SNAP||!TERRAIN)return;
@@ -348,7 +384,7 @@ function syncEntities(){
       // Lite NxEr: SphereGeometry(Scale.entity,12,12), server-assigned
       // rgb() colour (identical on every client + matches Lite),
       // emissive same colour, + a red energy torus.
-      const base=new THREE.Color(a.c||'rgb(200,200,200)');
+      const base=new THREE.Color(a.c||COLORS[a.id]||'rgb(200,200,200)');
       m=new THREE.Mesh(new THREE.SphereGeometry(Scale.entity,12,12),
         new THREE.MeshStandardMaterial({color:base.clone(),
           emissive:base.clone(),emissiveIntensity:0.15,
@@ -401,6 +437,7 @@ function syncEntities(){
     }else if(!isMyChild&&m.userData.baby){m.remove(m.userData.baby);m.userData.baby=null;}
     m.position.lerp(p,0.35);
   }
+  if(!SNAP.foods)SNAP.foods=[];     // slim-broadcast: tolerate no-food frames
   const fids=new Set(SNAP.foods.map((_,i)=>i));
   for(const[id,m]of foodMeshes){if(!fids.has(id)){scene.remove(m);foodMeshes.delete(id);}}
   SNAP.foods.forEach((f,i)=>{
@@ -646,6 +683,7 @@ async function fetchWorld(retry){
         if(ld)ld.textContent='3D build error: '+(be&&be.message||be)+
           ' — see console (F12).';
         $('left').classList.remove('hide');$('rank').classList.remove('hide');
+        mInit();
       }
     }
   }catch(e){
@@ -662,7 +700,10 @@ function connect(){
   WS.onclose=()=>{$('conn').textContent='○ reconnecting…';setTimeout(connect,2000);};
   WS.onmessage=e=>{const m=JSON.parse(e.data);
     if(m.type==='hello')TOKEN=m.token;
-    else if(m.type==='world'){SNAP=m.data;
+    else if(m.type==='world'){const d=m.data;
+      if(d.colors){for(const k in d.colors)COLORS[k]=d.colors[k];}
+      if(d.foods===undefined&&SNAP)d.foods=SNAP.foods;   // keep cached foods
+      SNAP=d;
       const ep=SNAP.world&&SNAP.world.epoch;
       if(ep!=null&&ep!==TERR_EPOCH)fetchWorld();
       hud();}};
@@ -719,8 +760,67 @@ async function loadParams(){
   }
   $('sliders').innerHTML=h;
 }
+// v1.45 — mobile panel toggle. Panels start collapsed on a narrow
+// screen (.mcollapse only bites under the media query); the bar opens
+// one at a time so they never overlap. On desktop the bar is hidden and
+// .mcollapse is inert, so this is a no-op there.
+function mInit(){
+  const L=$('left'),R=$('rank');
+  if(L)L.classList.add('mcollapse');
+  if(R)R.classList.add('mcollapse');
+  window._mPanel=null;
+  const a=$('mt-left'),b=$('mt-rank');
+  if(a)a.classList.remove('on'); if(b)b.classList.remove('on');
+}
+window.mToggle=function(which){
+  const L=$('left'),R=$('rank');if(!L||!R)return;
+  if(window._mPanel===which){               // tap active → close
+    (which==='left'?L:R).classList.add('mcollapse');
+    window._mPanel=null;
+  }else{                                     // open one, hide the other
+    L.classList.add('mcollapse');R.classList.add('mcollapse');
+    (which==='left'?L:R).classList.remove('mcollapse');
+    window._mPanel=which;
+  }
+  const a=$('mt-left'),b=$('mt-rank');
+  if(a)a.classList.toggle('on',window._mPanel==='left');
+  if(b)b.classList.toggle('on',window._mPanel==='rank');
+};
+
+// v1.45 — multi-NxEr tracking (up to 3). MY is the focused NxEr; the
+// chip bar switches focus between every NxEr this browser owns.
+function renderOwnedBar(){
+  const bar=$('owned-bar');if(!bar)return;
+  if(MY_NAMES.length<=1){bar.innerHTML='';return;}
+  bar.innerHTML=MY_NAMES.map(nm=>
+    '<button class="'+(nm===MY?'gold':'')+'" style="flex:0 0 auto;padding:5px 9px;min-height:0" '
+    +'onclick="setFocus(\''+nm+'\')">'+(nm===MY?'★ ':'')+nm+'</button>').join('');
+}
+window.openKaleido=function(){
+  if(!MY){note('r-msg','Select one of your NxErs first.',0);return;}
+  // opens the brain connectome in its own window; renders client-side, so
+  // the game keeps running in this window. One window per NxEr.
+  window.open('/kaleido.html?name='+encodeURIComponent(MY),
+    'nxonkaleido_'+MY,'width=940,height=720,menubar=no,toolbar=no');
+};
+window.setFocus=function(name){
+  if(!MY_NAMES.includes(name))return;
+  MY=name;localStorage.setItem('nx_name',name);
+  const mn=$('m-name');if(mn)mn.textContent=name;
+  renderOwnedBar();refreshMine();locate();
+};
+function addOwned(names,focus){
+  if(Array.isArray(names)&&names.length)MY_NAMES=names.slice(0,3);
+  if(focus&&!MY_NAMES.includes(focus))MY_NAMES.push(focus);
+  MY_NAMES=MY_NAMES.slice(0,3);
+  if(focus)MY=focus;
+  localStorage.setItem('nx_names',JSON.stringify(MY_NAMES));
+  if(MY)localStorage.setItem('nx_name',MY);
+  renderOwnedBar();
+}
+
 window.doRegister=async function(){
-  if(MY){return note('r-msg','You already have a live NxEr ('+MY+'). It must die before you can create another.',0);}
+  if(MY_NAMES.length>=3){return note('r-msg','You already have 3 live NxErs (the max). One must die before you can create another.',0);}
   const params={};
   for(const p of PARAMS.params){
     const el=$('p-'+p.key);if(!el)continue;
@@ -728,19 +828,19 @@ window.doRegister=async function(){
   }
   const own=localStorage.getItem('nx_owner')||'';
   const{s,j}=await post('/api/register',{params,owner:own});
-  if(s===409&&j.name){            // already own a live NxEr → reconnect
+  if(s===409){                    // at the cap → track what we own
     if(j.owner)localStorage.setItem('nx_owner',j.owner);
-    connectAs(j.name);
-    return note('r-msg','You already have a live NxEr: '+j.name+'. Connected to it.',1);
+    if(j.names&&j.names.length){addOwned(j.names,j.names[0]);connectAs(MY);}
+    return note('r-msg',j.error||'You are at the 3-NxEr limit.',0);
   }
   if(s!==200)return note('r-msg',j.error||'failed',0);
   if(j.owner)localStorage.setItem('nx_owner',j.owner);
-  localStorage.setItem('nx_name',j.name);
+  addOwned(j.names,j.name);
   $('md-name').textContent=j.name;
   $('md-pw').textContent=j.password||'—';   // server-generated, shown once
   $('modal').classList.remove('hide');
   connectAs(j.name);
-  note('r-msg','✅ Created & connected — you are '+j.name+'. The server-generated password is shown above; save it.',1);
+  note('r-msg','✅ Created & connected — you are '+j.name+' ('+MY_NAMES.length+'/3). The server-generated password is shown above; save it.',1);
 };
 window.closeModal=()=>{
   $('modal').classList.add('hide');
@@ -776,18 +876,27 @@ window.saveModelJson=function(){
   note('r-msg','✅ Saved model JSON',1);
 };
 function _validateModel(j){
-  // Accept (a) our own save format, OR (b) a server-export
-  // {name,params,brain,stats}, OR (c) the advanced builder's mngol5
-  // export. In every case we need a `params` dict whose keys are a
-  // SUBSET of the server's USER_TUNABLE schema, and whose values are
-  // numbers / bools inside the declared min/max range.
+  // Accept (a) our own creation save (the ~17 USER_TUNABLE sliders),
+  // (b) a full server-export {name,params,brain,stats} whose params
+  // dict carries ALL ~275 substrate parameters, OR (c) the advanced
+  // builder's mngol5 export. The creation screen can only set the
+  // sliders it exposes, so we VALIDATE the keys we recognise and
+  // SILENTLY IGNORE the rest (a full export's extra substrate params,
+  // and its serialised `brain`, are not settable here — a newly
+  // created NxEr always builds a fresh brain from these genome values).
+  // Previously any single unknown key (e.g. "acetylcholine_baseline"
+  // from a full save) hard-failed the whole load; that made the two
+  // Save buttons produce mutually incompatible files. Now one format
+  // loads everywhere.
   if(!j||typeof j!=='object') return 'not a JSON object';
   if(!j.params||typeof j.params!=='object') return 'missing "params" object';
   if(!PARAMS||!PARAMS.params) return 'slider schema not loaded yet — try again';
   const known=new Map(PARAMS.params.map(p=>[p.key,p]));
+  let recognised=0;
   for(const [k,v] of Object.entries(j.params)){
     const spec=known.get(k);
-    if(!spec) return 'unknown parameter "'+k+'"';
+    if(!spec) continue;            // unknown -> ignored, not an error
+    recognised++;
     if(spec.type==='bool'){
       if(v!==0&&v!==1&&v!==true&&v!==false) return '"'+k+'" must be 0/1/true/false';
     }else{
@@ -796,6 +905,7 @@ function _validateModel(j){
       if(n<spec.min||n>spec.max) return '"'+k+'" out of range ['+spec.min+'..'+spec.max+']';
     }
   }
+  if(recognised===0) return 'no recognisable parameters in this file';
   if(j.topology&&j.topology!==MODEL_TOPOLOGY)
     return 'topology "'+j.topology+'" is not supported (only chc6)';
   return null;            // valid
@@ -808,10 +918,14 @@ window.loadModelJson=async function(input){
   const err=_validateModel(j);
   if(err) return note('r-msg','❌ '+err,0);
   // Apply only AFTER validation. Unspecified sliders keep their
-  // current value (so partial models still work).
-  let n=0;
+  // current value (so partial models still work). A full server-export
+  // carries ~275 params; only the ones with a matching slider are
+  // applied — the rest (and the serialised brain) are ignored because
+  // creation always builds a fresh brain from these genome values.
+  let n=0, ignored=0;
   for(const [k,v] of Object.entries(j.params)){
-    const el=$('p-'+k); const spec=PARAMS.params.find(p=>p.key===k); if(!el||!spec)continue;
+    const el=$('p-'+k); const spec=PARAMS.params.find(p=>p.key===k);
+    if(!el||!spec){ ignored++; continue; }
     if(spec.type==='bool'){ el.checked=!!v; }
     else{
       el.value=v;
@@ -819,7 +933,8 @@ window.loadModelJson=async function(input){
     }
     n++;
   }
-  note('r-msg','✅ Loaded '+n+' parameters from '+f.name+'. Review the sliders, then Create NxEr.',1);
+  const extra = ignored>0 ? ' ('+ignored+' advanced params ignored — a new brain is built from these genes)' : '';
+  note('r-msg','✅ Loaded '+n+' parameters from '+f.name+extra+'. Review the sliders, then Create NxEr.',1);
 };
 window.openBuilder=function(){
   // Open the trimmed Advanced Builder in a new window. It loads with
@@ -870,47 +985,64 @@ function setRegEnabled(on){
 }
 function connectAs(name){
   MY=name;
+  if(!MY_NAMES.includes(name)){MY_NAMES.push(name);MY_NAMES=MY_NAMES.slice(0,3);
+    localStorage.setItem('nx_names',JSON.stringify(MY_NAMES));}
+  localStorage.setItem('nx_name',name);
   $('mine').classList.remove('hide');
   $('m-name').textContent=name;
+  renderOwnedBar();
   if($('l-name'))$('l-name').value=name;
   // you're connected — collapse the login form, show only the detail
   ['l-name','l-pw'].forEach(id=>{const e=$(id);if(e)e.closest('div,label')&&e.style.setProperty('display','none');});
   document.querySelectorAll('#t-login > label, #t-login > .sub, #t-login > .sec:first-of-type, #t-login > input, #t-login > button.gold')
     .forEach(el=>{if(!el.closest('#mine'))el.style.display='none';});
-  setRegEnabled(false);            // one live NxEr per session
+  setRegEnabled(MY_NAMES.length<3);    // v1.45 — up to 3 per browser
   refreshMine();
   if(window._mineTimer)clearInterval(window._mineTimer);
   window._mineTimer=setInterval(()=>{if(MY)refreshMine();},3000);
   let tries=0;const jt=setInterval(()=>{if(locate()||++tries>40)clearInterval(jt);},250);
 }
-function disconnectMe(){            // called when our NxEr dies
-  MY=null;localStorage.removeItem('nx_owner');localStorage.removeItem('nx_name');
+function disconnectMe(deadName){        // called when a NxEr dies
+  const nm=deadName||MY;
+  MY_NAMES=MY_NAMES.filter(x=>x!==nm);
+  localStorage.setItem('nx_names',JSON.stringify(MY_NAMES));
+  if(MY===nm)MY=null;
+  if(MY_NAMES.length){                  // still own another → switch to it
+    renderOwnedBar();
+    setRegEnabled(MY_NAMES.length<3);
+    note('r-msg','NxEr '+nm+' died — switched to '+MY_NAMES[0]+'.',0);
+    setFocus(MY_NAMES[0]);
+    return;
+  }
+  // owned none now — restore login form. KEEP nx_owner so the freed
+  // slots stay reusable under the same browser identity.
+  localStorage.removeItem('nx_name');
   if(window._mineTimer)clearInterval(window._mineTimer);
   $('mine').classList.add('hide');
+  renderOwnedBar();
   document.querySelectorAll('#t-login > label, #t-login > .sub, #t-login > .sec:first-of-type, #t-login > input, #t-login > button.gold')
     .forEach(el=>{if(!el.closest('#mine'))el.style.display='';});
   ['l-name','l-pw'].forEach(id=>{const e=$(id);if(e)e.style.display='';});
   setRegEnabled(true);
-  note('r-msg','Your NxEr died — you can create a new one.',0);
+  note('r-msg','Your NxEr '+nm+' died — you can create a new one.',0);
 }
 window.doLogin=async function(){
   const name=$('l-name').value.trim().toUpperCase(),pw=$('l-pw').value;
-  const{s,j}=await post('/api/login',{name,password:pw,token:TOKEN});
+  const own=localStorage.getItem('nx_owner')||'';
+  const{s,j}=await post('/api/login',{name,password:pw,token:TOKEN,owner:own});
   if(s!==200)return note('l-msg',(j.error||'failed')+(j.ip_banned?' — IP now banned 24h':''),0);
-  MY=name;note('l-msg','✅ Connected to '+name,1);
-  $('mine').classList.remove('hide');$('m-name').textContent=name;refreshMine();
-  // poll the owner panel on a gentle timer (NOT every WS frame, which
-  // is 10 Hz and would hammer the server). 3 s is plenty for stats.
-  if(window._mineTimer)clearInterval(window._mineTimer);
-  window._mineTimer=setInterval(()=>{if(MY)refreshMine();},3000);
+  addOwned(j.names,name);
+  note('l-msg','✅ Connected to '+name,1);
+  connectAs(name);
 };
 async function refreshMine(){
   if(!MY)return;
-  const r=await fetch('/api/mynxer?name='+encodeURIComponent(MY));
-  if(r.status===404){disconnectMe();return;}      // NxEr gone
+  const me=MY;
+  const r=await fetch('/api/mynxer?name='+encodeURIComponent(me));
+  if(r.status===404){disconnectMe(me);return;}      // NxEr gone
   if(!r.ok)return;
   const v=await r.json(),s=v.stats||{};
-  if(v.alive===false){disconnectMe();return;}     // NxEr died
+  if(v.alive===false){disconnectMe(me);return;}     // NxEr died
   MY_OFFSPRING=new Set((v.offspring_ids)||[]);
   $('m-stats').innerHTML=
     (v.brain_building?'<div class="stat" style="color:#ffd24a"><span>🧠 Brain</span><b>building…</b></div>':'')
@@ -1038,16 +1170,19 @@ window.exportNxer=async function(){
 
 fetchWorld();connect();loadParams();
 
-// Auto-reconnect: if this browser already owns a live NxEr, rejoin it
-// without asking for the password again (session tracking).
+// Auto-reconnect: if this browser already owns live NxErs, rejoin them
+// (all of them, v1.45) without asking for the password again.
 (async()=>{
   const own=localStorage.getItem('nx_owner');
   if(!own)return;
   try{
     const{s,j}=await post('/api/session',{owner:own});
-    if(s===200&&j.name){connectAs(j.name);
-      note('r-msg','Reconnected to your NxEr '+j.name+'.',1);}
-    else{localStorage.removeItem('nx_owner');localStorage.removeItem('nx_name');}
+    const names=(j&&j.names)||[];
+    if(s===200&&names.length){
+      addOwned(names,names[0]);
+      connectAs(names[0]);
+      note('r-msg','Reconnected to your NxEr'+(names.length>1?'s ('+names.join(', ')+')':' '+names[0])+'.',1);
+    }else{localStorage.removeItem('nx_owner');localStorage.removeItem('nx_name');localStorage.removeItem('nx_names');}
   }catch(e){}
 })();
 </script>

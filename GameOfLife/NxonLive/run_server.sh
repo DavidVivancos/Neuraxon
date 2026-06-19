@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Multi Neuraxon Game of Life 5 — launcher
-# Server release: GoL Server V 1.048  (v189-compat substrate, NAS arch nas_best_t005)
+# Server release: GoL Server V 1.053  (v189-compat substrate, NAS arch nas_best_t005)
 # ===================================================================
 # SPEED: the brain compute is pure Python and is the bottleneck. The
 # single biggest speedup on Ubuntu — with ZERO code changes — is to

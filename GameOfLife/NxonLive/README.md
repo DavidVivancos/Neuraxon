@@ -1,12 +1,6 @@
 # Multi Neuraxon Game of Life 5 — client / server
 
-**Version mngol5-v1.29 / GoL Server V 1.048** — server-managed passwords + nas_best trial-22 architecture (hidden=6, fitness 6.39, build 135 ms).
-
-* Based on the Paper:
-*   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
-*   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
-* https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint  (Neuraxon V2.0 )
-
+**Version mngol5-v1.52 / GoL Server V 1.072** — the learning loop: enables AGMP plasticity and bursts dopamine on reward (eating + mating), banked between brain steps, so eligibility traces consolidate and brains can learn within a lifetime. This is the change the NAS run pointed to (fitness was flat across the whole architecture space; a harder landscape still gave zero fitness-heritability — only learning is left). Watch the g_structure block (mean inter-ability r, positive-manifold, lambda1/lambda2) for g emerging. Also: brain viewer renamed NxonCaliedo -> NxonKaleido, and fixed the bug where opening the viewer froze the world window (api/nxbrain took the engine lock on the event loop, blocking the world WebSocket; the viewer path is now fully lock-free)
 
 A 24/7 server that runs one Neuraxon Game-of-Life world forever and
 streams it to many web clients. Built on the proven **v184** neural
@@ -75,3 +69,4 @@ server stays responsive and clients keep streaming.
 On a 4-core server, leave it `0` (→ 3 workers): the heavy brain phase
 runs ~3x faster and the world view loads smoothly even at 100% sim CPU.
 One bad tick or a dead worker can never kill the 24/7 loop.
+

@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>NxonKaleido — Brain Connectome</title>
+<script type="importmap">
+{"imports":{
+  "three":"https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+<style>
+  :root{--bg:#04050b;--ink:#e6ebff;--dim:#7a86b0;--line:#1b2238;--accent:#7fd4ff}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;overflow:hidden}
+  #cv{position:fixed;inset:0;display:block;outline:none;touch-action:none}
+  #hud{position:fixed;top:12px;left:12px;z-index:10;background:#06080fcc;
+    border:1px solid var(--line);border-radius:10px;padding:10px 14px;
+    backdrop-filter:blur(6px);max-width:min(92vw,440px)}
+  #hud h1{margin:0 0 2px;font-size:15px;letter-spacing:.5px}
+  #hud .sub{font-size:11px;color:var(--dim)}
+  #hud .nm{color:var(--accent)}
+  #live{display:inline-block;width:8px;height:8px;border-radius:50%;
+    background:#36d399;margin-right:5px;box-shadow:0 0 8px #36d399}
+  #live.stale{background:#f5a524;box-shadow:0 0 8px #f5a524}
+  #live.dead{background:#f04a4a;box-shadow:0 0 8px #f04a4a}
+  #legend{position:fixed;bottom:12px;left:12px;z-index:10;font-size:10px;
+    color:var(--dim);background:#06080faa;border:1px solid var(--line);
+    border-radius:8px;padding:7px 10px;line-height:1.6}
+  #legend b{color:var(--ink);font-weight:600}
+  .sw{display:inline-block;width:9px;height:9px;border-radius:2px;
+    margin-right:4px;vertical-align:-1px}
+  #hint{position:fixed;bottom:12px;right:12px;z-index:10;font-size:10px;
+    color:var(--dim);background:#06080faa;border:1px solid var(--line);
+    border-radius:8px;padding:6px 10px}
+  #err{position:fixed;inset:0;display:none;place-items:center;z-index:20;
+    background:#04050bdd;text-align:center;padding:24px}
+  #err div{max-width:460px}#err h2{color:#f5a524}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div id="hud">
+  <h1>Nxon<span style="color:var(--accent)">Kaleido</span></h1>
+  <div class="sub"><span id="live"></span>NxEr <span class="nm" id="nm">…</span>
+     &middot; tick <span id="tk">—</span> &middot; <span id="meta">connecting…</span></div>
+</div>
+<div id="legend">
+  <div><b>Cortex</b> = translucent surface &middot; glows flow across it</div>
+  <div><b>Regions</b> = brain spheres
+       <span class="sw" style="background:#5bdc7a;margin-left:6px"></span>sensory
+       <span class="sw" style="background:#c77dff;margin-left:6px"></span>assoc
+       <span class="sw" style="background:#ff8a4c;margin-left:6px"></span>motor</div>
+  <div><b>Flows</b> = synapses &middot; colour waves stream along, speed·brightness = gate</div>
+  <div><b>Events</b> 🍎 sees food &middot; 😋 ate &middot; 😟 hungry &middot; ❤️ mated &middot; 🎵 sang &middot; 💢 stole</div>
+</div>
+<div id="hint">drag = rotate &middot; wheel/pinch = zoom</div>
+<div id="err"><div><h2 id="eh">—</h2><p id="ep" style="color:#aab"></p></div></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+const $=id=>document.getElementById(id);
+const qs=new URLSearchParams(location.search);
+const NAME=(qs.get('name')||'').toUpperCase();
+$('nm').textContent=NAME||'?';
+document.title='NxonKaleido — '+(NAME||'brain');
+
+// ---------- shared GLSL ----------
+const PAL=`vec3 pal(float t){return 0.5+0.5*cos(6.28318*(t+vec3(0.0,0.33,0.67)));}`;
+// compact value noise for the organic cortex surface
+const NOISE=`
+  float hash(vec3 p){p=fract(p*0.3183099+0.1);p*=17.0;
+    return fract(p.x*p.y*p.z*(p.x+p.y+p.z));}
+  float vnoise(vec3 x){vec3 i=floor(x),f=fract(x);f=f*f*(3.0-2.0*f);
+    return mix(mix(mix(hash(i+vec3(0,0,0)),hash(i+vec3(1,0,0)),f.x),
+                   mix(hash(i+vec3(0,1,0)),hash(i+vec3(1,1,0)),f.x),f.y),
+               mix(mix(hash(i+vec3(0,0,1)),hash(i+vec3(1,0,1)),f.x),
+                   mix(hash(i+vec3(0,1,1)),hash(i+vec3(1,1,1)),f.x),f.y),f.z);}`;
+
+// Synapse = translucent TUBE, colour waves flowing along it (dimmer now).
+const tubeVert=`
+  varying vec2 vUv;
+  uniform float uTime; uniform float uGate;
+  void main(){
+    vUv=uv;
+    vec3 p=position;
+    float b=sin(uv.x*9.0 - uTime*(1.0+uGate*2.5))*0.06*uGate;
+    p+=normal*b;
+    gl_Position=projectionMatrix*modelViewMatrix*vec4(p,1.0);
+  }`;
+const tubeFrag=`
+  precision highp float;
+  varying vec2 vUv;
+  uniform float uTime; uniform float uGate; uniform float uHue;
+  ${PAL}
+  void main(){
+    float flow=vUv.x - uTime*(0.12+uGate*0.55);
+    float band=0.5+0.5*sin((vUv.x*7.0 - uTime*(1.0+uGate*3.0))*6.28318);
+    float ring=0.5+0.5*sin((vUv.y*3.0 + uTime*0.6)*6.28318);
+    vec3 col=pal(flow*1.6 + uHue + vUv.y*0.15 + uTime*0.04);
+    col*=(0.40+0.6*band*ring);
+    float a=(0.07+0.4*uGate)*(0.40+0.5*band);
+    gl_FragColor=vec4(col*(0.6+uGate*0.5), a);
+  }`;
+
+// Region = displaced flowing PLASMA sphere, translucent (dimmer now).
+const orbVert=`
+  varying vec3 vP; varying float vA;
+  uniform float uTime; uniform float uAct;
+  void main(){
+    vA=uAct;
+    vec3 p=position;
+    float d=sin(p.x*2.1+uTime*1.4)*cos(p.y*2.0+uTime*1.1)*sin(p.z*2.0+uTime*0.9);
+    p+=normal*d*(0.12+0.55*uAct);
+    vP=p;
+    gl_Position=projectionMatrix*modelViewMatrix*vec4(p,1.0);
+  }`;
+const orbFrag=`
+  precision highp float;
+  varying vec3 vP; varying float vA;
+  uniform float uTime; uniform vec3 uBase;
+  ${PAL}
+  void main(){
+    float t=length(vP)*0.35 + uTime*0.10 + vP.x*0.08;
+    vec3 col=mix(uBase, pal(t), 0.55);
+    float glow=0.5+0.5*sin(uTime*2.0+vP.y*3.0);
+    col*=(0.35+0.5*vA)*(0.6+0.4*glow);
+    gl_FragColor=vec4(col, 0.42+0.35*vA);
+  }`;
+
+// Cortex = enclosing brain-shaped MEMBRANE. Organic lumps + a sagittal
+// fissure, translucent via Fresnel (rim shows, centre see-through) so the
+// inner flows stay visible, with psychedelic colour flowing across it.
+const cortexVert=`
+  varying float vFres; varying vec3 vP;
+  uniform float uTime;
+  ${NOISE}
+  void main(){
+    vec3 p=position;                 // already ellipsoid-shaped geometry
+    float d = vnoise(p*0.10 + uTime*0.04)*3.2
+            + vnoise(p*0.24 + 5.0)*1.4;     // gyri / sulci
+    float top=smoothstep(0.0,9.0,p.y);
+    float mid=exp(-pow(p.x*0.16,2.0));
+    d -= top*mid*4.0;                // longitudinal fissure along the top
+    p += normalize(normal)*d;
+    vec4 mv=modelViewMatrix*vec4(p,1.0);
+    vec3 vn=normalize(normalMatrix*normal);
+    vec3 vd=normalize(-mv.xyz);
+    vFres=pow(1.0-max(dot(vn,vd),0.0),2.0);
+    vP=p;
+    gl_Position=projectionMatrix*mv;
+  }`;
+const cortexFrag=`
+  precision highp float;
+  varying float vFres; varying vec3 vP;
+  uniform float uTime; uniform float uAct;
+  uniform int uSphereCount;
+  uniform vec3 uSpherePos[8];
+  uniform vec3 uSphereCol[8];
+  ${PAL}
+  void main(){
+    float t=vP.y*0.02 + vP.x*0.015 + length(vP)*0.02 + uTime*0.05;
+    vec3 col=pal(t);
+    // region tint: nearby sphere colours permeate into the membrane so the
+    // sensory/assoc/motor zones are distinguishable, per the legend.
+    vec3 reg=vec3(0.0); float wsum=0.0;
+    for(int i=0;i<8;i++){
+      if(i>=uSphereCount) break;
+      float dd=distance(vP, uSpherePos[i]);
+      float w=1.0/(dd*dd*0.018+0.6);
+      reg+=uSphereCol[i]*w; wsum+=w;
+    }
+    if(wsum>0.0) col=mix(col, reg/wsum, 0.42);
+    float a=vFres*(0.26+0.30*uAct);
+    gl_FragColor=vec4(col*(0.7+0.4*vFres), a);
+  }`;
+
+// ---------- scene ----------
+const scene=new THREE.Scene();
+scene.fog=new THREE.FogExp2(0x04050b,0.010);
+const camera=new THREE.PerspectiveCamera(55,innerWidth/innerHeight,0.1,2000);
+camera.position.set(0,14,66);
+const renderer=new THREE.WebGLRenderer({canvas:$('cv'),antialias:true,alpha:false});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
+const composer=new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene,camera));
+// dimmer bloom + a threshold so only bright cores glow (was 1.1 / 0.0)
+const bloom=new UnrealBloomPass(new THREE.Vector2(innerWidth,innerHeight),0.5,0.6,0.22);
+composer.addPass(bloom);
+const controls=new OrbitControls(camera,$('cv'));
+controls.enablePan=false;                 // rotate + zoom only, per spec
+controls.enableDamping=true;controls.dampingFactor=0.08;
+controls.minDistance=18;controls.maxDistance=200;
+controls.autoRotate=true;controls.autoRotateSpeed=0.5;
+controls.addEventListener('start',()=>controls.autoRotate=false);
+addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);
+  composer.setSize(innerWidth,innerHeight);});
+(function(){const g=new THREE.BufferGeometry();const n=700,p=new Float32Array(n*3);
+ for(let i=0;i<n;i++){p[i*3]=(Math.random()-.5)*1000;p[i*3+1]=(Math.random()-.5)*1000;p[i*3+2]=(Math.random()-.5)*1000;}
+ g.setAttribute('position',new THREE.BufferAttribute(p,3));
+ scene.add(new THREE.Points(g,new THREE.PointsMaterial({color:0x222c50,size:1.0})));})();
+
+const root=new THREE.Group();scene.add(root);
+const ROLE_HUE={sensory:0.34,assoc:0.78,motor:0.06};
+function roleBase(role){const h=ROLE_HUE[role]!==undefined?ROLE_HUE[role]:0.55;
+  return new THREE.Color().setHSL(h,0.7,0.5);}
+
+// the enclosing cortex membrane (built once; brain-ish ellipsoid)
+let cortex=null;
+(function buildCortex(){
+  const geo=new THREE.IcosahedronGeometry(1,5);
+  geo.scale(30,19,34);                 // wider & longer than tall
+  geo.computeVertexNormals();
+  const mat=new THREE.ShaderMaterial({
+    uniforms:{uTime:{value:0},uAct:{value:0},
+      uSphereCount:{value:0},
+      uSpherePos:{value:Array.from({length:8},()=>new THREE.Vector3())},
+      uSphereCol:{value:Array.from({length:8},()=>new THREE.Color())}},
+    vertexShader:cortexVert,fragmentShader:cortexFrag,
+    transparent:true,depthWrite:false,side:THREE.DoubleSide,
+    blending:THREE.NormalBlending});
+  cortex=new THREE.Mesh(geo,mat);
+  scene.add(cortex);
+})();
+
+let orbs=[];   // {mesh,mat,pos,role,curAct,tgtAct}
+let tubes=[];  // {mesh,mat,curGate,tgtGate}
+let built=false, avgAct=0;
+
+// ----- emoji event flows: a glyph streams from a sphere out to the cortex -----
+const EMO={food:'🍎',hungry:'😟',ate:'😋',mate:'❤️',sing:'🎵',steal:'💢'};
+const emojiTex={};
+function getEmojiTex(ch){
+  if(emojiTex[ch])return emojiTex[ch];
+  const c=document.createElement('canvas');c.width=c.height=128;
+  const x=c.getContext('2d');x.font='92px serif';x.textAlign='center';x.textBaseline='middle';
+  x.fillText(ch,64,70);
+  const t=new THREE.CanvasTexture(c);emojiTex[ch]=t;return t;
+}
+let emos=[]; const lastEmo={};
+function spawnEmoji(type,role){
+  const ch=EMO[type];if(!ch||!built)return;
+  const now=performance.now();
+  if(now-(lastEmo[type]||0)<1500)return;            // throttle per type
+  lastEmo[type]=now;
+  let src=orbs.find(o=>o.role===role)||orbs.find(o=>o.role==='assoc')||orbs[0];
+  if(!src)return;
+  const mat=new THREE.SpriteMaterial({map:getEmojiTex(ch),
+    transparent:true,depthWrite:false,depthTest:false,opacity:0});
+  const sp=new THREE.Sprite(mat);
+  const start=src.pos.clone();
+  const end=src.pos.clone().add(src.pos.clone().normalize().multiplyScalar(14));
+  sp.position.copy(start);sp.scale.setScalar(3.2);scene.add(sp);
+  emos.push({sp,start,end,t0:now,dur:2300});
+  if(emos.length>40){const o=emos.shift();scene.remove(o.sp);}
+}
+
+function layout(n,role,i){
+  const R=20, ang=(i/Math.max(1,n))*Math.PI*2;
+  const y=role==='sensory'?9:role==='motor'?-9:0;
+  return new THREE.Vector3(Math.cos(ang)*R,y,Math.sin(ang)*R);
+}
+function disposeAll(){root.clear();orbs=[];tubes=[];}
+
+function build(data){
+  disposeAll();
+  const sp=data.spheres||[];
+  sp.forEach((s,i)=>{
+    const pos=layout(sp.length,s.role,i);
+    const baseR=2.4+1.9*Math.min(1,(s.n||24)/40);
+    const mat=new THREE.ShaderMaterial({
+      uniforms:{uTime:{value:0},uAct:{value:s.act||0},
+                uBase:{value:new THREE.Color().copy(roleBase(s.role))}},
+      vertexShader:orbVert,fragmentShader:orbFrag,
+      transparent:true,depthWrite:false});
+    const mesh=new THREE.Mesh(new THREE.IcosahedronGeometry(baseR,3),mat);
+    mesh.position.copy(pos);root.add(mesh);
+    orbs.push({mesh,mat,pos,role:s.role,curAct:s.act||0,tgtAct:s.act||0});
+  });
+  (data.links||[]).forEach((L,li)=>{
+    const a=orbs[L.s],b=orbs[L.t];if(!a||!b)return;
+    const mid=a.pos.clone().add(b.pos).multiplyScalar(0.5);
+    mid.add(mid.clone().normalize().multiplyScalar(7+Math.random()*6));
+    mid.y+=(Math.random()-0.5)*7;
+    const curve=new THREE.QuadraticBezierCurve3(a.pos.clone(),mid,b.pos.clone());
+    const g=L.g??0.5;
+    const radius=0.35+1.25*g;
+    const geo=new THREE.TubeGeometry(curve,46,radius,10,false);
+    const mat=new THREE.ShaderMaterial({
+      uniforms:{uTime:{value:0},uGate:{value:g},uHue:{value:(li*0.13)%1}},
+      vertexShader:tubeVert,fragmentShader:tubeFrag,
+      transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,
+      side:THREE.DoubleSide});
+    const mesh=new THREE.Mesh(geo,mat);root.add(mesh);
+    tubes.push({mesh,mat,curGate:g,tgtGate:g});
+  });
+  built=true;
+  if(cortex){
+    const U=cortex.material.uniforms;
+    U.uSphereCount.value=Math.min(8,orbs.length);
+    for(let i=0;i<8;i++){
+      if(i<orbs.length){U.uSpherePos.value[i].copy(orbs[i].pos);
+        U.uSphereCol.value[i].copy(roleBase(orbs[i].role));}
+      else{U.uSpherePos.value[i].set(0,0,0);U.uSphereCol.value[i].setRGB(0,0,0);}
+    }
+  }
+  $('meta').textContent=orbs.length+' regions · '+tubes.length+' flows';
+}
+function update(data){
+  if(!built||orbs.length!==(data.spheres||[]).length){build(data);return;}
+  (data.spheres||[]).forEach((s,i)=>{if(orbs[i])orbs[i].tgtAct=s.act||0;});
+  (data.links||[]).forEach((L,i)=>{if(tubes[i])tubes[i].tgtGate=L.g??0.5;});
+}
+
+// ---------- polling ----------
+let live='warming';
+function setLive(){$('live').className=live==='ok'?'':live==='dead'?'dead':'stale';}
+function showErr(h,p){$('eh').textContent=h;$('ep').textContent=p;$('err').style.display='grid';}
+async function poll(){
+  if(!NAME){showErr('No NxEr selected','Open NxonKaleido from a NxEr panel.');return;}
+  try{
+    const r=await fetch('/api/nxbrain?name='+encodeURIComponent(NAME),{cache:'no-store'});
+    if(r.status===404){live='dead';setLive();$('meta').textContent='NxEr is no longer alive';return;}
+    if(!r.ok){live='stale';setLive();return;}
+    const j=await r.json();
+    if(j.warming){live='warming';setLive();return;}
+    live='ok';setLive();$('tk').textContent=j.tick;update(j);
+    (j.events||[]).forEach(e=>spawnEmoji(e.e,e.s));
+  }catch(e){live='stale';setLive();}
+}
+setInterval(poll,1200);poll();
+
+// ---------- animate ----------
+const clock=new THREE.Clock();
+function animate(){
+  requestAnimationFrame(animate);
+  const t=clock.getElapsedTime();
+  let sum=0;
+  for(const o of orbs){
+    o.curAct+=(o.tgtAct-o.curAct)*0.07; sum+=o.curAct;
+    o.mat.uniforms.uTime.value=t;
+    o.mat.uniforms.uAct.value=o.curAct;
+    const s=0.9+0.45*o.curAct+0.05*Math.sin(t*2.0+o.pos.x);
+    o.mesh.scale.setScalar(s);
+    o.mesh.rotation.y=t*0.12;
+  }
+  avgAct+=(((orbs.length?sum/orbs.length:0))-avgAct)*0.05;
+  for(const f of tubes){
+    f.curGate+=(f.tgtGate-f.curGate)*0.06;
+    f.mat.uniforms.uTime.value=t;
+    f.mat.uniforms.uGate.value=f.curGate;
+  }
+  if(cortex){cortex.material.uniforms.uTime.value=t;
+    cortex.material.uniforms.uAct.value=avgAct;
+    cortex.rotation.y=t*0.03;}
+  // emoji flows: travel sphere -> cortex, fade in then out
+  const now=performance.now();
+  for(let i=emos.length-1;i>=0;i--){
+    const e=emos[i];const k=(now-e.t0)/e.dur;
+    if(k>=1){scene.remove(e.sp);emos.splice(i,1);continue;}
+    e.sp.position.lerpVectors(e.start,e.end,k);
+    e.sp.material.opacity=k<0.15?(k/0.15):(1.0-(k-0.15)/0.85);
+    e.sp.scale.setScalar(3.2+2.4*k);
+  }
+  controls.update();
+  composer.render();
+}
+animate();
+if(!renderer.getContext()){showErr('3D not available',
+  'Your browser/GPU blocked WebGL. Try a desktop browser.');}
+</script>
+</body>
+</html>

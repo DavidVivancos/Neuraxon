@@ -104,7 +104,11 @@ def extract_ability_vector(nxer) -> List[float]:
     mates = _safe(getattr(st, "mates_performed", 0.0)) if st else 0.0
 
     visited = getattr(nxer, "visited", None)
-    n_visited = float(len(visited)) if visited else explored
+    # v1.36 — `visited` is now an LRU-bounded recent-cell set (caps ~5000),
+    # so prefer the monotonic `explored` stat as the spatial-novelty proxy
+    # so Gv_spatial keeps rewarding cumulative exploration without a cap.
+    n_visited = explored if explored else (
+        float(len(visited)) if visited else 0.0)
     known_food = getattr(nxer, "known_food_ids", None)
     n_known_food = float(len(known_food)) if known_food else 0.0
 
