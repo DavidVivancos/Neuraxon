@@ -1,4 +1,4 @@
-"""Neuraxon Architecture Search (NAS) — v1.4 (Game of Life v5.10 / v195)
+"""Neuraxon Architecture Search (NAS) — v1.5 (Game of Life v5.10 / v196)
 
 Runs many small Game-of-Life trials in parallel (multiprocessing), each
 with a different architecture sampled from a search space. Each trial is
@@ -12,8 +12,20 @@ Two separate research tracks:
   (1) Game-of-Life bio-inspired code improvements (the v144-v156 series)
   (2) NAS to find sweet-spot architectures within the v(N) game.
 
+v196 (v5.10) — SEARCH-METHOD UPGRADE. v161-v195 grew the search SPACE and the
+fitness function; the search ALGORITHM stayed a fixed-knob evolutionary loop
+with a binary "escape" toggle, selecting purely on the (median-aggregated) raw
+fitness. 
+
 Usage (CLI):
+  # v196 default: evolutionary + adaptive controller + guided immigrants + LCB
   python NxonArchNAS.py --trials 16 --wall-seconds 60 --workers 4
+
+  # concentrate the budget on the 12 high-leverage genes, pinned around best:
+  python NxonArchNAS.py --search-space focus --seed-archs nas_best.json
+
+  # compound a previous run's knowledge into a fresh search:
+  python NxonArchNAS.py --resume nas_runs/<prev>/nas_log.csv
 
 Usage (programmatic):
   from NxonArchNAS import run_search
@@ -227,6 +239,165 @@ SEARCH_SPACE: Dict[str, Any] = {
 }
 
 
+# =============================================================================
+# SEARCH-SPACE TIERS — v196 (v5.10) FOCUS / CORE SUBSETS
+# =============================================================================
+# v161-v195 always searched the FULL 35-key space. The v195 8h run (216 trials)
+# plus a per-parameter signature analysis (the Pearson correlation of each
+# searched gene against fitness, against the E/I-ordering margin M1−inh, and
+# against the L1 distance to the paper trinary mix 0.22/0.68/0.10) showed the
+# outcome is dominated by a small handful of genes; the rest are near-neutral
+# noise dimensions that dilute the search. The FOCUS tier is those high-leverage
+# genes — searched freely while everything else is PINNED at a known-good
+# architecture (a --seed-archs JSON if given, else BEST_KNOWN_PINS below) — so
+# the whole budget concentrates on the levers that actually move the metrics.
+#
+# Why each FOCUS gene (|r| from the v195 signature analysis, strongest first):
+#   refractory_period_ticks                 fitness +0.76, paper-dist −0.94  (dominant rest-band lever)
+#   firing_threshold_excitatory             E/I −0.73, fitness −0.40         (the real E/I lever)
+#   num_hidden_neurons_default              fitness +0.38, E/I +0.34
+#   connection_probability                  fitness +0.35, E/I +0.22
+#   metabolic_rate_abs_cap_multiple         fitness +0.30                    (survival headroom)
+#   resting_potential_decay                 fitness −0.33, paper-dist +0.27  (resting attractor — v196 direction)
+#   intrinsic_timescale_default             fitness +0.23                    (recovery timescale)
+#   adaptation_tau_ticks                    fitness +0.21, E/I +0.19
+#   adaptation_target_excitatory_multiplier fitness +0.18                    (E/I balance lever)
+#   adaptation_target_inhibitory_multiplier fitness −0.18, E/I −0.28         (E/I balance lever)
+#   firing_threshold_inhibitory             fitness +0.20                    (v195's asymmetry lever — kept in)
+#   post_spike_mp_reset                     fitness −0.14, E/I −0.13         (AHP — rest-band/firing budget)
+# (circadian_cycle_ticks and metabolic_ramp_per_sec also correlate but are
+# WORLD-dynamics confounds rather than brain levers, so they stay pinned in
+# focus mode — see CHANGELOG_v196 "the 12 parameters". Adjust FOCUS_KEYS to
+# re-scope; everything is a one-line edit.)
+FOCUS_KEYS = [
+    'neural.refractory_period_ticks',
+    'neural.firing_threshold_excitatory',
+    'neural.firing_threshold_inhibitory',
+    'neural.num_hidden_neurons_default',
+    'neural.connection_probability',
+    'neural.resting_potential_decay',
+    'neural.intrinsic_timescale_default',
+    'neural.post_spike_mp_reset',
+    'operating_ranges.adaptation_tau_ticks',
+    'operating_ranges.adaptation_target_excitatory_multiplier',
+    'operating_ranges.adaptation_target_inhibitory_multiplier',
+    'biology.metabolic_rate_abs_cap_multiple',
+]
+
+# CORE = the six tightest levers (the trinary-distribution + E/I machinery only),
+# for the very end-game when the survival/topology genes are already settled.
+CORE_KEYS = [
+    'neural.refractory_period_ticks',
+    'neural.firing_threshold_excitatory',
+    'neural.firing_threshold_inhibitory',
+    'neural.post_spike_mp_reset',
+    'operating_ranges.adaptation_target_excitatory_multiplier',
+    'operating_ranges.adaptation_target_inhibitory_multiplier',
+]
+
+# Default pin values for the genes a tier does NOT search (used when no
+# --seed-archs is supplied). These are the v195 leaderboard #1 (the strongest
+# all-round architecture the prior search found): a healthy rest band, real
+# heritability, full survival. Pinning here keeps focus-mode candidates near a
+# known-viable brain so the population floor stays high.
+BEST_KNOWN_PINS: Dict[str, Any] = {
+    'biology.metabolic_ramp_per_sec': 18.0,
+    'biology.max_atrophy': 11.236,
+    'biology.metabolic_rate_abs_cap_multiple': 56.949,
+    'biology.idle_explore_seconds': 1.136,
+    'biology.explore_probability': 0.693,
+    'biology.mate_cooldown_seconds': 9,
+    'biology.circadian_cycle_ticks': 516,
+    'neural.num_hidden_neurons_default': 24,
+    'neural.connection_probability': 0.4345,
+    'neural.afferent_synapse_strength': 0.7319,
+    'neural.firing_threshold_excitatory': 0.3577,
+    'neural.firing_threshold_inhibitory': -0.8835,
+    'neural.spontaneous_firing_rate': 0.0631,
+    'neural.intrinsic_timescale_default': 23.191,
+    'neural.resting_potential_decay': 0.1662,
+    'neural.sensorimotor_coupling': 2.325,
+    'neural.symmetric_stdp': True,
+    'neural.refractory_period_ticks': 5,
+    'neural.post_spike_mp_reset': 0.2625,
+    'neural.sphere_topology': 'chc6',
+    'neural.cross_sphere_coupling': 1.379,
+    'neural.cryst_capacity': 1.566,
+    'neural.free_energy_beta': 1.229,
+    'operating_ranges.learning_rate': 0.036,
+    'operating_ranges.plasticity_threshold': 0.5075,
+    'operating_ranges.autoreceptor_coefficient': 0.1622,
+    'operating_ranges.adaptation_tau_ticks': 49.902,
+    'operating_ranges.adaptation_target_excitatory_multiplier': 1.4114,
+    'operating_ranges.adaptation_target_inhibitory_multiplier': 0.9091,
+    'operating_ranges.fitness_g_weight': 1.5,
+    'genetic_lottery.metabolic_rate_multiplier_lo': 0.838,
+    'genetic_lottery.metabolic_rate_multiplier_hi': 1.378,
+    'genetic_lottery.intrinsic_timescale_jitter': 5.446,
+    'genetic_lottery.firing_threshold_jitter': 0.1205,
+    'genetic_lottery.mutation_strength': 0.0808,
+}
+
+
+def _spec_bounds(spec: Any) -> Optional[Tuple[float, float]]:
+    """Return (lo, hi) numeric bounds for a continuous spec, else None."""
+    if (isinstance(spec, tuple) and len(spec) == 3
+            and spec[0] in ('uniform', 'loguniform', 'int_uniform')):
+        return float(spec[1]), float(spec[2])
+    return None
+
+
+# Which searched keys are continuous (gaussian-jittered) vs categorical/int.
+_CATEGORICAL_KEYS = {k for k, spec in SEARCH_SPACE.items() if isinstance(spec, list)}
+_INT_KEYS = {k for k, spec in SEARCH_SPACE.items()
+             if isinstance(spec, tuple) and spec and spec[0] == 'int_uniform'}
+_CONTINUOUS_KEYS = {k for k, spec in SEARCH_SPACE.items()
+                    if _spec_bounds(spec) is not None and k not in _INT_KEYS}
+
+
+def space_for_tier(tier: str) -> Dict[str, Any]:
+    """Return the active search-space sub-dict for a tier name.
+
+    'full'  (default) — the whole 35-key SEARCH_SPACE (v161-v195 behaviour).
+    'focus' — only FOCUS_KEYS (the ~12 high-leverage genes); the rest pinned.
+    'core'  — only CORE_KEYS (the six trinary/E-I levers); the rest pinned.
+
+    Unknown/None tier falls back to 'full'.
+    """
+    tier = (tier or 'full').lower().strip()
+    if tier == 'focus':
+        keys = [k for k in FOCUS_KEYS if k in SEARCH_SPACE]
+    elif tier == 'core':
+        keys = [k for k in CORE_KEYS if k in SEARCH_SPACE]
+    else:
+        keys = list(SEARCH_SPACE.keys())
+    return {k: SEARCH_SPACE[k] for k in keys}
+
+
+def pins_for_space(space: Dict[str, Any],
+                   seed_arch: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Fixed {full_key: value} for every SEARCH_SPACE gene NOT in `space`.
+
+    Values come from `seed_arch` (a loaded architecture JSON) when it supplies
+    them, else from BEST_KNOWN_PINS. Genes the active `space` searches are NOT
+    pinned (they vary freely). The genetic_lottery lo/hi pair is handled by the
+    sampler's range-collapse, so we pin the collapsed range when present.
+    """
+    pins: Dict[str, Any] = {}
+    for full_key in SEARCH_SPACE:
+        if full_key in space:
+            continue
+        val = None
+        if seed_arch is not None:
+            section, key = full_key.split('.', 1)
+            val = seed_arch.get(section, {}).get(key)
+        if val is None:
+            val = BEST_KNOWN_PINS.get(full_key)
+        if val is not None:
+            pins[full_key] = val
+    return pins
+
+
 def _sample_one(rng: random.Random, spec: Any) -> Any:
     """v162 — sample one value from a SEARCH_SPACE entry.
     
@@ -350,14 +521,23 @@ def _get_repeats_mode() -> str:
 # ARCHITECTURE GENERATION
 # =============================================================================
 def sample_random_architecture(rng: random.Random,
-                                  trial_id: int) -> Dict[str, Any]:
+                                  trial_id: int,
+                                  space: Optional[Dict[str, Any]] = None,
+                                  pins: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Sample one architecture from SEARCH_SPACE.
     
     v162 — supports continuous (min, max) ranges, log-uniform, integer
     uniform, and discrete lists. Also normalizes genetic_lottery key
     pairs so the `lo` value is always < the `hi` value (the NAS samples
     them independently, but downstream code expects an ordered pair).
+
+    v196 — `space` restricts which genes are SAMPLED (a tier sub-dict from
+    space_for_tier); `pins` provides fixed values for every gene NOT in
+    `space` (from pins_for_space). With both None this is exactly the
+    v162-v195 full-space behaviour.
     """
+    space = space if space is not None else SEARCH_SPACE
+    pins = pins or {}
     arch: Dict[str, Any] = {
         '_meta': {
             'source': 'NxonArchNAS',
@@ -367,7 +547,12 @@ def sample_random_architecture(rng: random.Random,
         'biology': {}, 'neural': {}, 'operating_ranges': {},
         'healthy_bands': {}, 'genetic_lottery': {},
     }
-    for full_key, spec in SEARCH_SPACE.items():
+    # 1) Pin the inactive genes first (so an active sample can still override).
+    for full_key, val in pins.items():
+        section, key = full_key.split('.', 1)
+        arch.setdefault(section, {})[key] = val
+    # 2) Sample the active genes.
+    for full_key, spec in space.items():
         section, key = full_key.split('.', 1)
         arch.setdefault(section, {})[key] = _sample_one(rng, spec)
     
@@ -408,14 +593,214 @@ def arch_summary_string(arch: Dict[str, Any]) -> str:
 # Strategies have the same signature: given trial_id + archive of past
 # results, sample one architecture. The scheduler stays unchanged.
 
+# =============================================================================
+# VARIANCE-AWARE SELECTION + E/I-ORDERING REWARD — v196 (v5.10)
+# =============================================================================
+# v193 made each architecture's metrics a MEDIAN over seed-repeats (robust to a
+# single outlier run). v196 takes the next step: rank by a LOWER-CONFIDENCE
+# BOUND on fitness, not the raw median fitness. The v195 8h leaderboard #1 (trial
+# 191, fitness 9.40) had fitness_std_reps≈0.57 across its own three repeats, and
+# several top-10 trials had std up to ~0.88 — selecting on the raw value rewards
+# the lucky draw. The LCB central−k·stderr pulls high-variance spikes BELOW
+# stable architectures with a slightly lower mean but a tight spread, so the
+# search converges on a reproducible basin rather than an isolated needle. The
+# logged `fitness` column is unchanged (still the median-metric fitness); only
+# the RANKING uses the bound, and k=0 recovers exact v195 selection.
+
+# Default confidence-bound strength (≈ one standard error). Tunable via
+# --select-k / NEURAXON_NAS_SELECT_K.
+NAS_SELECT_K = 1.0
+
+# Default weight of the E/I-ordering selection bonus (see _ei_ordering_bonus).
+# Tunable via --ei-weight / NEURAXON_NAS_EI_WEIGHT; 0 disables it.
+NAS_EI_WEIGHT = 0.5
+
+
+def _get_select_k() -> float:
+    try:
+        return float(os.environ.get('NEURAXON_NAS_SELECT_K', NAS_SELECT_K))
+    except (TypeError, ValueError):
+        return NAS_SELECT_K
+
+
+def _get_ei_weight() -> float:
+    try:
+        return float(os.environ.get('NEURAXON_NAS_EI_WEIGHT', NAS_EI_WEIGHT))
+    except (TypeError, ValueError):
+        return NAS_EI_WEIGHT
+
+
+def _ei_ordering_bonus(metrics: Optional[Dict[str, Any]], weight: float) -> float:
+    """v196 — substrate-free reward for EXCITATION-DOMINANT ordering (M1 >= inh).
+
+    The v191 trinary triad scores M1 (+1, target 0.22), neutral (0, 0.68) and
+    inhibitory (−1, 0.10) with three tents centred on those targets. Those tents
+    already MILDLY prefer excitation-dominance — but only weakly: the v195 search
+    nailed neutral≈0.69 yet settled at M1≈inh≈0.15, inhibition-dominant in
+    199/216 trials, because near that balanced sub-target operating point the two
+    tents separate the orders by only ~0.14 fitness, which the substrate's
+    inhibition bias plus the survival/neutral advantages of the inverted corner
+    easily outweigh. This term adds an explicit, TUNABLE ordering lever (the one
+    the v195 changelog recommended for v196): full `weight` when the network is
+    excitation-dominant at the paper margin (M1 − inh ≥ +0.12), zero when it is
+    inhibition-dominant (M1 − inh ≤ 0), linear between — strongest precisely
+    where fitness discriminates least, nudging the search off the inverted corner.
+
+    Applied ONLY to the selection score (not to fitness()), so fitness()'s 13.0
+    ceiling and every v187-v195 fitness test stay byte-for-byte identical.
+    """
+    if not metrics or weight <= 0.0:
+        return 0.0
+    m1 = float(metrics.get('M1_last', 0.0))
+    inh = float(metrics.get('M1_inh_last', 0.0))
+    margin = m1 - inh
+    PAPER_MARGIN = 0.12          # 0.22 − 0.10
+    frac = max(0.0, min(1.0, margin / PAPER_MARGIN))
+    return weight * frac
+
+
+def selection_score(result: Dict[str, Any],
+                    k: Optional[float] = None,
+                    ei_weight: Optional[float] = None) -> float:
+    """v196 — the value the search RANKS by (elites, global-best, top-3).
+
+    selection_score = fitness − k · stderr(fitness over repeats)   [LCB]
+                      + E/I-ordering bonus                          [v196 fix]
+
+    `result` is a finished-trial dict (has 'fitness' and 'metrics'). Failed
+    trials (fitness ≤ −1) keep their fitness so they sort last. Falls back to
+    raw fitness when the per-repeat spread is unavailable (single-seed runs).
+    """
+    central = float(result.get('fitness', -1.0))
+    if central <= -1.0:
+        return central
+    k = _get_select_k() if k is None else k
+    ei_weight = _get_ei_weight() if ei_weight is None else ei_weight
+    m = result.get('metrics') or {}
+    n = max(1.0, float(m.get('n_repeats_ok', m.get('n_repeats', 1.0)) or 1.0))
+    sd = float(m.get('fitness_std_reps', 0.0) or 0.0)
+    lcb = central - k * sd / (n ** 0.5)
+    lcb += _ei_ordering_bonus(m, ei_weight)
+    return lcb
+
+
+class GuidedSampler:
+    """v196 — online estimation-of-distribution (EDA) layer that learns WHAT THE
+    BEST ARCHITECTURES LOOK LIKE and biases the search's "random" immigrants
+    toward it, so the population floor rises instead of every immigrant being
+    uniform-random junk.
+
+    Per continuous gene in the active space it fits the mean+spread of the
+    values seen in the top fraction of trials so far, and draws guided
+    candidates from those fitted (clamped) Gaussians; genes with no winner
+    signal (too few samples) fall back to uniform, so it never over-commits.
+    It is refit every time the strategy's archive grows, so the guidance
+    sharpens as the run learns — and guided immigrants are MIXED with pure
+    random ones (the strategy chooses the ratio), preserving exploration.
+
+    Operates directly on architecture dicts (same shape as
+    sample_random_architecture), honouring the active `space` and `pins`.
+    """
+
+    def __init__(self, space: Dict[str, Any], pins: Optional[Dict[str, Any]] = None,
+                 top_frac: float = 0.25, min_winners: int = 6):
+        self.space = space
+        self.pins = pins or {}
+        self.top_frac = top_frac
+        self.min_winners = min_winners
+        self.stats: Dict[str, Tuple[float, float, float, float, str]] = {}
+        self.ready = False
+
+    @staticmethod
+    def _arch_get(arch: Dict[str, Any], full_key: str) -> Any:
+        section, key = full_key.split('.', 1)
+        return arch.get(section, {}).get(key)
+
+    def update(self, archive: List[Dict[str, Any]]) -> None:
+        """Refit the winning-gene distribution from archive entries.
+
+        `archive` entries are {'score'|'fitness', 'arch', ...}; we rank by
+        'score' (the selection score) when present, else 'fitness'.
+        """
+        scored = [a for a in archive if a.get('arch') is not None]
+        if len(scored) < self.min_winners * 2:
+            return
+        scored.sort(key=lambda a: a.get('score', a.get('fitness', -1.0)),
+                    reverse=True)
+        n_top = max(self.min_winners, int(round(len(scored) * self.top_frac)))
+        top = scored[:n_top]
+        new_stats: Dict[str, Tuple[float, float, float, float, str]] = {}
+        for full_key, spec in self.space.items():
+            bounds = _spec_bounds(spec)
+            if bounds is None or full_key in _CATEGORICAL_KEYS:
+                continue  # categorical genes stay uniform
+            lo, hi = bounds
+            vals = []
+            for a in top:
+                v = self._arch_get(a['arch'], full_key)
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    vals.append(float(v))
+            if len(vals) < self.min_winners:
+                continue
+            mean = sum(vals) / len(vals)
+            var = sum((v - mean) ** 2 for v in vals) / len(vals)
+            std = max((hi - lo) * 0.06, var ** 0.5)   # floor the spread
+            kind = 'int_uniform' if full_key in _INT_KEYS else 'uniform'
+            new_stats[full_key] = (mean, std, lo, hi, kind)
+        if new_stats:
+            self.stats = new_stats
+            self.ready = True
+
+    def warm_start(self, stats: Dict[str, Tuple[float, float, float, float, str]]) -> None:
+        """Seed the prior directly (e.g. from a resumed run's winners)."""
+        if stats:
+            self.stats = dict(stats)
+            self.ready = True
+
+    def sample(self, rng: random.Random, trial_id: int) -> Dict[str, Any]:
+        """Draw one GUIDED architecture dict: modelled genes from their fitted
+        Gaussian, everything else uniform / pinned (so it still explores)."""
+        arch: Dict[str, Any] = {
+            '_meta': {'source': 'NxonArchNAS:Guided', 'trial_id': trial_id,
+                      'sampled_at': time.strftime('%Y-%m-%dT%H:%M:%S')},
+            'biology': {}, 'neural': {}, 'operating_ranges': {},
+            'healthy_bands': {}, 'genetic_lottery': {},
+        }
+        for full_key, val in self.pins.items():
+            section, key = full_key.split('.', 1)
+            arch.setdefault(section, {})[key] = val
+        for full_key, spec in self.space.items():
+            section, key = full_key.split('.', 1)
+            st = self.stats.get(full_key)
+            if st is None:
+                arch.setdefault(section, {})[key] = _sample_one(rng, spec)
+                continue
+            mean, std, lo, hi, kind = st
+            v = rng.gauss(mean, std)
+            v = max(lo, min(hi, v))
+            arch.setdefault(section, {})[key] = int(round(v)) if kind == 'int_uniform' else v
+        lot = arch.get('genetic_lottery', {})
+        lo = lot.pop('metabolic_rate_multiplier_lo', None)
+        hi = lot.pop('metabolic_rate_multiplier_hi', None)
+        if lo is not None and hi is not None:
+            lot['metabolic_rate_multiplier_range'] = [min(lo, hi), max(lo, hi)]
+        return arch
+
+
 class _SearchStrategy:
     """Base class. Override `sample(trial_id)` to return an architecture
     dict. `update(result)` is called by the saver after each trial
     finishes — strategies that maintain state (elite pool, surrogate
     model, etc.) use this to incorporate new results."""
     
-    def __init__(self, rng: random.Random):
+    def __init__(self, rng: random.Random,
+                 space: Optional[Dict[str, Any]] = None,
+                 pins: Optional[Dict[str, Any]] = None):
         self.rng = rng
+        # v196 — active search sub-space + pins for the inactive genes (focus
+        # tier). Default to the full space with no pins (v161-v195 behaviour).
+        self.space = space if space is not None else SEARCH_SPACE
+        self.pins = pins or {}
     
     def sample(self, trial_id: int) -> Dict[str, Any]:
         raise NotImplementedError
@@ -432,31 +817,50 @@ class _SearchStrategy:
 class RandomSearchStrategy(_SearchStrategy):
     """v161-v163 behaviour: every trial is an independent uniform sample
     from SEARCH_SPACE. Robust to noise, exhaustively explorative, never
-    exploits past results."""
+    exploits past results. v196 — honours the active space + pins (focus tier)."""
     
     def sample(self, trial_id: int) -> Dict[str, Any]:
-        return sample_random_architecture(self.rng, trial_id)
+        return sample_random_architecture(self.rng, trial_id,
+                                          space=self.space, pins=self.pins)
 
 
 class EvolutionaryStrategy(_SearchStrategy):
     """v164 — (μ + λ) evolution strategy with mixed mutation/crossover/
-    random operators.
-    
+    random operators. v196 — wrapped in a SELF-EVOLVING CONTROLLER.
+
     State:
-      - archive: every completed trial (with fitness), kept under a lock
-        because the saver-thread updates it concurrently with the
-        scheduler-thread reading it
-      - n_random_seed: first N trials always use pure random sampling so
+      - archive: every completed trial (with fitness AND selection score),
+        kept under a lock because the saver-thread updates it concurrently
+        with the scheduler-thread reading it
+      - random_seed_trials: first N trials always use pure random sampling so
         the elite pool gets seeded with diversity (avoids premature
         convergence)
-    
-    Each sample after seeding picks one of three operators:
-      - 20%  random (continued exploration; ensures we don't get stuck)
-      - 50%  mutation (one elite, perturb 1-3 parameters with Gaussian
-                       noise scaled to each param's range)
-      - 30%  crossover (two elites, blend parameter-by-parameter)
+
+    Operators (the base mix, adapted live by the controller):
+      - p_random   immigrants (continued exploration); a `guided_frac` slice
+        of these are drawn from the GuidedSampler (winning-gene EDA) instead
+        of uniform-random, raising the population floor
+      - p_mutation one elite, perturb a few params with Gaussian noise scaled
+        to each param's range and a self-adaptive per-child sigma
+      - p_crossover two elites, blend parameter-by-parameter
+
+    v196 CONTROLLER (replaces the v169 binary escape toggle). On a sliding
+    window of recent selection scores it:
+      * anneals the global mutation sigma with a 1/5th-success rule (shrink
+        while improving = exploit, grow while flat = explore);
+      * runs a GRADED stagnation ladder keyed on trials-since-best — widen
+        mutation (tier 1) → hypermutation burst (tier 2) → partial restart via
+        more immigrants (tier 3) — instead of one on/off jump;
+      * shifts the operator mix toward immigrants while stuck and toward
+        mutation/crossover while improving.
+    Set adaptive=False (or --no-adaptive) to freeze the knobs at the v169
+    escape behaviour.
+
+    Ranking everywhere (elite pool, archive) is by the LCB SELECTION SCORE
+    (fitness − k·stderr + E/I bonus), not raw fitness, so the search exploits
+    CONSISTENT architectures rather than lucky single draws.
     """
-    
+
     def __init__(self, rng: random.Random,
                   elite_pool_size: int = 10,
                   random_seed_trials: int = 50,
@@ -467,10 +871,20 @@ class EvolutionaryStrategy(_SearchStrategy):
                   mutation_sigma_frac: float = 0.15,
                   escape_threshold: int = 30,
                   escape_sigma_frac: float = 0.35,
-                  escape_n_params: Tuple[int, int] = (3, 6)):
-        super().__init__(rng)
+                  escape_n_params: Tuple[int, int] = (3, 6),
+                  space: Optional[Dict[str, Any]] = None,
+                  pins: Optional[Dict[str, Any]] = None,
+                  adaptive: bool = True,
+                  guided_frac: float = 0.5,
+                  select_k: Optional[float] = None,
+                  ei_weight: Optional[float] = None):
+        super().__init__(rng, space=space, pins=pins)
         self.elite_pool_size = elite_pool_size
         self.random_seed_trials = random_seed_trials
+        # Base operator mix (the controller adapts the *live* copies below).
+        self.p_random_base = p_random
+        self.p_mutation_base = p_mutation
+        self.p_crossover_base = p_crossover
         self.p_random = p_random
         self.p_mutation = p_mutation
         self.p_crossover = p_crossover
@@ -480,87 +894,144 @@ class EvolutionaryStrategy(_SearchStrategy):
         self.mutation_sigma_frac_normal = mutation_sigma_frac
         self.mutation_n_params = mutation_n_params       # current (toggled)
         self.mutation_sigma_frac = mutation_sigma_frac   # current (toggled)
-        # v169 — escape mode parameters
-        self.escape_threshold = escape_threshold
+        # v169 — escape mode parameters (the ladder's tier-1 widths)
+        self.escape_threshold = max(1, escape_threshold)
         self.escape_sigma_frac = escape_sigma_frac
         self.escape_n_params = escape_n_params
-        
+
+        # v196 — selection / controller config
+        self.select_k = _get_select_k() if select_k is None else select_k
+        self.ei_weight = _get_ei_weight() if ei_weight is None else ei_weight
+        self.adaptive = adaptive
+        self.guided_frac = max(0.0, min(1.0, guided_frac))
+        # absolute sigma clamp for the 1/5-rule annealing
+        self._sigma_lo = max(0.04, 0.4 * mutation_sigma_frac)
+        self._sigma_hi = min(0.9, 4.0 * mutation_sigma_frac)
+        self._window = max(8, 3 * self.escape_threshold // 2)   # sliding window
+        self._recent_improved: List[int] = []   # 1 if trial set a new best, else 0
+        self.hypermutate = False                  # tier-2 burst flag
+        self.restart_frac = 0.0                   # tier-3 extra-immigrant fraction
+        self.tier = 0                             # current stagnation tier
+        self._best_score = -1.0                   # best LCB selection score seen
+
+        # v196 — online guided (EDA) immigrant sampler over the active space
+        self._guided = GuidedSampler(self.space, pins=self.pins)
+
         # Thread-safe archive of all completed trials
         self._lock = threading.Lock()
         self._archive: List[Dict[str, Any]] = []
         
-        # v169 (v4.77) — NAS escape state tracking
-        # =========================================
-        # The v168 @1800s run revealed an evolutionary search failure mode:
-        # the best architecture was found at trial 9 (seed phase) and the
-        # next 115 trials produced ZERO improvements. Evolutionary search
-        # got trapped exploiting trial 9's neighborhood without ever
-        # exploring far enough to discover better regions.
-        # 
-        # Fix: track trials_since_last_best. When it exceeds escape_threshold
-        # (default 30), switch to escape mode:
-        #   - mutation_sigma_frac: 0.15 → 0.35 (broader Gaussian per-param)
-        #   - mutation_n_params:   (1,3) → (3,6) (more params mutated per child)
-        # This produces "long-range" mutations that genuinely explore distant
-        # regions of the search space. When a new best is found, revert to
-        # normal mode and reset the counter.
+        # v169 (v4.77) — NAS escape state tracking (kept for status/back-compat;
+        # the v196 controller generalises it into the graded ladder above).
         self.best_fitness = -1.0
         self.trials_since_last_best = 0
         self.in_escape_mode = False
         self.escape_events = []   # list of (trial_id_started, trial_id_resolved or None)
         
         # Op counters (for status reporting)
-        self.op_count = {'random': 0, 'mutation': 0, 'crossover': 0}
+        self.op_count = {'random': 0, 'guided': 0, 'mutation': 0, 'crossover': 0}
     
     def update(self, result: Dict[str, Any]) -> None:
-        """Called from saver thread. Add this trial to the archive if it
-        has a usable fitness. v169 — also tracks the trials-since-last-best
-        counter that drives escape mode."""
+        """Called from saver thread. Add this trial to the archive (ranked by
+        its v196 LCB selection score) and re-plan the search strategy via the
+        self-evolving controller."""
         fit = result.get('fitness', -1.0)
         if fit <= -1.0:
             return
+        # v196 — rank by the selection score the saver already computed
+        # (fall back to computing it here for programmatic callers).
+        score = result.get('selection_score')
+        if score is None:
+            score = selection_score(result, k=self.select_k, ei_weight=self.ei_weight)
         tid = result.get('trial_id', -1)
         with self._lock:
             self._archive.append({
                 'fitness': fit,
+                'score':   score,
                 'arch':    result['arch'],
                 'trial_id': tid,
             })
-            # v169 — escape state machine
-            if fit > self.best_fitness:
-                # New global best — exit escape if active, reset counter
+            improved = score > self._best_score + 1e-6
+            if improved:
+                self._best_score = score
+                self.trials_since_last_best = 0
+                # legacy escape bookkeeping
                 if self.in_escape_mode:
-                    # Mark the escape event as resolved
                     if self.escape_events and self.escape_events[-1][1] is None:
                         self.escape_events[-1] = (self.escape_events[-1][0], tid)
                     self.in_escape_mode = False
-                    self.mutation_sigma_frac = self.mutation_sigma_frac_normal
-                    self.mutation_n_params = self.mutation_n_params_normal
-                    print(f"[NAS escape] RESOLVED at trial {tid} "
-                          f"(new best {fit:.3f}) — reverting to normal mutation",
-                          flush=True)
-                self.best_fitness = fit
-                self.trials_since_last_best = 0
+                self.best_fitness = max(self.best_fitness, fit)
             else:
                 self.trials_since_last_best += 1
-                # Enter escape mode if we've been stuck too long
-                if (not self.in_escape_mode and
-                    self.trials_since_last_best >= self.escape_threshold and
-                    len(self._archive) > self.random_seed_trials):
-                    self.in_escape_mode = True
-                    self.mutation_sigma_frac = self.escape_sigma_frac
-                    self.mutation_n_params = self.escape_n_params
-                    self.escape_events.append((tid, None))
-                    print(f"[NAS escape] TRIGGERED at trial {tid} "
-                          f"({self.trials_since_last_best} trials without improvement, "
-                          f"best={self.best_fitness:.3f}) — switching to broad mutation "
-                          f"(sigma={self.escape_sigma_frac}, n_params={self.escape_n_params})",
-                          flush=True)
+            self._recent_improved.append(1 if improved else 0)
+            if len(self._recent_improved) > self._window:
+                self._recent_improved.pop(0)
+            # Refit the guided EDA prior from the (now larger) archive.
+            try:
+                self._guided.update(self._archive)
+            except Exception:
+                pass
+            # Re-plan knobs.
+            if self.adaptive and len(self._archive) > self.random_seed_trials:
+                self._replan(tid)
+    
+    def _replan(self, tid: int) -> None:
+        """v196 controller — runs under self._lock. Anneal mutation sigma with a
+        1/5th-success rule and escalate a graded stagnation ladder. Pure
+        bookkeeping over recent selection scores; sample() reads the result."""
+        # --- 1/5th success rule on the recent window -----------------------
+        win = self._recent_improved
+        if len(win) >= max(5, self._window // 2):
+            rate = sum(win) / len(win)
+            if rate > 0.2:        # improving often → exploit (shrink sigma)
+                self.mutation_sigma_frac = max(self._sigma_lo,
+                                               self.mutation_sigma_frac * 0.85)
+            elif rate < 0.2:      # stalling → explore (grow sigma)
+                self.mutation_sigma_frac = min(self._sigma_hi,
+                                               self.mutation_sigma_frac * 1.25)
+        # --- graded stagnation ladder --------------------------------------
+        self.hypermutate = False
+        self.restart_frac = 0.0
+        tier = self.trials_since_last_best // self.escape_threshold
+        if tier != self.tier:
+            self.tier = tier
+            if tier > 0:
+                print(f"[NAS controller] STAGNATION tier {tier} "
+                      f"({self.trials_since_last_best} trials flat, "
+                      f"best_score={self._best_score:.3f}) — escalating", flush=True)
+            else:
+                print(f"[NAS controller] improvement at trial {tid} "
+                      f"(score {self._best_score:.3f}) — de-escalating to tier 0",
+                      flush=True)
+        if tier == 0:
+            # improving: exploit — favour mutation/crossover, few immigrants
+            self.p_random = max(0.10, self.p_random_base * 0.75)
+            self.mutation_n_params = self.mutation_n_params_normal
+        else:
+            # stuck: explore — more immigrants, broader mutation the deeper we are
+            self.p_random = min(0.5, self.p_random_base + 0.12 * tier)
+            self.mutation_sigma_frac = min(self._sigma_hi,
+                                           max(self.mutation_sigma_frac,
+                                               self.escape_sigma_frac * (1.0 + 0.3 * (tier - 1))))
+            self.mutation_n_params = self.escape_n_params
+            self.in_escape_mode = True
+            if not self.escape_events or self.escape_events[-1][1] is not None:
+                self.escape_events.append((tid, None))
+            if tier >= 2:
+                self.hypermutate = True          # broad burst
+            if tier >= 3:
+                self.restart_frac = min(0.6, 0.2 * (tier - 1))  # partial restart
+        # keep the operator mix normalised (crossover takes the remainder)
+        self.p_mutation = self.p_mutation_base
+        self.p_crossover = max(0.0, 1.0 - self.p_random - self.p_mutation)
     
     def _get_elites(self) -> List[Dict[str, Any]]:
-        """Return top-N archive entries by fitness. Snapshot under lock."""
+        """Return top-N archive entries by v196 LCB selection score. Snapshot
+        under lock. Falls back to raw fitness for legacy entries lacking a score."""
         with self._lock:
-            sorted_arch = sorted(self._archive, key=lambda x: -x['fitness'])
+            sorted_arch = sorted(
+                self._archive,
+                key=lambda x: -x.get('score', x.get('fitness', -1.0)))
             return sorted_arch[:self.elite_pool_size]
     
     def seed_with_archs(self, seed_archs: List[Dict[str, Any]],
@@ -589,10 +1060,12 @@ class EvolutionaryStrategy(_SearchStrategy):
             for i, arch in enumerate(seed_archs):
                 self._archive.append({
                     'fitness': assumed_fitness,
+                    'score': assumed_fitness,   # v196 — seeds rank by score too
                     'arch': arch,
                     'trial_id': -1 - i,   # negative trial_ids mark "seeded"
                 })
             self.best_fitness = max(assumed_fitness, self.best_fitness)
+            self._best_score = max(assumed_fitness, self._best_score)
             self.trials_since_last_best = 0
         print(f"[NAS] Seeded elite pool with {len(seed_archs)} pre-evaluated "
               f"architectures (assumed_fitness={assumed_fitness})", flush=True)
@@ -610,14 +1083,17 @@ class EvolutionaryStrategy(_SearchStrategy):
             'healthy_bands': {}, 'genetic_lottery': {},
         }
     
-    def _mutate_value(self, key: str, val: Any, spec: Any) -> Any:
+    def _mutate_value(self, key: str, val: Any, spec: Any,
+                      sigma_frac: Optional[float] = None) -> Any:
         """Perturb a single value within its SEARCH_SPACE bounds. For
-        continuous: Gaussian noise scaled to `mutation_sigma_frac` of
-        the range. For discrete: 50% chance pick a neighbor in the list."""
+        continuous: Gaussian noise scaled to `sigma_frac` (default the
+        controller's current mutation_sigma_frac) of the range. For discrete:
+        50% chance pick a neighbor in the list."""
+        sf = self.mutation_sigma_frac if sigma_frac is None else sigma_frac
         if isinstance(spec, tuple) and len(spec) == 3 and isinstance(spec[0], str):
             kind, lo, hi = spec
             span = max(1e-12, hi - lo)
-            sigma = self.mutation_sigma_frac * span
+            sigma = sf * span
             if kind == 'uniform':
                 new_val = float(val) + self.rng.gauss(0, sigma)
                 return max(lo, min(hi, new_val))
@@ -625,7 +1101,7 @@ class EvolutionaryStrategy(_SearchStrategy):
                 import math
                 log_lo, log_hi = math.log(lo), math.log(hi)
                 log_span = log_hi - log_lo
-                log_sigma = self.mutation_sigma_frac * log_span
+                log_sigma = sf * log_span
                 new_log = math.log(max(lo * 1e-6, float(val))) + self.rng.gauss(0, log_sigma)
                 new_log = max(log_lo, min(log_hi, new_log))
                 return math.exp(new_log)
@@ -646,7 +1122,13 @@ class EvolutionaryStrategy(_SearchStrategy):
         return val
     
     def _mutate(self, parent: Dict[str, Any], trial_id: int) -> Dict[str, Any]:
-        """Copy parent arch, perturb 1-3 random parameters."""
+        """Copy parent arch, perturb a few ACTIVE-space parameters.
+
+        v196 — only genes in the active space are mutated (focus tier leaves
+        the pinned genes untouched); the per-child sigma is self-adapted
+        (ES-style log-normal jitter around the controller's current sigma) so
+        different children explore different scales; a tier-2 hypermutation
+        burst doubles the sigma for genuine long-range jumps."""
         child = self._empty_arch(trial_id)
         # Copy all sections from parent
         for section in ('biology', 'neural', 'operating_ranges',
@@ -654,21 +1136,30 @@ class EvolutionaryStrategy(_SearchStrategy):
             if section in parent:
                 child[section] = copy.deepcopy(parent[section])
         
-        # Pick 1-3 parameters to mutate
-        keys = list(SEARCH_SPACE.keys())
+        # ES-style self-adaptive per-child sigma (log-normal around current).
+        sigma_eff = self.mutation_sigma_frac * math.exp(0.3 * self.rng.gauss(0.0, 1.0))
+        if self.hypermutate:
+            sigma_eff *= 2.0
+        sigma_eff = max(self._sigma_lo, min(self._sigma_hi, sigma_eff))
+        
+        # Pick parameters to mutate — from the ACTIVE space only (focus tier).
+        keys = list(self.space.keys())
+        if not keys:
+            return child
         n_lo, n_hi = self.mutation_n_params
         n_mut = self.rng.randint(n_lo, min(n_hi, len(keys)))
         mut_keys = self.rng.sample(keys, n_mut)
         
         for full_key in mut_keys:
             section, key = full_key.split('.', 1)
-            spec = SEARCH_SPACE[full_key]
+            spec = self.space[full_key]
             current = child.setdefault(section, {}).get(key)
             if current is None:
                 # Parent doesn't have this param — sample fresh from spec
                 child[section][key] = _sample_one(self.rng, spec)
             else:
-                child[section][key] = self._mutate_value(full_key, current, spec)
+                child[section][key] = self._mutate_value(full_key, current, spec,
+                                                         sigma_frac=sigma_eff)
         
         # Re-collapse the metabolic_rate lottery pair (matches sample_random_architecture)
         lot = child.get('genetic_lottery', {})
@@ -687,17 +1178,18 @@ class EvolutionaryStrategy(_SearchStrategy):
     
     def _crossover(self, parent_a: Dict[str, Any],
                    parent_b: Dict[str, Any], trial_id: int) -> Dict[str, Any]:
-        """Mix two parents: for each searchable parameter, randomly pick
+        """Mix two parents: for each ACTIVE-space parameter, randomly pick
         from A or B (50/50). Keeps the structure but blends search-space
-        coordinates."""
+        coordinates. v196 — only the active genes are blended (pinned genes
+        are identical in both parents in focus mode)."""
         child = self._empty_arch(trial_id)
         # Start by copying parent_a entirely
         for section in ('biology', 'neural', 'operating_ranges',
                         'healthy_bands', 'genetic_lottery'):
             if section in parent_a:
                 child[section] = copy.deepcopy(parent_a[section])
-        # For each searchable param, 50% chance to use parent_b's value
-        for full_key in SEARCH_SPACE.keys():
+        # For each ACTIVE searchable param, 50% chance to use parent_b's value
+        for full_key in self.space.keys():
             section, key = full_key.split('.', 1)
             if self.rng.random() < 0.5:
                 b_val = parent_b.get(section, {}).get(key)
@@ -711,31 +1203,48 @@ class EvolutionaryStrategy(_SearchStrategy):
             chosen = a_range if self.rng.random() < 0.5 else b_range
             lot['metabolic_rate_multiplier_range'] = list(chosen)
         return child
+
+    def _immigrant(self, trial_id: int) -> Dict[str, Any]:
+        """One immigrant: guided (winning-gene EDA) with prob guided_frac once
+        the guided prior is ready, else a pure-random sample. Both honour the
+        active space + pins."""
+        if (self._guided.ready and self.guided_frac > 0.0
+                and self.rng.random() < self.guided_frac):
+            self.op_count['guided'] += 1
+            return self._guided.sample(self.rng, trial_id)
+        self.op_count['random'] += 1
+        return sample_random_architecture(self.rng, trial_id,
+                                          space=self.space, pins=self.pins)
     
     def sample(self, trial_id: int) -> Dict[str, Any]:
         """Generate one architecture: seed phase = random; otherwise
-        pick an operator weighted by p_random / p_mutation / p_crossover."""
+        pick an operator weighted by the controller's live p_random /
+        p_mutation / p_crossover. v196 — immigrants may be GUIDED, and a
+        tier-3 partial restart raises the effective immigrant fraction."""
         with self._lock:
             archive_size = len(self._archive)
+            p_random = self.p_random
+            restart_frac = self.restart_frac
         
         # Seed phase: always random until we have enough elites
         if archive_size < self.random_seed_trials:
             self.op_count['random'] += 1
-            return sample_random_architecture(self.rng, trial_id)
+            return sample_random_architecture(self.rng, trial_id,
+                                              space=self.space, pins=self.pins)
         
-        # Choose operator
+        # v196 — partial restart (tier 3+) injects extra immigrants on top of
+        # the base immigrant rate to jump to a new region of the space.
+        p_imm = min(0.9, p_random + restart_frac)
         r = self.rng.random()
-        if r < self.p_random or archive_size < 2:
-            self.op_count['random'] += 1
-            return sample_random_architecture(self.rng, trial_id)
+        if r < p_imm or archive_size < 2:
+            return self._immigrant(trial_id)
         
         elites = self._get_elites()
         if not elites:
-            self.op_count['random'] += 1
-            return sample_random_architecture(self.rng, trial_id)
+            return self._immigrant(trial_id)
         
-        if r < self.p_random + self.p_mutation:
-            # Mutation: pick one elite, perturb 1-3 params
+        if r < p_imm + self.p_mutation:
+            # Mutation: pick one elite, perturb a few params
             parent = self.rng.choice(elites)
             self.op_count['mutation'] += 1
             return self._mutate(parent['arch'], trial_id)
@@ -758,7 +1267,10 @@ class EvolutionaryStrategy(_SearchStrategy):
             archive_n = len(self._archive)
         return (f"Evolutionary[pool={self.elite_pool_size}, "
                 f"seed={self.random_seed_trials}, archive={archive_n}, "
+                f"tier={self.tier} sigma={self.mutation_sigma_frac:.3f} "
+                f"p_imm~{self.p_random:.2f} guided_frac={self.guided_frac:.2f}, "
                 f"ops: rnd={self.op_count['random']} "
+                f"gui={self.op_count['guided']} "
                 f"mut={self.op_count['mutation']} "
                 f"x={self.op_count['crossover']}]")
 
@@ -768,7 +1280,10 @@ def make_strategy(name: str, rng: random.Random, **kwargs) -> _SearchStrategy:
     """Build a strategy by name. Accepts kwargs to override defaults."""
     name = (name or 'random').lower().strip()
     if name in ('random', 'rand'):
-        return RandomSearchStrategy(rng)
+        # RandomSearchStrategy only understands space/pins; ignore evo kwargs.
+        return RandomSearchStrategy(rng,
+                                    space=kwargs.get('space'),
+                                    pins=kwargs.get('pins'))
     elif name in ('evolutionary', 'evo', 'evolution', 'ga'):
         return EvolutionaryStrategy(rng, **kwargs)
     else:
@@ -1718,7 +2233,7 @@ def _write_csv_header(csv_path: Path):
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow([
-            'trial_id', 'completed_at_iso', 'fitness',
+            'trial_id', 'completed_at_iso', 'fitness', 'selection_score',
             'final_alive', 'peak_alive',
             'alive_q1', 'alive_q2', 'alive_q3', 'alive_mean',
             'M1', 'M1_neutral', 'M1_inh',   # v189 — trinary balance visibility
@@ -1758,6 +2273,9 @@ def _append_csv_row(csv_path: Path, result: Dict, is_global_best: bool):
         result['trial_id'],
         time.strftime('%Y-%m-%dT%H:%M:%S'),
         f"{result['fitness']:.4f}",
+        # v196 — the LCB selection score the search actually ranks by (falls
+        # back to fitness when not yet computed, e.g. a failed/legacy row).
+        f"{result.get('selection_score', result['fitness']):.4f}",
         m.get('final_alive', ''), m.get('peak_alive', ''),
         # v168 — checkpoint columns
         m.get('alive_q1', ''), m.get('alive_q2', ''),
@@ -1883,7 +2401,7 @@ def _save_arch_json(arch: Dict[str, Any], path: Path, rank: int,
     # New _meta — completely replaces template _meta with NAS-run info
     template['_meta'] = {
         'name': f'nas_best_t{trial_id:03d}',
-        'version': 'NxonArchNAS v1.4 (v195)',
+        'version': 'NxonArchNAS v1.5 (v196)',
         'description': (
             f'Architecture found by NAS — trial {trial_id}, fitness {fitness_val:.4f}. '
             'Plug-and-play compatible with architectures/default.json: drop this file '
@@ -2011,14 +2529,24 @@ class _NASScheduler:
                     
                     new_best = False
                     if r['fitness'] > -1.0:
+                        # v196 — compute the LCB selection score ONCE (here in
+                        # the saver) and attach it to the result. Selection of
+                        # the global best, the top-3, and the strategy's elite
+                        # pool all rank by THIS, not the raw median fitness, so
+                        # a lucky single draw can't out-rank a consistent
+                        # architecture with a tighter seed-repeat spread.
+                        r['selection_score'] = selection_score(r)
+                        best_key = (self.global_best.get('selection_score',
+                                    self.global_best['fitness'])
+                                    if self.global_best else None)
                         if (self.global_best is None
-                            or r['fitness'] > self.global_best['fitness']):
+                            or r['selection_score'] > best_key):
                             self.global_best = r
                             new_best = True
-                        # Update top-3
+                        # Update top-3 (by selection score)
                         self.global_top3 = sorted(
                             self.global_top3 + [r],
-                            key=lambda x: -x['fitness'])[:3]
+                            key=lambda x: -x.get('selection_score', x['fitness']))[:3]
                     
                     # v164 — feed every completed trial to the search
                     # strategy so it can update its archive (evolutionary
@@ -2273,7 +2801,7 @@ def run_continuous(num_trials: int = 8,
                      batches: Optional[int] = None,
                      max_trials: Optional[int] = None,
                      verbose: bool = True,
-                     search_strategy: str = 'random',
+                     search_strategy: str = 'evolutionary',
                      evo_elite_pool: int = 10,
                      evo_random_seed_trials: int = 50,
                      evo_p_random: float = 0.20,
@@ -2284,9 +2812,17 @@ def run_continuous(num_trials: int = 8,
                      evo_escape_sigma: float = 0.35,
                      evo_escape_n_params: Tuple[int, int] = (3, 6),
                      seed_archs: Optional[List[Dict[str, Any]]] = None,
-                     seed_archs_fitness: float = 6.0) -> Dict[str, Any]:
+                     seed_archs_fitness: float = 6.0,
+                     search_space_tier: str = 'full',
+                     adaptive: bool = True,
+                     guided_frac: float = 0.5,
+                     select_k: Optional[float] = None,
+                     ei_weight: Optional[float] = None) -> Dict[str, Any]:
     """v160 — Streaming NAS. v164 adds pluggable search_strategy.
     v169 — adds escape mechanism for evolutionary strategy when stuck.
+    v196 — default strategy is 'evolutionary'; adds the focus-tier search space,
+    the self-evolving controller (adaptive + guided immigrants), and LCB
+    variance-aware selection (select_k / ei_weight).
     
     Args:
       num_trials: legacy display-batch size
@@ -2297,10 +2833,15 @@ def run_continuous(num_trials: int = 8,
       batches: legacy v159 flag (max_trials = batches * num_trials)
       max_trials: total trial cap (None = forever until Ctrl-C)
       verbose: per-trial console output
-      search_strategy: 'random' (v161-v163) or 'evolutionary' (v164)
+      search_strategy: 'evolutionary' (v196 default) or 'random' (v161-v163)
       evo_*: evolutionary parameters when search_strategy='evolutionary'
-      evo_escape_*: v169 escape parameters — trigger broad mutation when
-                    no improvement for evo_escape_threshold trials.
+      evo_escape_*: v169 escape parameters — the controller's tier-1 widths.
+      search_space_tier: 'full' (35 genes), 'focus' (~12 high-leverage, rest
+                         pinned) or 'core' (6 trinary/E-I levers, rest pinned).
+      adaptive: v196 self-evolving controller on/off.
+      guided_frac: fraction of immigrants drawn from the guided EDA prior.
+      select_k: LCB strength (fitness − k·stderr); None → env/default (1.0).
+      ei_weight: E/I-ordering selection bonus weight; None → env/default (0.5).
     """
     if workers is None:
         workers = max(1, mp.cpu_count() - 1)
@@ -2314,8 +2855,31 @@ def run_continuous(num_trials: int = 8,
     # Translate batches → max_trials for backward compat
     if max_trials is None and batches is not None:
         max_trials = batches * num_trials
+
+    # v196 — route the LCB knobs through the environment so the saver thread's
+    # selection_score() (which reads env) matches the strategy's ranking, AND
+    # so spawned workers inherit them. Explicit args win over any prior env.
+    if select_k is not None:
+        os.environ['NEURAXON_NAS_SELECT_K'] = str(select_k)
+    if ei_weight is not None:
+        os.environ['NEURAXON_NAS_EI_WEIGHT'] = str(ei_weight)
+    eff_k = _get_select_k()
+    eff_ei = _get_ei_weight()
+
+    # v196 — build the active search space + pins for the chosen tier. In a
+    # pinned tier the FIRST seed arch (if any) supplies the pin values; else
+    # BEST_KNOWN_PINS. Seeds also pre-populate the elite pool below.
+    active_space = space_for_tier(search_space_tier)
+    pin_seed = seed_archs[0] if seed_archs else None
+    pins = pins_for_space(active_space, seed_arch=pin_seed) \
+        if len(active_space) < len(SEARCH_SPACE) else {}
+    if verbose and pins:
+        print(f"[NAS] search-space tier '{search_space_tier}': searching "
+              f"{len(active_space)} genes, pinning {len(pins)} "
+              f"({'from --seed-archs' if pin_seed else 'from BEST_KNOWN_PINS'})",
+              flush=True)
     
-    # v164 — build the strategy
+    # v164/v196 — build the strategy (evolutionary by default)
     strategy_rng = random.Random(seed)
     strategy = make_strategy(
         search_strategy, strategy_rng,
@@ -2329,15 +2893,22 @@ def run_continuous(num_trials: int = 8,
         escape_threshold=evo_escape_threshold,
         escape_sigma_frac=evo_escape_sigma,
         escape_n_params=evo_escape_n_params,
-    ) if search_strategy != 'random' else RandomSearchStrategy(strategy_rng)
+        # v196 — tier space/pins + controller + LCB knobs
+        space=active_space,
+        pins=pins,
+        adaptive=adaptive,
+        guided_frac=guided_frac,
+        select_k=eff_k,
+        ei_weight=eff_ei,
+    )
     
     # v170 (v4.78) — pre-populate elite pool with known-good architectures.
     # Only supported by EvolutionaryStrategy; random strategy ignores seeds.
     if seed_archs and hasattr(strategy, 'seed_with_archs'):
         strategy.seed_with_archs(seed_archs, assumed_fitness=seed_archs_fitness)
     elif seed_archs:
-        print(f"[NAS] WARNING: --seed-archs requires --search-strategy evolutionary; "
-              f"ignoring {len(seed_archs)} seed archs", flush=True)
+        print(f"[NAS] WARNING: --seed-archs/--resume requires evolutionary "
+              f"strategy; ignoring {len(seed_archs)} seed archs", flush=True)
     
     scheduler = _NASScheduler(
         num_trials=num_trials, wall_seconds=wall_seconds,
@@ -2349,6 +2920,136 @@ def run_continuous(num_trials: int = 8,
 
 
 # v156-v158 backward-compat — single batch
+# =============================================================================
+# RESUME / WARM-START — v196 (v5.10)
+# =============================================================================
+# Compute should COMPOUND across runs rather than every search starting cold.
+# --resume takes a previous run (a run directory, a nas_best/nas_top*.json, or a
+# nas_log.csv) and returns its best architectures as seed archs: these
+# pre-populate the elite pool AND — once they enter the archive — warm the
+# guided EDA prior, so a fresh search starts from the prior run's winners and
+# refines them instead of re-discovering them.
+
+# Short-key → full dotted-key map, for reconstructing an arch from a CSV
+# arch_summary string (the summary uses the bare key, e.g. "num_hidden_..").
+_SHORT_TO_FULL = {full.split('.', 1)[1]: full for full in SEARCH_SPACE}
+_SHORT_TO_FULL['metabolic_rate_multiplier_range'] = \
+    'genetic_lottery.metabolic_rate_multiplier_range'
+
+
+def _coerce_scalar(tok: str) -> Any:
+    """Parse a value token from an arch_summary into bool/int/float/list/str."""
+    tok = tok.strip()
+    if tok in ('True', 'False'):
+        return tok == 'True'
+    if tok.startswith('[') and tok.endswith(']'):
+        try:
+            return [float(x) for x in tok[1:-1].split(',') if x.strip()]
+        except ValueError:
+            return tok
+    try:
+        f = float(tok)
+        return int(f) if f.is_integer() and 'e' not in tok.lower() and '.' not in tok else f
+    except ValueError:
+        return tok
+
+
+def _arch_from_summary(summary: str) -> Dict[str, Any]:
+    """Reconstruct an architecture dict from a CSV arch_summary string.
+
+    Display precision only (the summary rounds floats), which is fine for a
+    SEED — it is re-evaluated and refined. Tokens are `key=value` space-joined;
+    list values like metabolic_rate_multiplier_range=[a, b] contain a space, so
+    we parse by scanning for `key=` boundaries rather than splitting on spaces.
+    """
+    arch: Dict[str, Any] = {
+        '_meta': {'source': 'NxonArchNAS:resume'},
+        'biology': {}, 'neural': {}, 'operating_ranges': {},
+        'healthy_bands': {}, 'genetic_lottery': {},
+    }
+    import re as _re
+    # split into key=value chunks: a key is a run of [a-z0-9_] immediately
+    # followed by '='; the value runs until the next such key or end-of-string.
+    pattern = _re.compile(r"([a-zA-Z0-9_]+)=(.*?)(?=\s+[a-zA-Z0-9_]+=|$)")
+    for m in pattern.finditer(summary or ''):
+        short, raw = m.group(1), m.group(2)
+        full = _SHORT_TO_FULL.get(short)
+        if not full:
+            continue
+        section, key = full.split('.', 1)
+        arch.setdefault(section, {})[key] = _coerce_scalar(raw)
+    return arch
+
+
+def load_resume_seeds(path: str, top_n: int = 5) -> List[Dict[str, Any]]:
+    """Load the best architectures from a previous run for warm-starting.
+
+    `path` may be: a run directory (uses nas_best/nas_top*.json inside, else
+    nas_log.csv), a single arch JSON, or a nas_log.csv. Returns up to `top_n`
+    architecture dicts (de-duplicated), best first.
+    """
+    p = Path(path).expanduser().resolve()
+    json_candidates: List[Path] = []
+    csv_path: Optional[Path] = None
+    if p.is_dir():
+        for name in ('nas_best.json', 'nas_top1.json', 'nas_top2.json', 'nas_top3.json'):
+            if (p / name).is_file():
+                json_candidates.append(p / name)
+        if (p / 'nas_log.csv').is_file():
+            csv_path = p / 'nas_log.csv'
+    elif p.suffix == '.json' and p.is_file():
+        json_candidates.append(p)
+    elif p.suffix == '.csv' and p.is_file():
+        csv_path = p
+        # prefer sibling JSONs if present (full precision)
+        for name in ('nas_best.json', 'nas_top1.json', 'nas_top2.json', 'nas_top3.json'):
+            if (p.parent / name).is_file():
+                json_candidates.append(p.parent / name)
+
+    seeds: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    def _add(arch: Dict[str, Any]):
+        if not isinstance(arch, dict) or 'biology' not in arch:
+            return
+        # de-dup on the searched-gene signature
+        sig = arch_summary_string(arch)
+        if sig in seen:
+            return
+        seen.add(sig)
+        seeds.append(arch)
+
+    for jp in json_candidates:
+        try:
+            with open(jp, 'r', encoding='utf-8') as f:
+                _add(json.load(f))
+        except Exception as exc:
+            print(f"[NAS] --resume: could not read {jp}: {exc}", flush=True)
+
+    # Fall back to (or supplement with) the CSV's top rows.
+    if csv_path is not None and len(seeds) < top_n:
+        try:
+            with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+                rows = list(csv.DictReader(f))
+            def _key(row):
+                try:
+                    return float(row.get('selection_score') or row.get('fitness') or -1)
+                except (TypeError, ValueError):
+                    return -1.0
+            rows.sort(key=_key, reverse=True)
+            for row in rows:
+                if len(seeds) >= top_n:
+                    break
+                _add(_arch_from_summary(row.get('arch_summary', '')))
+        except Exception as exc:
+            print(f"[NAS] --resume: could not parse {csv_path}: {exc}", flush=True)
+
+    seeds = seeds[:top_n]
+    print(f"[NAS] --resume: loaded {len(seeds)} seed architecture(s) from {p}",
+          flush=True)
+    return seeds
+
+
 def run_search(num_trials: int = 8,
                  wall_seconds: int = 60,
                  workers: Optional[int] = None,
@@ -2403,12 +3104,41 @@ def main():
                         help='[v158 legacy] Equivalent to --max-trials --trials.')
     # v164 — pluggable search strategy
     parser.add_argument('--search-strategy', choices=['random', 'evolutionary'],
-                        default='random',
-                        help='Sampling strategy. "random" (default, v161-v163 behavior) '
-                             'samples each trial independently from SEARCH_SPACE. '
-                             '"evolutionary" maintains an elite pool of top-K trials and '
-                             'generates new trials via mutation/crossover of elites '
-                             '(after seeding random_seed_trials with random samples).')
+                        default='evolutionary',
+                        help='Sampling strategy. "evolutionary" (v196 default) maintains '
+                             'an elite pool ranked by the LCB selection score and generates '
+                             'new trials via the self-evolving controller (adaptive mutation, '
+                             'guided immigrants, mutation/crossover of elites). "random" '
+                             '(v161-v163 behavior) samples each trial independently.')
+    # v196 — search-space tier, controller, guided immigrants, LCB selection
+    parser.add_argument('--search-space', choices=['full', 'focus', 'core'],
+                        default='full',
+                        help="v196 — which genes to search. 'full' (default, 35 genes); "
+                             "'focus' (~12 high-leverage genes, the rest pinned at "
+                             "--seed-archs or the best-known arch); 'core' (6 trinary/E-I "
+                             "levers). Use 'focus'/'core' WITH --seed-archs to refine a "
+                             "known-good architecture along only the levers that matter.")
+    parser.add_argument('--no-adaptive', action='store_true',
+                        help='v196 — freeze the self-evolving controller (constant '
+                             'mutation/operator knobs + v169 binary escape).')
+    parser.add_argument('--guided-frac', type=float, default=0.5,
+                        help='v196 — fraction of immigrants drawn from the guided '
+                             '(winning-gene EDA) prior vs pure-random (default 0.5; '
+                             '0 disables guided immigrants).')
+    parser.add_argument('--select-k', type=float, default=None,
+                        help='v196 — LCB selection strength: rank by fitness − k·stderr '
+                             f'over the seed-repeats (default {NAS_SELECT_K}). 0 recovers '
+                             'v195 raw-fitness selection.')
+    parser.add_argument('--ei-weight', type=float, default=None,
+                        help='v196 — weight of the E/I-ordering selection bonus that '
+                             f'rewards excitation-dominant (M1≥inh) trinary (default '
+                             f'{NAS_EI_WEIGHT}; 0 disables). Selection-only — fitness() '
+                             'and its 13.0 ceiling are unchanged.')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='v196 — warm-start from a previous run: pass a run directory, '
+                             'a nas_best/nas_top*.json, or a nas_log.csv. Its best '
+                             'architectures seed the elite pool AND the guided prior so '
+                             'compute compounds across runs. Implies a small seed phase.')
     parser.add_argument('--evo-elite-pool', type=int, default=10,
                         help='[evolutionary] Number of top trials kept as parents (default: 10)')
     parser.add_argument('--evo-random-seed-trials', type=int, default=50,
@@ -2491,6 +3221,26 @@ def main():
             except Exception as exc:
                 print(f"[NAS] --seed-archs: failed to load {path}: {exc}", flush=True)
                 return 1
+
+    # v196 — --resume: warm-start from a previous run (dir / json / csv). The
+    # discovered archs are prepended to any explicit --seed-archs and, because
+    # they pre-populate the elite pool, also warm the guided EDA prior. Resuming
+    # implies a small seed phase (so the search starts from the seeds, not 50
+    # fresh randoms) unless the user set --evo-random-seed-trials explicitly.
+    resume_used = False
+    if args.resume:
+        resume_seeds = load_resume_seeds(args.resume)
+        if resume_seeds:
+            seed_archs = (seed_archs or []) + resume_seeds
+            resume_used = True
+        else:
+            print(f"[NAS] --resume: no usable architectures found in {args.resume}",
+                  flush=True)
+    if resume_used and args.evo_random_seed_trials == 50:  # untouched default
+        args.evo_random_seed_trials = max(5, min(10, len(seed_archs)))
+        print(f"[NAS] --resume: seed phase set to "
+              f"{args.evo_random_seed_trials} trials (override with "
+              f"--evo-random-seed-trials)", flush=True)
     
     max_trials = args.max_trials
     if args.single_batch:
@@ -2518,6 +3268,12 @@ def main():
         evo_escape_n_params=(args.evo_escape_n_params_lo, args.evo_escape_n_params_hi),
         seed_archs=seed_archs,
         seed_archs_fitness=args.seed_archs_fitness,
+        # v196 — tier / controller / guided / LCB
+        search_space_tier=args.search_space,
+        adaptive=not args.no_adaptive,
+        guided_frac=args.guided_frac,
+        select_k=args.select_k,
+        ei_weight=args.ei_weight,
     )
     
     if summary['best_arch'] is not None:

@@ -365,7 +365,7 @@ class DataLogger:
             'start_timestamp': datetime.now().isoformat(),
             'log_level': self.log_level,
             'version': '5.10',                     # v184
-            'internal_version': 195,               # v152
+            'internal_version': 196,               # v152
             'research_probes_available': _RESEARCH_PROBES_AVAILABLE,
             'research_probes_import_error': _RESEARCH_PROBES_IMPORT_ERROR,
         }
