@@ -1,6 +1,9 @@
 # Neuraxon Game of Life Researh Version<br>
 CHANGE LOG:<br>
 
+June 24th 2026:<br>
+Neuraxon Game of Life — v5.10 / Internal version 196 , Evolutionary NAS improvements
+
 June 19th 2026:<br>
 Neuraxon Live v  v1.52 / GoL Server V 1.072** -> NxonKaleido Brain viz update
 
