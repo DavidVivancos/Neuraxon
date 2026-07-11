@@ -1,60 +1,56 @@
-# Neuraxon Ant Colony 1.02 internal version 09
+# Neuraxon Ant Colony 1.03 internal version 10
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
 # https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint  (Neuraxon V2.0 )
 # https://www.researchgate.net/publication/397331336_Neuraxon (V1)
 """
-Miner_nxon.py — the MINER client (consensus edition).
+Miner_nxon.py — the MINER client (v1.03, integer trit-LUT model).
 
-A miner is the Qubic node's mining role. Per the recorded protocol it:
-  (1) picks any LIVE parent solution from the agreed registry,
-  (2) chooses a nonce and applies K12(pubkey||nonce) mutations to the parent ANN,
-  (3) runs the ~1-second chc6 simulation locally (the "ant"),
-  (5) broadcasts a submission {pubkey, nonce, parentRef} with a deposit attached.
+Per the recorded protocol the miner:
+  (1) picks any LIVE parent solution from the agreed registry and fetches its LUT;
+  (2) chooses a nonce = base_L_K (L lut lines mutated per walk step, K
+      anti-attractor escape steps) and runs the mining WALK locally (the "ant");
+  (5) broadcasts {pubkey, nonce, parentRef} with a deposit if the walk's best
+      beats the parent.
 
-Crucially the submission carries NO score. The score is recomputed by every node
-from the public (pubkey, nonce, parentRef) material, so there is nothing for a
-miner to fabricate — the secret-model "fabricator" attack is structurally
-impossible here. The only adversarial behaviour left is spam (submitting junk
-nonces), which the deposit makes costly and which the nodes simply reject.
+The submission carries NO score — every node re-runs the identical walk (it is
+deterministic from K12(pubkey||nonce)) and recomputes the integer score, so
+there is nothing to fabricate. The only adversarial behaviour is spam, which the
+deposit makes costly and the nodes reject.
 
 Modes:
-  - "honest": runs the ant locally and only submits when it finds a genuine
-    improvement over the chosen parent (self-filtering — efficient).
-  - "spam":   submits a fresh nonce every tick without checking, hoping to get
-    lucky. Almost everything is rejected; its deposit drains.
+  - "honest": runs the walk locally, submits only genuine improvements.
+  - "spam":   fires nonces without checking; mostly rejected, deposit drains.
 """
 
 import time
 import random
 
-import NxonAnt
-import NxonScore
 import NxonGenome as G
+import NxonScore
+import NxonTrit as TR
 
 
 class Miner:
-    def __init__(self, pubkey, mode="honest", mut_strength=0.16,
-                 rng_seed=0, ant_budget=1.0, local_tries=10):
+    def __init__(self, pubkey, epoch, mode="honest", walk_steps=120,
+                 rng_seed=0, ant_budget=1.0):
         self.pubkey = pubkey
+        self.epoch = epoch
         self.mode = mode
-        self.mut_strength = mut_strength
+        self.walk_steps = walk_steps
         self.rng = random.Random(rng_seed)
         self.ant_budget = ant_budget
-        self.local_tries = local_tries
-        self._nonce_counter = 0
+        self._ctr = 0
 
-    def _next_nonce(self):
-        self._nonce_counter += 1
-        # Nonce is arbitrary; mix in identity + counter + a random draw.
-        return "{}-{}-{}".format(self._nonce_counter,
-                                 self.rng.randrange(1 << 30),
-                                 self.pubkey[-2:])
+    def _new_nonce(self):
+        self._ctr += 1
+        base = self.rng.randrange(1 << 30)
+        L = 1 + self.rng.randrange(4)          # 1..4 lut lines per step
+        K = self.rng.randrange(self.walk_steps // 2 + 1)   # escape steps
+        return G.make_nonce("{}b{}".format(base, self._ctr), L, K)
 
     def _pick_parent(self, registry):
-        """Pick a live parent, biased toward higher-scoring solutions (exploit)
-        with exploration over the top half of the live set."""
         live = registry.live_solutions()
         if not live:
             return None
@@ -74,31 +70,20 @@ class Miner:
         return chosen
 
     def make_submission(self, registry, tick):
-        """Produce a submission for this tick, or None if the miner declines."""
         parent = self._pick_parent(registry)
         if parent is None:
             return None
         parent_ref = parent["hash"]
 
         if self.mode == "spam":
-            # No local check — just fire a nonce and hope. Mostly rejected.
-            nonce = self._next_nonce()
+            nonce = self._new_nonce()
             return {"pubkey": self.pubkey, "nonce": nonce, "parentRef": parent_ref}
 
-        # Honest: try a few nonces locally, submit the first genuine improvement.
-        best = None
-        for _ in range(self.local_tries):
-            nonce = self._next_nonce()
-            child = G.mutate_genome_k12(parent["genome"], self.pubkey, nonce,
-                                        self.mut_strength)
-            eval_seed = G.derive_eval_seed(self.pubkey, nonce, parent_ref)
-            metrics, _, timed_out = NxonAnt._evaluate_architecture(
-                child, eval_seed, time.time() + self.ant_budget * 3)
-            if timed_out or metrics is None:
-                continue
-            score = NxonScore.consensus_score_int(metrics)
-            if score > parent["score"] and (best is None or score > best[1]):
-                best = (nonce, score)
-        if best is None:
-            return None      # found no improvement this tick; stay quiet
-        return {"pubkey": self.pubkey, "nonce": best[0], "parentRef": parent_ref}
+        # Honest: run the walk locally, submit only if it beats the parent.
+        nonce = self._new_nonce()
+        _, best_score, _, _ = TR.mining_walk(
+            parent["lut"], self.pubkey, nonce, self.epoch, self.walk_steps,
+            deadline=time.time() + self.ant_budget * 3)
+        if best_score > parent["score"]:
+            return {"pubkey": self.pubkey, "nonce": nonce, "parentRef": parent_ref}
+        return None

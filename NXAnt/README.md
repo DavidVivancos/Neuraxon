@@ -1,89 +1,80 @@
-# NxonAnt 1.02 — Consensus Edition (Qubic node-consensus model)
+# NxonAnt 1.03 — Integer trit-LUT Neuraxon (node-consensus)
 
-Match the **node-consensus** trust model in AntColony spec: every node independently re-runs the ~1-second simulation,
-recomputes the score, applies the validity rules, and they all must agree.
-**There is no secret and no single Overseer service.** Security comes from
-redundant re-execution plus the submission deposit using the Qubic model.
+v1.03 replaces the floating-point chc6 brain with a **pure-integer trinary
+cellular automaton with per-neuron lookup tables**
 
-## The on-node / offline split
+State is a **trit** per neuron: `NEUTRAL=0, POS=1, NEG=2` (Neruaxon -1/0/+1).
+Each non-input neuron has 3 source neighbours and a 27-entry lookup table (one
+entry per combination of its 3 neighbour trits). The update is:
 
-**ON-NODE (consensus, runs on every machine, all public):**
-- the ~1-second chc6 simulation (`NxonAnt.py`) — re-run to re-verify;
-- the deterministic mutation `mutate_genome_k12` and eval-seed derivation, both
-  from public `K12(pubkey‖nonce‖parentRef)` material (`NxonGenome.py`);
-- the **public integer score** `consensus_score_int` and the healthy-bands +
-  weights it uses (`NxonScore.py`);
-- the validity rules and the registry / system file (`NxonNode.py`).
-
-**OFFLINE (tool, downstream of consensus — `NxonOverseerOffline.py`):**
-- multi-objective / Pareto re-ranking among accepted solutions;
-- MultiNeuraxon2 brain assembly (compose recorded winners into a larger brain);
-- curriculum tightening proposal for the next epoch;
-- analytics / reputation.
-
-The same `NxonScore` module is imported by the nodes and by the offline tool, so
-the offline re-check reproduces the on-node integer score exactly (the demo
-reports 0 mismatches).
+```
+idx = state[src[n][0]] + 3*state[src[n][1]] + 9*state[src[n][2]]   # base-3, 0..26
+next[n] = lut[n][idx]
+```
 
 ## Files
 
 | File | Side | Role |
 |---|---|---|
-| `NxonAnt.py` | on-node | chc6 ant: 1-second sim, returns RAW metrics. Unchanged runtime. |
-| `NxonGenome.py` | on-node | public genome template, search space, `K12` derivations, deterministic mutation, ROOT seeding. |
-| `NxonScore.py` | on-node | **public** healthy-bands + weights + **integer** consensus score. The shared scoring law. |
-| `NxonNode.py` | on-node | the consensus verifier: re-run, re-score, validity rules, registry, system file, + a multi-node network demo. |
-| `Miner_nxon.py` | client | miner: pick parent, `K12(pubkey‖nonce)` mutation, run ant, broadcast `{pubkey, nonce, parentRef}` + deposit. honest / spam modes. |
-| `NxonOverseerOffline.py` | offline | curation: Pareto, assembly, curriculum tightening, analytics. |
-| `NxonReview1.py` | offline | independent re-verification (same recompute the nodes do). |
+| `NxonGenome.py` | on-node | trit-LUT genome, epoch structure from digest, `K12`, deterministic mutation-with-undo, ROOT (blank brain). |
+| `NxonTrit.py` | on-node | the integer trit-CA `run_sim` + the `mining_walk`. The "ant". |
+| `NxonScore.py` | on-node | public integer band-score over fixed-point metrics. |
+| `NxonNode.py` | on-node | consensus verifier: re-run the walk, re-score, validity rules, registry, system file, + multi-node network demo. |
+| `Miner_nxon.py` | client | miner: pick parent, `base_L_K` nonce, run the walk, broadcast `{pubkey,nonce,parentRef}` + deposit. honest / spam. |
+| `NxonOverseerOffline.py` | offline | rebuild LUTs from derivations, Pareto re-rank, MultiNeuraxon2 assembly, curriculum tightening. |
+| `NxonReview1.py` | offline | independent reproducibility check. |
 
 ## Run it
 
 ```bash
-# A 3-node network with 6 miners. Every node re-verifies every submission and
-# they must agree; the demo shuffles arrival order PER NODE to prove the
-# outcome is order-independent, and checks the system files are byte-identical.
-python3 NxonNode.py --nodes 3 --miners 6 --ticks 14 --ant-budget 1.0 --mutation 0.18
+# 3-node network, 6 miners. Each node re-runs every miner's walk, recomputes the
+# integer score, and must agree; order is shuffled per node to prove
+# order-independence; system files are checked byte-identical.
+python3 NxonNode.py --nodes 3 --miners 6 --ticks 16 --walk-steps 120 --neurons 48 --sim-ticks 128
 
-# Then run the offline curation on the agreed system file:
-python3 NxonOverseerOffline.py nxon_consensus_out/system_file_node_00.json
+# Offline curation on the agreed system file (rebuilds LUTs, 0 mismatches):
+python3 NxonOverseerOffline.py nxon103_out/system_file_node_00.json
 
-# Independent re-verification of a recorded solution:
-python3 NxonReview1.py <a genome json> --n-trials 20
+# Independent reproducibility check:
+python3 NxonReview1.py nxon103_out/system_file_node_00.json
+
+# Bench / self-test the integer sim + walk:
+python3 NxonTrit.py 48 128 120
 ```
 
-The network run prints, per tick, `all N nodes agree: YES` and ends with
-`System files byte-identical across nodes: True`. miner_00 is a spammer (fires
-blind nonces, mostly rejected, forfeits the most deposit); the rest are honest
-(run the ant locally and only submit genuine improvements).
+ROOT is a **blank all-NEUTRAL brain** (score 0, does nothing) — a true floor with
+maximum headroom, so the colony visibly evolves it toward healthy dynamics
+(0 → all-bands in a few ticks). The single integer trit sim runs in ~1 ms; a
+120-step walk in ~0.15 s, well inside the 1-second budget.
 
-## The validity rules (exactly your spec, on the integer scalar)
+## The validity rules (unchanged, on the integer scalar)
 
-Judged against the **pre-tick registry snapshot**, so arrival order can't change
-the outcome:
+Judged against the pre-tick registry snapshot, so arrival order can't change the
+outcome (proven by shuffling order per node → identical registry digest):
 
 - **R1 strict improvement** — child score > parent score.
-- **R2 earlier-tick sibling floor** — child score ≥ max score of siblings (same
-  parent) accepted at a strictly earlier tick.
-- **R3 same-tick non-competition** — same-tick children are judged against the
-  same snapshot, so they don't compete and every node agrees regardless of order
-  (proven in the demo by shuffling order per node → identical registry digest).
-- **R4 independent re-verify** — the score is recomputed by every node.
-- **R5 parent age** — parent younger than 676 productive ticks (frontier-keeping).
+- **R2 earlier-tick sibling floor** — child ≥ max score of strictly-earlier-tick
+  siblings of the same parent.
+- **R3 same-tick non-competition** — same-tick children judged vs the same
+  snapshot; order-independent → every node agrees.
+- **R4 independent re-verify** — every node recomputes the score.
+- **R5 parent age** — parent younger than 676 productive ticks.
 
-The productive-tick age clock advances once per tick that accepts ≥ 1 solution,
-so quiet periods don't age the tree. ROOT score = 0 (the floor); the score is a
-non-negative integer fitness where higher is better, so children climb above 0.
+The productive-tick age clock advances once per tick that accepts ≥ 1 solution.
 
-## Determinism — the one production requirement
+## Reconciliation with the recorded spec (point-by-point)
 
-The consensus scalar is an **integer** computed on quantized metrics, so the
-scoring step is bit-identical across nodes. Full cross-node agreement **also**
-requires the SIMULATION to be deterministic across hardware (compiler/libm/FMA
-differences). This reference is deterministic within one Python build; for real
-deployment the chc6 sim must run in fixed-point or a pinned FP mode, and the
-metric-quantization grain (`METRIC_SCALE`) must be coarser than any residual
-cross-node drift so a 1-ULP difference can never flip the integer score. K12 is
-stubbed with SHA3-256 here; swap in real KangarooTwelve in deployment (call
-sites don't change).
+- `sourceNeuron[N][3]`, `T[ticks][nInput]`, placement, phase map → `build_epoch`
+  (from digest, on every node).
+- `lut[N][27]` mined from `K12(pubkey‖nonce)` → `seed_lut`; child LUT = walk
+  result stored per solution.
+- RUN SIMULATION (inject held drive, base-3 LUT update, commit non-input,
+  accumulate by phase) → `NxonTrit.run_sim`, exactly the loop in the spec.
+- MINING (anti-attractor walk, `nonce[1]=L`, `nonce[2]=K`, allow-worse then
+  better-only) → `NxonTrit.mining_walk`.
+- `score = bandScore(metrics)` higher=healthier → `NxonScore.consensus_score_int`
+  (integer).
+- No training data / no output comparison → we measure neuron-state dynamics per
+  phase, never compare to an expected output.
+
 
