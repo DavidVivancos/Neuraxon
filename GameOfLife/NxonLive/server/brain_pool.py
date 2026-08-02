@@ -246,6 +246,34 @@ def _brain_science(b, acc):
     except Exception:
         pass
 
+    # ---- v1.53: sampled synaptic weight scan -----------------------
+    # The 44-day run showed the excitatory fraction collapsing
+    # monotonically (M1_E 0.103 -> 0.033) with the inter-sphere gate
+    # rock-steady, i.e. the brains went quiet without the gating
+    # changing. We could not tell whether plasticity was net-depressing
+    # the weights because weights were never logged. This samples up to
+    # 200 synapses per sphere at the existing ~1/min science cadence,
+    # so the next run can correlate weight drift against M1_E directly.
+    try:
+        for sph in spheres.values():
+            syns = getattr(sph.network, "synapses", None)
+            if not syns:
+                continue
+            step = 1 if len(syns) <= 200 else len(syns) // 200
+            for i in range(0, len(syns), step):
+                s = syns[i]
+                if getattr(s, "integrity", 1) <= 0:
+                    continue
+                w = float(getattr(s, "w_fast", 0.0))
+                acc["w_sum"] += w
+                acc["w_abs"] += w if w >= 0 else -w
+                acc["w_sq"] += w * w
+                acc["w_n"] += 1
+                if w > 0:
+                    acc["w_pos"] += 1
+    except Exception:
+        pass
+
 
 def _brain_topology(b):
     """v1.48 — extract ONE brain's connectivity + live activity for the
@@ -306,6 +334,8 @@ def _new_sci_acc():
         "motor_act", "motor_n",
         "dead_sum", "dead_n",
         "mamp_ok_sum", "mamp_ok_n", "mamp_les_sum", "mamp_les_n",
+        # v1.53 — sampled synaptic weights (plasticity drift diagnostic)
+        "w_sum", "w_abs", "w_sq", "w_n", "w_pos",
     )}
 
 

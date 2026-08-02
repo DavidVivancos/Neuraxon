@@ -1,6 +1,6 @@
 # Multi Neuraxon Game of Life 5 — client / server
 
-**Version mngol5-v1.52 / GoL Server V 1.072** — the learning loop: enables AGMP plasticity and bursts dopamine on reward (eating + mating), banked between brain steps, so eligibility traces consolidate and brains can learn within a lifetime. This is the change the NAS run pointed to (fitness was flat across the whole architecture space; a harder landscape still gave zero fitness-heritability — only learning is left). Watch the g_structure block (mean inter-ability r, positive-manifold, lambda1/lambda2) for g emerging. Also: brain viewer renamed NxonCaliedo -> NxonKaleido, and fixed the bug where opening the viewer froze the world window (api/nxbrain took the engine lock on the event loop, blocking the world WebSocket; the viewer path is now fully lock-free)
+**Version mngol5-v1.53 / GoL Server V 1.073** — update after the 44-day run (13.9M ticks, 46,957 NAS trials). 
 
 A 24/7 server that runs one Neuraxon Game-of-Life world forever and
 streams it to many web clients. Built on the proven **v184** neural

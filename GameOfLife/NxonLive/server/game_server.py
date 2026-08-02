@@ -20,12 +20,12 @@ import glob
 import threading
 
 from .engine import (Engine, NxEr, make_params, _params_to_dict,
-                      RANK_METRICS)
+                      RANK_METRICS, _AGE_CKPTS)
 from .names import NameAllocator
 from .persistence import Persistence
 
 
-SERVER_VERSION = "GoL Server V 1.072"   # bumped each release
+SERVER_VERSION = "GoL Server V 1.073"   # bumped each release
 
 class GameServer:
     def __init__(self, config_path, state_dir):
@@ -188,6 +188,13 @@ class GameServer:
         eng.tick = int(snap.get("tick", 0))
         eng.next_nxer_id = int(snap.get("next_nxer_id", 0))
         eng.next_food_id = int(snap.get("next_food_id", 0))
+        # v1.53 — carry the NAS trial counter across the reboot so trial
+        # ids in nas_trials.jsonl never collide (read BEFORE _init_runtime,
+        # which only defaults it when absent).
+        try:
+            eng._nas_trial_seq = int(snap.get("nas_trial_seq", 0))
+        except (TypeError, ValueError):
+            eng._nas_trial_seq = 0
         eng.all_time = snap.get("all_time",
                                 {m: [] for m in RANK_METRICS})
         # _restore bypasses Engine.__init__ via Engine.__new__, so we
@@ -263,6 +270,17 @@ class GameServer:
             nx.can_sea = nd.get("can_sea", False)
             nx.parents = nd.get("parents", [None, None])
             nx.offspring_ids = nd.get("offspring_ids", [])
+            # v1.53 — restore true age + within-life foraging curve. Falls
+            # back to the current tick for pre-v1.53 snapshots (which never
+            # stored born_tick) so a restored NxEr reads as newly born
+            # rather than as old as the world.
+            nx.born_tick = int(nd.get("born_tick", eng.tick) or 0)
+            fba = nd.get("food_by_age") or {}
+            nx.food_by_age = {int(k): v for k, v in fba.items()}
+            # skip checkpoints this NxEr has already lived past, so we never
+            # backfill fabricated points at the moment of reboot
+            age_now = eng.tick - nx.born_tick
+            nx._ck_i = sum(1 for c in _AGE_CKPTS if c <= age_now)
             # rebuild the brain inside its pool worker: load the saved
             # brain if present, else build fresh from params.
             if nd.get("brain"):

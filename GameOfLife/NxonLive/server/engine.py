@@ -209,6 +209,13 @@ class NxEr:
         self.last_steal_tick = -10000  # v1.46 — theft cooldown gate
         self.last_eat_tick = -10000   # so first eat is allowed immediately
         self._da_accum = 0.0          # v1.52 — reward (dopamine) banked since last brain step
+        # v1.53 — within-life foraging curve. food_found is sampled at fixed
+        # AGES, so at death we can ask whether this NxEr got better at
+        # foraging as it aged (real within-life learning) instead of only
+        # correlating lifetime totals with lifespan, which is confounded by
+        # survivorship (good foragers live longer in a no-learning world too).
+        self.food_by_age = {}
+        self._ck_i = 0
         # After each bite the hunger-toward-food floor is suppressed
         # until this tick — so the NxEr wanders away from a food
         # source for a while before being dragged back. Mirrors the
@@ -615,6 +622,35 @@ class Engine:
         """All derived/runtime state. Called by BOTH __init__ and the
         crash-restore path so the two can never drift out of sync
         (this is what caused the missing _cell_size on restart)."""
+        # v1.51 — embedded NAS. Every NxEr the SYSTEM spawns (founders,
+        # anti-extinction respawns, and the steady explorer trickle) gets a
+        # freshly sampled architecture so we can measure which brains do
+        # best; only mating offspring inherit genetics. Each explorer's
+        # architecture + lifetime outcomes are logged once, at death.
+        #
+        # v1.52 — learning loop. AGMP plasticity runs in the substrate every
+        # brain step; the missing piece was a reward that bursts phasic
+        # dopamine so the eligibility traces consolidate. Reward is banked
+        # per NxEr between brain steps (LOD-safe) and applied on the next.
+        #
+        # v1.53 — these MOVED here from __init__. _restore() builds the
+        # Engine via Engine.__new__ and only calls _init_runtime, so with
+        # them in __init__ a snapshot reboot produced an Engine with no
+        # _learning / _nas_enabled and step() died on the first tick with
+        # AttributeError. Any restart from snapshot was fatal.
+        global _LEARNING_AGMP
+        self._nas_enabled = bool(cfg.get("nas_explore_enabled", True))
+        self._nas_interval = int(cfg.get("nas_explore_interval_ticks", 500))
+        # preserve the trial counter across a restore so NAS trial ids
+        # stay unique in the log (fresh boot starts at 0)
+        if not isinstance(getattr(self, "_nas_trial_seq", None), int):
+            self._nas_trial_seq = 0
+        self._learning = bool(cfg.get("learning_enabled", True))
+        _LEARNING_AGMP = self._learning
+        self._da_base = float(cfg.get("dopamine_baseline", 0.15))
+        self._da_max = float(cfg.get("dopamine_burst_max", 0.85))
+        self._reward_eat_da = float(cfg.get("reward_eat_dopamine", 0.5))
+        self._reward_mate_da = float(cfg.get("reward_mate_dopamine", 0.7))
         # v1.34 — science history logger (set by GameServer after init;
         # None means logging disabled). The engine only ever ENQUEUES
         # records (cheap); a background thread does the file I/O.
@@ -824,27 +860,9 @@ class Engine:
         self._uptime_t0 = time.time()
         self._g_cache = {"pc1": 0.0, "pos_manifold": 0.0,
                          "mean_r": 0.0, "lambda_ratio": 1.0, "n": 0}
-        # v1.51 — embedded NAS. Every NxEr the SYSTEM spawns (founders,
-        # anti-extinction respawns, and the steady explorer trickle) gets a
-        # freshly sampled architecture so we can measure which brains do
-        # best; only mating offspring inherit genetics. Each explorer's
-        # architecture + lifetime outcomes are logged once, at death.
-        self._nas_enabled = bool(cfg.get("nas_explore_enabled", True))
-        self._nas_interval = int(cfg.get("nas_explore_interval_ticks", 500))
-        self._nas_trial_seq = 0
-        # v1.52 — learning loop. AGMP plasticity already runs in the
-        # substrate every step; the only missing piece is a reward that
-        # bursts phasic dopamine so the eligibility traces consolidate.
-        # We compute a per-NxEr reward on eating / mating, accumulate it
-        # between brain steps (LOD-safe), and raise dopamine on the next
-        # step. Disabled => behaviour is exactly as before (no plasticity).
-        global _LEARNING_AGMP
-        self._learning = bool(cfg.get("learning_enabled", True))
-        _LEARNING_AGMP = self._learning
-        self._da_base = float(cfg.get("dopamine_baseline", 0.15))
-        self._da_max = float(cfg.get("dopamine_burst_max", 0.85))
-        self._reward_eat_da = float(cfg.get("reward_eat_dopamine", 0.5))
-        self._reward_mate_da = float(cfg.get("reward_mate_dopamine", 0.7))
+        # NOTE: the NAS + learning runtime flags are deliberately set in
+        # _init_runtime(), NOT here — see the comment there. _restore()
+        # builds the Engine with __new__ and only calls _init_runtime.
         self._init_runtime(cfg)
         self._spawn_food(self._effective_food_cap())
         for _ in range(int(cfg["starting_nxers"])):
@@ -1623,9 +1641,18 @@ class Engine:
         idle_death = self.bio_idle_death_ticks    # v1.46 (0 = off)
         dt = self.dt
         tick = self.tick
+        n_ckpt = len(_AGE_CKPTS)
         for nx in order:
             outs, br = nx._last_out         # initialized in NxEr.__init__
             self._act(nx, outs)
+            # v1.53 — within-life foraging curve: one int compare per NxEr
+            # per tick, and a dict write only when an age boundary is
+            # crossed (at most 8 times in a whole lifetime).
+            if nx._ck_i < n_ckpt:
+                _ck = _AGE_CKPTS[nx._ck_i]
+                if (tick - nx.born_tick) >= _ck:
+                    nx.food_by_age[_ck] = nx.stats.food_found
+                    nx._ck_i += 1
             if nx.food > energy_cap:        # v1.46 — cap hoarding
                 nx.food = energy_cap
             idle_ticks = tick - nx.last_move_tick
@@ -1739,6 +1766,10 @@ class Engine:
                 "mates": st.mates_performed,
                 "explored": st.explored,
                 "fitness": round(st.fitness, 3),
+                # v1.53 — unsaturated companion metric + within-life
+                # foraging curve (see _fitness_hi / _AGE_CKPTS).
+                "fitness_hi": round(_fitness_hi(st), 4),
+                "food_by_age": nx.food_by_age,
                 "g": round(getattr(st, "g_factor", 0.0), 3),
                 "thr_inh": round(getattr(p, "firing_threshold_inhibitory", 0.0), 4),
                 "thr_exc": round(getattr(p, "firing_threshold_excitatory", 0.0), 4),
@@ -1761,6 +1792,8 @@ class Engine:
                 "mates": st.mates_performed,
                 "explored": st.explored,
                 "fitness": round(st.fitness, 3),
+                "fitness_hi": round(_fitness_hi(st), 4),   # v1.53
+                "food_by_age": nx.food_by_age,             # v1.53
                 "g": round(getattr(st, "g_factor", 0.0), 3),
             })
         self.pool.remove(nx.id)       # free the brain in its worker
@@ -1831,12 +1864,32 @@ class Engine:
                            ("name", "trial_id", "fitness", "version")}
         except Exception:
             pass
-        for k in ("world_size", "earth_map", "max_nxers", "min_alive",
-                  "target_tps", "engine_workers", "base_food_drain",
-                  "max_atrophy", "metabolic_ramp_scale", "start_food",
-                  "brain_step_every", "offspring_mutation_strength"):
-            if k in cfg:
-                rec["cfg"][k] = cfg[k]
+        # v1.53 — log the WHOLE config, not a 12-key whitelist. The 44-day
+        # V1.072 run could not be fully interpreted afterwards because
+        # learning_enabled / agmp_enabled / the reward knobs / the NAS
+        # settings were simply not recorded, so there was no way to confirm
+        # from the logs alone what the run had actually been doing. This is
+        # one record per boot, so logging everything costs nothing and makes
+        # every run self-documenting. Non-JSON values are stringified so a
+        # stray object can never break the provenance write.
+        for k, v in cfg.items():
+            rec["cfg"][k] = (v if isinstance(v, (int, float, str, bool))
+                             or v is None else str(v))
+        # explicit science stamp: the flags that define what the run means
+        rec["science"] = {
+            "learning_enabled": bool(getattr(self, "_learning", False)),
+            "agmp_env": os.environ.get("MNGOL5_AGMP"),
+            "nas_explore_enabled": bool(getattr(self, "_nas_enabled", False)),
+            "nas_explore_interval_ticks": int(
+                getattr(self, "_nas_interval", 0)),
+            "reward_eat_dopamine": float(getattr(self, "_reward_eat_da", 0.0)),
+            "reward_mate_dopamine": float(
+                getattr(self, "_reward_mate_da", 0.0)),
+            "dopamine_baseline": float(getattr(self, "_da_base", 0.0)),
+            "dopamine_burst_max": float(getattr(self, "_da_max", 0.0)),
+            "fitness_hi": "logged at death (unsaturated companion metric)",
+            "age_checkpoints": list(_AGE_CKPTS),
+        }
         self.history.provenance(rec)
 
     def compute_m12(self, alive):
@@ -1893,6 +1946,18 @@ class Engine:
                 out["M2_mean_gate"] = round(mean_g, 4)
                 out["M2_gate_xlink_std"] = round(math.sqrt(var), 4)
                 out["M2_n_links"] = gn
+            # v1.53 — W: synaptic weight drift. Lets the excitatory-collapse
+            # question ("are the brains going quiet because plasticity is
+            # net-depressing the weights?") be answered from the log.
+            if sci.get("w_n", 0) > 0:
+                wn = sci["w_n"]
+                mean_w = sci["w_sum"] / wn
+                wvar = max(0.0, sci["w_sq"] / wn - mean_w * mean_w)
+                out["W_mean"] = round(mean_w, 5)
+                out["W_mean_abs"] = round(sci["w_abs"] / wn, 5)
+                out["W_std"] = round(math.sqrt(wvar), 5)
+                out["W_pos_frac"] = round(sci["w_pos"] / wn, 4)
+                out["W_n_sampled"] = wn
             # M8 sphere specialisation — sensory firing fraction minus
             # association firing fraction (sensory should sit higher)
             sa = (sci["sensory_act"] / sci["sensory_n"]
@@ -2291,6 +2356,13 @@ class Engine:
                 "params": _params_to_dict(a.params),
                 "parents": a.parents,
                 "offspring_ids": a.offspring_ids,
+                # v1.53 — born_tick was never saved, so every NxEr restored
+                # from a snapshot came back with born_tick = 0 and reported
+                # an age of "the whole world's tick count". That corrupted
+                # lifespan in obituaries/nas_trials after any reboot, and
+                # would have fired every within-life age checkpoint at once.
+                "born_tick": getattr(a, "born_tick", 0),
+                "food_by_age": getattr(a, "food_by_age", {}),
             }
             if keep_brains:
                 bd = self.pool.export(a.id)
@@ -2306,6 +2378,8 @@ class Engine:
             "tick": self.tick,
             "next_nxer_id": self.next_nxer_id,
             "next_food_id": self.next_food_id,
+            # v1.53 — keep NAS trial ids unique across a reboot
+            "nas_trial_seq": int(getattr(self, "_nas_trial_seq", 0)),
             "all_time": self.all_time,
             "lifetime":  self.lifetime,
             "names_state": self.names.state(),
@@ -2356,6 +2430,48 @@ def _fitness(s):
             + norm_time  * 0.20
             + norm_ener  * 0.10
             + norm_sync  * 0.10
+            + norm_mates * 0.20)
+
+
+# v1.53 — ages (in ticks) at which each NxEr's cumulative food_found is
+# sampled, so a within-life foraging curve can be reconstructed at death.
+# Roughly doubling, covering ~1 min to ~2.2 h of lived time at 20 tps.
+_AGE_CKPTS = (1250, 2500, 5000, 10000, 20000, 40000, 80000, 160000)
+
+
+def _fitness_hi(s):
+    """v1.53 — high-resolution companion to _fitness (MEASUREMENT ONLY;
+    selection, ranking and best/ still use _fitness so 44 days of history
+    stay comparable).
+
+    The legacy formula saturates badly. Over the 44-day V1.072 run, 69% of
+    NxErs capped norm_food, 90% capped norm_expl, 54% capped norm_time, and
+    53% capped all three at once. Inside that group food_found spanned
+    100..10,610 — a 100x range — while fitness sat at 0.714 +/- 0.040. A
+    ruler that blind cannot show whether architecture or learning matters,
+    which is very likely why every knob correlation came back ~0.
+
+    This version keeps the same 6 terms and weights but scales the
+    unbounded ones logarithmically against the observed ceilings, so it
+    keeps resolving differences at the top of the distribution instead of
+    flattening them."""
+    def lg(x, cap):
+        x = float(x) if x else 0.0
+        if x <= 0.0:
+            return 0.0
+        return min(1.0, math.log1p(x) / math.log1p(cap))
+    norm_food = lg(s.food_found, 10000.0)      # observed max ~10,610
+    norm_expl = lg(s.explored, 50000.0)        # median alone was ~10,871
+    norm_time = lg(s.time_lived_s, 100000.0)   # observed max ~95,700 s
+    norm_ener = (min(s.energy_efficiency / 10.0, 1.0)
+                 if s.energy_efficiency else 0.0)
+    sync_proxy = max(0.0, 1.0 - abs(s.branching - 1.0))
+    norm_mates = lg(s.mates_performed, 20.0)
+    return (norm_food * 0.25
+            + norm_expl * 0.15
+            + norm_time * 0.20
+            + norm_ener * 0.10
+            + min(sync_proxy, 1.0) * 0.10
             + norm_mates * 0.20)
 
 
