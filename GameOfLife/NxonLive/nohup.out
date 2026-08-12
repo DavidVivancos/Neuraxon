@@ -1,2 +1,0 @@
-[run_server] using PyPy (Python 3.11.13 (7.3.20+dfsg-4, Oct 29 2025, 17:24:08)) — JIT enabled
-[run_server] canonical_host set → binding to 127.0.0.1 (put nginx in front; see install_nginx.sh)
