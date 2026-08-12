@@ -22,6 +22,7 @@
 # on a 1-core box and as a safety net).
 # ===================================================================
 import os
+import math
 import multiprocessing as mp
 
 
@@ -124,7 +125,7 @@ def _brain_firing_counts(b):
     return exc, neu, inh, n
 
 
-def _brain_science(b, acc):
+def _brain_science_into(b, acc):
     """v1.44 — single defensive pass over ONE brain, accumulating its
     contributions to the offline GoL M-metrics into the shard dict `acc`.
     Runs only at history cadence (~1/min) inside the 'sci' op, folded into
@@ -324,6 +325,73 @@ def _brain_topology(b):
     return {"spheres": out_spheres, "links": out_links}
 
 
+def _m_from_acc(a):
+    """v1.54 — turn ONE brain's science accumulator into that brain's own
+    M-metric values. Same formulas compute_m12() uses on the population
+    total; the difference is simply that this is not summed across brains.
+
+    Until now every per-brain value was folded into a shard accumulator and
+    discarded, so the M claims existed only as a population average and no
+    individual brain could be ranked by them. That made it impossible to ask
+    which architectures produce M-compliant brains, or to select for them."""
+    out = {}
+    nneu = a.get("nneu", 0)
+    if nneu > 0:
+        out["M1_E"] = a["e"] / nneu
+        out["M1_I"] = a["h"] / nneu
+        out["M1_N"] = a["z"] / nneu
+    if a.get("br_n", 0) > 0:
+        out["M5_branching"] = a["br_sum"] / a["br_n"]
+    if a.get("ts_n", 0) > 1:
+        tn = a["ts_n"]
+        mts = a["ts_sum"] / tn
+        out["M6_acw_heterogeneity"] = math.sqrt(
+            max(0.0, a["ts_sq"] / tn - mts * mts))
+    if a.get("gate_n", 0) > 0:
+        gn = a["gate_n"]
+        mg = a["gate_sum"] / gn
+        out["M2_mean_gate"] = mg
+        out["M2_gate_xlink_std"] = math.sqrt(
+            max(0.0, a["gate_sq"] / gn - mg * mg))
+    if a.get("sensory_n", 0) and a.get("assoc_n", 0):
+        out["M8_sensory_vs_assoc"] = (a["sensory_act"] / a["sensory_n"]
+                                      - a["assoc_act"] / a["assoc_n"])
+    if a.get("dead_n", 0) > 0:
+        out["M10_dead_neuron_frac"] = a["dead_sum"] / a["dead_n"]
+    if a.get("mamp_ok_n", 0) and a.get("mamp_les_n", 0):
+        ok = a["mamp_ok_sum"] / a["mamp_ok_n"]
+        if ok > 0.05:
+            out["M10_lesion_retention"] = (a["mamp_les_sum"]
+                                           / a["mamp_les_n"]) / ok
+    # v1.55 — per-brain synaptic weight magnitude. Population-level W_*
+    # showed mean |w| tripling toward the +/-1 clip while mean w stayed
+    # at 0, which tracked the excitatory collapse at r = -0.87. Exposing
+    # it per brain lets the NAS correlate architecture against weight
+    # runaway directly, instead of only seeing its downstream symptom.
+    if a.get("w_n", 0) > 0:
+        wn = a["w_n"]
+        out["W_mean_abs"] = a["w_abs"] / wn
+        out["W_mean"] = a["w_sum"] / wn
+        out["W_pos_frac"] = a["w_pos"] / wn
+    return {k: round(v, 5) for k, v in out.items()}
+
+
+def _brain_science(b, acc, per_brain=None, bid=None):
+    """v1.54 — wrapper around the single-brain pass. Accumulates into a
+    LOCAL dict first so this brain's own M values can be read off, then
+    folds that local dict into the shard total exactly as before. The
+    neuron walk is unchanged, so the cost is a few divisions per brain at
+    the existing ~1/min science cadence."""
+    loc = _new_sci_acc()
+    _brain_science_into(b, loc)
+    for k, v in loc.items():
+        acc[k] = acc.get(k, 0) + v
+    if per_brain is not None and bid is not None and loc.get("n_brains", 0):
+        m = _m_from_acc(loc)
+        if m:
+            per_brain[bid] = m
+
+
 def _new_sci_acc():
     return {k: 0 for k in (
         "n_brains", "e", "z", "h", "nneu",
@@ -450,12 +518,13 @@ def _worker_main(conn):
             # brains. Returns summable float accumulators; the engine
             # merges across shards and turns them into the M-metrics.
             acc = _new_sci_acc()
-            for b in brains.values():
+            per_brain = {}
+            for i, b in brains.items():
                 try:
-                    _brain_science(b, acc)
+                    _brain_science(b, acc, per_brain, i)
                 except Exception:
                     pass
-            conn.send(("sci", acc))
+            conn.send(("sci", acc, per_brain))
         elif op == "btopo":
             # v1.48 — single-brain topology for the NxonKaleido viewer.
             b = brains.get(msg[1])
@@ -861,14 +930,21 @@ class BrainPool:
         shard (or runs in-process), merges the summable accumulators, and
         returns the merged dict (or None if no brains). Low cadence only
         (history sampling), one round-trip per shard — never the hot
-        path."""
-        acc = _new_sci_acc()
+        path.
 
-        def _merge(part):
-            if not part:
-                return
-            for k, v in part.items():
-                acc[k] = acc.get(k, 0) + v
+        v1.54 — also returns each brain's OWN M values, so individual NxErs
+        can be scored against the M bands instead of only the population
+        average. Returns (acc, per_brain) where per_brain is {nxer_id: {...}}.
+        """
+        acc = _new_sci_acc()
+        per_brain = {}
+
+        def _merge(part, pb=None):
+            if part:
+                for k, v in part.items():
+                    acc[k] = acc.get(k, 0) + v
+            if pb:
+                per_brain.update(pb)
 
         if self.parallel:
             sent = [False] * self.n
@@ -883,18 +959,21 @@ class BrainPool:
                     continue
                 try:
                     if self._parents[k].poll(self._step_timeout):
-                        tag, part = self._parents[k].recv()
-                        if tag == "sci":
-                            _merge(part)
+                        msg = self._parents[k].recv()
+                        if msg and msg[0] == "sci":
+                            _merge(msg[1],
+                                   msg[2] if len(msg) > 2 else None)
                 except (BrokenPipeError, OSError, EOFError, ValueError):
                     pass
         else:
-            for b in self._brains.values():
+            for i, b in self._brains.items():
                 try:
-                    _brain_science(b, acc)
+                    _brain_science(b, acc, per_brain, i)
                 except Exception:
                     pass
-        return acc if acc.get("n_brains", 0) > 0 else None
+        if acc.get("n_brains", 0) > 0:
+            return acc, per_brain
+        return None, {}
 
     def brain_topology(self, nxer_id):
         """v1.48 — fetch ONE NxEr's brain topology for the NxonKaleido

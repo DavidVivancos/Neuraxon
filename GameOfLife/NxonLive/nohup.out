@@ -1,0 +1,44 @@
+[run_server] using PyPy (Python 3.11.13 (7.3.20+dfsg-4, Oct 29 2025, 17:24:08)) — JIT enabled
+[run_server] canonical_host set → binding to 127.0.0.1 (put nginx in front; see install_nginx.sh)
+Error handling request from 127.0.0.1
+Traceback (most recent call last):
+  File "/usr/local/lib/pypy3.11/dist-packages/aiohttp/web_protocol.py", line 517, in _handle_request
+    resp = await request_handler(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/pypy3.11/dist-packages/aiohttp/web_app.py", line 569, in _handle
+    return await handler(request)
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/pypy3.11/dist-packages/aiohttp/web_middlewares.py", line 117, in impl
+    return await handler(request)
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/mngol5/web/webserver.py", line 466, in host_https_mw
+    return await handler(req)
+           ^^^^^^^^^^^^^^^^^^
+  File "/root/mngol5/web/webserver.py", line 376, in api_admin_stats
+    alive_managed = sum(1 for a in eng.nxers.values()
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/mngol5/web/webserver.py", line 376, in <genexpr>
+    alive_managed = sum(1 for a in eng.nxers.values()
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: dictionary changed size during iteration
+Error handling request from 127.0.0.1
+Traceback (most recent call last):
+  File "/usr/local/lib/pypy3.11/dist-packages/aiohttp/web_protocol.py", line 517, in _handle_request
+    resp = await request_handler(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/pypy3.11/dist-packages/aiohttp/web_app.py", line 569, in _handle
+    return await handler(request)
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/pypy3.11/dist-packages/aiohttp/web_middlewares.py", line 117, in impl
+    return await handler(request)
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/mngol5/web/webserver.py", line 466, in host_https_mw
+    return await handler(req)
+           ^^^^^^^^^^^^^^^^^^
+  File "/root/mngol5/web/webserver.py", line 375, in api_admin_stats
+    alive_total = sum(1 for a in eng.nxers.values() if a.alive)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/mngol5/web/webserver.py", line 375, in <genexpr>
+    alive_total = sum(1 for a in eng.nxers.values() if a.alive)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: dictionary changed size during iteration

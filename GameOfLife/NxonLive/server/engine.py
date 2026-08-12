@@ -216,6 +216,17 @@ class NxEr:
         # survivorship (good foragers live longer in a no-learning world too).
         self.food_by_age = {}
         self._ck_i = 0
+        # v1.54 — per-NxEr M-compliance (measurement only; see
+        # _score_m_compliance). None until this brain's first science sample.
+        self.m_score = None        # instantaneous fraction of bands in-band
+        self.m_score_ema = None    # smoothed — the one to correlate on
+        self.m_fit = None          # v1.55 continuous graded compliance (no ties)
+        self.m_fit_ema = None      # v1.55 smoothed graded compliance
+        self.m_in_band = 0
+        self.m_n_checked = 0
+        self.m_deviation = None    # mean band-widths outside, when out
+        self.m_samples = 0
+        self.m_last = None         # this brain's own raw M values
         # After each bite the hunger-toward-food floor is suppressed
         # until this tick — so the NxEr wanders away from a food
         # source for a while before being dragged back. Mirrors the
@@ -348,13 +359,41 @@ def _params_to_dict(p):
 # offspring_mutation_strength > 0; default keeps the historic behaviour.
 _MUTABLE = {
     # key: (lo, hi) clamp
-    "firing_threshold_excitatory": (0.25, 0.80),
+    # v1.55 — thr_exc lower bound extended 0.25 -> 0.12. The 10-day run
+    # showed M-compliance still climbing at the lowest value that actually
+    # reached the brain (0.30, the old USER_TUNABLE clamp), so the optimum
+    # was outside the searchable box.
+    "firing_threshold_excitatory": (0.12, 0.80),
     "firing_threshold_inhibitory": (-1.30, -0.30),
     "post_spike_mp_reset": (0.0, 1.0),
     "intrinsic_timescale_default": (5.0, 40.0),
     "learning_rate": (0.0005, 0.08),
     "connection_probability": (0.10, 0.60),
-    "sensorimotor_coupling": (0.0, 3.5),
+    "sensorimotor_coupling": (0.1, 3.0),
+    # v1.55 — the parameters that ACTUALLY drive plasticity. AGMP uses
+    # agmp_eta (NOT learning_rate, which it ignores entirely), and the
+    # homeostatic scaling loop uses homeostatic_rate + target_firing_rate.
+    # The 10-day run showed mean |w| tripling (0.11 -> 0.42) toward the
+    # +/-1 clip while mean w stayed at 0: silent neurons get their weights
+    # scaled UP forever, which amplifies competing drive and keeps them
+    # silent. These three knobs are the only lever on that loop, so the
+    # NAS now searches them.
+    "agmp_eta": (0.0005, 0.02),
+    "homeostatic_rate": (0.00005, 0.002),
+    "target_firing_rate": (0.02, 0.25),
+}
+
+# v1.55 — some NAS knob names are not the attribute the substrate reads.
+# Sampling them was a silent no-op: the value was logged in nas_trials but
+# never reached a neuron, which is why they all showed r ~ 0 with every
+# outcome. Map each to the attribute that is actually read.
+_ARCH_ALIAS = {
+    # neurons read membrane_time_constant (neuron.py: intrinsic_timescale
+    # = membrane_time_constant); intrinsic_timescale_default is inert.
+    "intrinsic_timescale_default": "membrane_time_constant",
+    # there is no 'sensorimotor_coupling' attribute at all; the real
+    # inter-sphere drive knob is cross_sphere_coupling.
+    "sensorimotor_coupling": "cross_sphere_coupling",
 }
 
 
@@ -502,6 +541,25 @@ def make_params(overrides=None):
         p.agmp_enabled = (_agmp == "1")
     elif _LEARNING_AGMP:
         p.agmp_enabled = True        # v1.52 — learning loop on by config
+    # ---- 4. v1.55 — architecture / NAS knobs -------------------------
+    # These are NOT user-facing sliders and must not be filtered through
+    # USER_TUNABLE. Doing so silently dropped firing_threshold_inhibitory
+    # and sensorimotor_coupling (absent from that table) and clamped
+    # firing_threshold_excitatory to >= 0.30 and learning_rate to <= 0.05,
+    # so 3 of 7 sampled knobs never reached a brain and 2 more were
+    # truncated. Applied last, with _MUTABLE's own ranges, via the alias
+    # map so each lands on the attribute the substrate actually reads.
+    if overrides:
+        for k, (lo, hi) in _MUTABLE.items():
+            if k not in overrides:
+                continue
+            attr = _ARCH_ALIAS.get(k, k)
+            if not hasattr(p, attr):
+                continue
+            try:
+                setattr(p, attr, float(max(lo, min(hi, float(overrides[k])))))
+            except (TypeError, ValueError):
+                pass
     p.sphere_topology = "chc6"   # never overridable
     return p
 
@@ -1770,6 +1828,13 @@ class Engine:
                 # foraging curve (see _fitness_hi / _AGE_CKPTS).
                 "fitness_hi": round(_fitness_hi(st), 4),
                 "food_by_age": nx.food_by_age,
+                # v1.54 — per-NxEr M-claim compliance
+                "m_score": nx.m_score_ema,
+                "m_fit": nx.m_fit_ema,          # v1.55 continuous
+                "m_in_band": nx.m_in_band,
+                "m_n_checked": nx.m_n_checked,
+                "m_deviation": nx.m_deviation,
+                "m_samples": nx.m_samples,
                 "g": round(getattr(st, "g_factor", 0.0), 3),
                 "thr_inh": round(getattr(p, "firing_threshold_inhibitory", 0.0), 4),
                 "thr_exc": round(getattr(p, "firing_threshold_excitatory", 0.0), 4),
@@ -1794,6 +1859,15 @@ class Engine:
                 "fitness": round(st.fitness, 3),
                 "fitness_hi": round(_fitness_hi(st), 4),   # v1.53
                 "food_by_age": nx.food_by_age,             # v1.53
+                # v1.54 — does this architecture BUILD an M-compliant brain?
+                "m_score": nx.m_score_ema,
+                "m_fit": nx.m_fit_ema,          # v1.55 continuous
+                "m_score_last": nx.m_score,
+                "m_in_band": nx.m_in_band,
+                "m_n_checked": nx.m_n_checked,
+                "m_deviation": nx.m_deviation,
+                "m_samples": nx.m_samples,
+                "m_last": nx.m_last,
                 "g": round(getattr(st, "g_factor", 0.0), 3),
             })
         self.pool.remove(nx.id)       # free the brain in its worker
@@ -1892,6 +1966,72 @@ class Engine:
         }
         self.history.provenance(rec)
 
+    def _score_m_compliance(self, per_brain):
+        """v1.54 — give every NxEr its own M-compliance score.
+
+        For each brain we check its own M values against M_BANDS and record
+        the fraction that land in band. Eight of the bands are per-brain
+        measurable (M1 E/I/N, M2 gate mean + cross-link spread, M5, M6, M8,
+        M10 dead/lesion); M10_heritability_r and the Mg g-structure are
+        irreducibly population-level and are excluded here.
+
+        This is MEASUREMENT ONLY in v1.54 — nothing selects on it yet. It
+        exists so we can finally ask which architectures build brains that
+        satisfy the M claims, which the 46,957-trial NAS could never answer
+        while fitness (foraging) was the only per-NxEr outcome recorded.
+
+        A smoothed score is kept alongside the instantaneous one because a
+        single ~1/min sample of a spiking network is noisy; the EMA is the
+        one worth correlating against architecture."""
+        alpha = float(self.cfg.get("m_score_ema_alpha", 0.25))
+        for nid, m in per_brain.items():
+            nx = self.nxers.get(nid)
+            if nx is None or not nx.alive:
+                continue
+            hits = 0
+            n = 0
+            dev = 0.0
+            graded = 0.0
+            for k, v in m.items():
+                band = M_BANDS.get(k)
+                if band is None or v is None:
+                    continue
+                n += 1
+                lo, hi = band
+                w = max(1e-9, hi - lo)
+                if lo <= v <= hi:
+                    hits += 1
+                    graded += 1.0
+                else:
+                    # how far outside, normalised by the band's width
+                    d = ((lo - v) if v < lo else (v - hi)) / w
+                    dev += d
+                    # v1.55 — graded credit: a brain just outside a band
+                    # scores far better than one wildly outside. The binary
+                    # hit-fraction saturates (M6 is structurally
+                    # unachievable, so 7/8 = 0.875 is a hard ceiling and 45
+                    # NxErs tied there exactly, unrankable). This is
+                    # continuous and never ties.
+                    graded += 1.0 / (1.0 + d)
+            if n == 0:
+                continue
+            score = hits / n
+            nx.m_last = m
+            nx.m_score = round(score, 4)
+            nx.m_in_band = hits
+            nx.m_n_checked = n
+            nx.m_deviation = round(dev / n, 4)
+            nx.m_fit = round(graded / n, 4)
+            prev = getattr(nx, "m_score_ema", None)
+            nx.m_score_ema = round(
+                score if prev is None else (1 - alpha) * prev + alpha * score,
+                4)
+            pf = getattr(nx, "m_fit_ema", None)
+            nx.m_fit_ema = round(
+                nx.m_fit if pf is None
+                else (1 - alpha) * pf + alpha * nx.m_fit, 4)
+            nx.m_samples = int(getattr(nx, "m_samples", 0)) + 1
+
     def compute_m12(self, alive):
         """v1.44 — assemble the offline-GoL M-metrics we can faithfully
         measure online, from (a) the worker science sample (M1/M2/M5/M6/
@@ -1908,9 +2048,15 @@ class Engine:
         # ---- worker science sample (brain-internal metrics) ----
         sci = None
         try:
-            sci = self.pool.sample_science()
+            sci, per_brain = self.pool.sample_science()
         except Exception:
-            sci = None
+            sci, per_brain = None, {}
+        # v1.54 — score each NxEr against the M bands from its OWN brain
+        if per_brain:
+            try:
+                self._score_m_compliance(per_brain)
+            except Exception:
+                pass
         if sci:
             nneu = sci.get("nneu", 0) or 0
             if nneu > 0:
@@ -1985,6 +2131,37 @@ class Engine:
             if les is not None and ok > 0.05:
                 out["M10_lesion_retention"] = round(les / ok, 3)
             out["_n_brains_sampled"] = sci.get("n_brains", 0)
+
+        # ---- v1.54: population distribution of per-NxEr M-compliance ----
+        # The population averages above can sit in-band while almost no
+        # individual brain is compliant (and vice versa). This says how many
+        # actual brains satisfy the claims, which is what we want to select
+        # for later.
+        try:
+            sc = [a.m_score_ema for a in alive
+                  if getattr(a, "m_score_ema", None) is not None]
+            if sc:
+                sc_sorted = sorted(sc)
+                n = len(sc)
+                mean_sc = sum(sc) / n
+                out["Mc_mean"] = round(mean_sc, 4)
+                out["Mc_median"] = round(sc_sorted[n // 2], 4)
+                out["Mc_best"] = round(sc_sorted[-1], 4)
+                out["Mc_frac_ge_0_75"] = round(
+                    sum(1 for x in sc if x >= 0.75) / n, 4)
+                out["Mc_frac_ge_0_90"] = round(
+                    sum(1 for x in sc if x >= 0.90) / n, 4)
+                out["Mc_n"] = n
+            # v1.55 — continuous graded compliance (no ceiling ties)
+            fc = [a.m_fit_ema for a in alive
+                  if getattr(a, "m_fit_ema", None) is not None]
+            if fc:
+                fc_s = sorted(fc)
+                out["Mc_fit_mean"] = round(sum(fc) / len(fc), 4)
+                out["Mc_fit_median"] = round(fc_s[len(fc) // 2], 4)
+                out["Mc_fit_best"] = round(fc_s[-1], 4)
+        except Exception:
+            pass
 
         # ---- M7 self-sustained activity (behavioural accumulator) ----
         if self._m7_zero_n > 0 and self._m7_drv_n > 0:

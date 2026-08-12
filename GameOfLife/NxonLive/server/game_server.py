@@ -25,7 +25,7 @@ from .names import NameAllocator
 from .persistence import Persistence
 
 
-SERVER_VERSION = "GoL Server V 1.073"   # bumped each release
+SERVER_VERSION = "GoL Server V 1.076"   # bumped each release
 
 class GameServer:
     def __init__(self, config_path, state_dir):
@@ -65,6 +65,11 @@ class GameServer:
         except OSError:
             pass
         self._best_saved = self._load_best_index()
+        # v1.56 — migrate/repair folders written by the v1.48-v1.55 layout
+        try:
+            self._repair_best_dir()
+        except Exception as e:
+            print("[best] repair skipped:", e)
         self._best_last_save = time.time()
         self._steps = 0
         self._t0 = time.time()
@@ -657,28 +662,79 @@ class GameServer:
         except OSError:
             pass
 
+    def _brain_store_dir(self):
+        d = os.path.join(self._best_dir, "brains")
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            pass
+        return d
+
+    def _gc_brain_store(self):
+        """v1.56 — delete brain blobs nothing points at any more.
+
+        Reference counting is trivial here: a blob is live iff some
+        <metric>_*.json in best/ names it in its "brain" field."""
+        bdir = self._brain_store_dir()
+        wanted = set()
+        for f in glob.glob(os.path.join(self._best_dir, "*.json")):
+            if os.path.basename(f) == "_index.json":
+                continue
+            try:
+                with open(f) as fh:
+                    d = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            b = d.get("brain")
+            if b:
+                wanted.add(os.path.basename(b))
+        for f in glob.glob(os.path.join(bdir, "*.json")):
+            if os.path.basename(f) not in wanted:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
     def _archive_best(self):
         """Archive the ALL-TIME record holder per metric to
         state/best/<metric>_<name>_<value>_<tick>.json, once per new
         record. Runs hourly from the tick loop under the engine lock.
 
-        v1.43 — fixes "the best NxErs aren't saved." The previous version
-        only archived whoever was leading AND still alive at the hourly
-        sweep, so the genuine all-time champions (almost always dead by
-        the sweep) never reached the folder. Now we use
+        v1.43 — fixes "the best NxErs aren't saved." Uses
         `engine._record_breakers`, which captures the id+value the instant
-        a live NxEr breaks a record. For each metric we:
-          * skip if the record doesn't beat what we've already archived;
-          * if the record-holder is STILL ALIVE, export its full brain
-            (the ideal — a loadable champion model);
-          * if it has since DIED, write a brain-less stub from the
-            all-time board (genome/name/value/stats we still hold) so the
-            record is at least documented and named, never "?".
-        Covers every RANK_METRIC: food_found, food_taken, explored,
-        time_lived, mates_performed, fitness, and g."""
+        a live NxEr breaks a record, so genuine all-time champions (almost
+        always dead by the hourly sweep) still reach the folder.
+
+        v1.56 — fixes "best/ is full of tiny files and almost no brains."
+        v1.48 introduced two optimisations that destroyed each other:
+        writing metric M first deleted every `M_*.json` (to stop
+        value-stamped duplicates piling up), while an NxEr holding several
+        records stored its brain under ONE metric and wrote pointer stubs
+        for the rest. So when a new champion took metric M, the delete also
+        removed the brain that other metrics' stubs pointed at, orphaning
+        them. A 10-day run ended with 1 loadable brain out of 7 records and
+        3 dangling stubs — strictly worse than never de-duplicating at all
+        (7 full brains is only ~4.5 MB).
+
+        The blob is now separated from the record. Each champion brain is
+        written ONCE to best/brains/<name>_t<tick>.json and every metric
+        file is a small record that names it in "brain". Deleting a metric
+        file can therefore never destroy a brain; blobs are removed only by
+        _gc_brain_store() when no record references them. Metric files stay
+        small BY DESIGN now — that is the pointer, not a failure.
+        """
         from .engine import RANK_METRICS, _metric
         archived = []
-        saved_full_names = {}        # v1.48 — NxEr name -> metric it's archived under
+        bdir = self._brain_store_dir()
+        # name -> blob path, for NxErs whose brain we already stored (this
+        # sweep OR any previous one — v1.48's version only looked within a
+        # single sweep, so it re-exported the same brain hour after hour).
+        stored = {}
+        for f in glob.glob(os.path.join(bdir, "*.json")):
+            base = os.path.basename(f)
+            nm = base.rsplit("_t", 1)[0]
+            if nm:
+                stored[nm] = f
         breakers = dict(getattr(self.engine, "_record_breakers", {}) or {})
         rank_top = getattr(self.engine, "_rank_top", {}) or {}
         for m in RANK_METRICS:
@@ -706,55 +762,48 @@ class GameServer:
             a = self.engine.nxers.get(nid)
             name = (a.name if a else
                     self.engine._nxer_names.get(nid, "?"))
-            # v1.48 — "replace if different": if this metric's saved file is
-            # already this very NxEr AND the value hasn't improved past what
-            # we recorded, skip (handled by the value test above). When we
-            # DO write, first delete any prior file(s) for this metric so the
-            # folder never accumulates value-stamped duplicates of the same
-            # champion (it used to fill with explored_AON_338000,
-            # explored_AON_351000, … as the record climbed).
+            # v1.56 — delete prior file(s) for THIS metric only. Safe now:
+            # metric files never hold the only copy of a brain, so removing
+            # one cannot orphan another metric's record.
             for old in glob.glob(os.path.join(self._best_dir,
                                               f"{m}_*.json")):
                 try:
                     os.remove(old)
                 except OSError:
                     pass
-            # v1.48 — "do not save the same NxEr twice": one NxEr can hold
-            # several records (AON held 4). Archive its full brain ONCE and
-            # write compact pointer stubs for its other records instead of
-            # duplicating the same brain blob across files.
-            full_under = saved_full_names.get(name)
-            if full_under is not None:
-                model = {
-                    "name": name,
-                    "record": {"metric": m, "value": value,
-                               "tick": self.engine.tick},
-                    "note": (f"same NxEr also holds '{full_under}'; full "
-                             f"brain archived in the {full_under}_{name}_* "
-                             f"file (not duplicated here)."),
-                    "see": full_under,
-                }
+            # v1.56 — store the brain ONCE in best/brains/, then point at
+            # it. One NxEr holding several records gets one blob and
+            # several small records, none of which can dangle.
+            blob = stored.get(name)
+            if blob is None and a is not None and a.alive:
+                try:
+                    _mdl = self.engine.export_model_for(a)
+                    blob = os.path.join(
+                        bdir, f"{name}_t{self.engine.tick}.json")
+                    with open(blob, "w") as bf:
+                        json.dump(_mdl, bf)
+                    stored[name] = blob
+                except Exception as e:
+                    print("[GameServer] best-archive export failed:", e)
+                    blob = None
+            model = {
+                "name": name,
+                "record": {"metric": m, "value": value,
+                           "tick": self.engine.tick},
+            }
+            if blob is not None:
+                model["brain"] = os.path.join(
+                    "brains", os.path.basename(blob))
+                model["note"] = (
+                    f"full brain stored once at best/{model['brain']} "
+                    f"(shared by every record this NxEr holds).")
             else:
-                model = None
-                if a is not None and a.alive:
-                    # ideal path — capture the real, loadable brain now
-                    try:
-                        model = self.engine.export_model_for(a)
-                        saved_full_names[name] = m
-                    except Exception as e:
-                        print("[GameServer] best-archive export failed:", e)
-                        model = None
-                if model is None:
-                    # the champion died before this hourly sweep — archive a
-                    # documented, named stub so the record isn't lost / "?"
-                    model = {
-                        "name": name,
-                        "record": {"metric": m, "value": value,
-                                   "tick": self.engine.tick},
-                        "note": ("all-time record holder; brain unavailable "
-                                 "(NxEr died before hourly archive). For a "
-                                 "loadable brain, raise the archive cadence."),
-                    }
+                # champion died before this sweep — document the record so
+                # it is never lost or shown as "?"
+                model["note"] = ("all-time record holder; brain unavailable "
+                                 "(NxEr died before the archive sweep). For "
+                                 "a loadable brain, raise the archive "
+                                 "cadence.")
             v_disp = f"{value:.3f}".replace(".", "_")
             fn = f"{m}_{name}_{v_disp}_t{self.engine.tick}.json"
             fpath = os.path.join(self._best_dir, fn)
@@ -769,8 +818,87 @@ class GameServer:
         if archived:
             self._save_best_index()
             for m, nm, v, live in archived:
-                tag = "live brain" if live else "stub (died)"
+                tag = "live brain" if live else "record only (died)"
                 print(f"[best] archived {m}: {nm} = {v:.3f} [{tag}]")
+        # v1.56 — drop blobs no record points at any more (an NxEr that
+        # lost every one of its records). Cheap: a handful of files.
+        try:
+            self._gc_brain_store()
+        except Exception:
+            pass
+
+    def _repair_best_dir(self):
+        """v1.56 — one-off migration for folders written by v1.48-v1.55.
+
+        Those versions wrote pointer stubs ({"see": <metric>}) that were
+        orphaned whenever the referenced metric changed hands, because
+        taking a record deleted the previous holder's file — which was
+        sometimes the only copy of a brain. Real 10-day folders ended up
+        with 1 loadable brain and 3 dangling stubs.
+
+        This scans best/, rewrites any legacy record into the new pointer
+        form, and reports what is recoverable. A dangling record whose NxEr
+        is still alive is simply re-archived by the next sweep (its value
+        is cleared from the index so the sweep re-fires); one whose NxEr is
+        long dead keeps its documented record with no brain, which is the
+        best that can be done — the brain no longer exists anywhere."""
+        if not os.path.isdir(self._best_dir):
+            return
+        fixed = dangling = ok = 0
+        for f in glob.glob(os.path.join(self._best_dir, "*.json")):
+            if os.path.basename(f) == "_index.json":
+                continue
+            try:
+                with open(f) as fh:
+                    d = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if "see" not in d:
+                if d.get("brain") or "record" in d:
+                    ok += 1
+                continue
+            # legacy stub -> did its target survive?
+            nm = d.get("name")
+            tgt = glob.glob(os.path.join(
+                self._best_dir, "%s_%s_*.json" % (d["see"], nm)))
+            live = [t for t in tgt if os.path.getsize(t) > 10000]
+            d.pop("see", None)
+            if live:
+                # promote the legacy full file into the brain store
+                blob = os.path.join(
+                    self._brain_store_dir(), "%s_legacy.json" % nm)
+                try:
+                    if not os.path.exists(blob):
+                        with open(live[0]) as sf, open(blob, "w") as df:
+                            df.write(sf.read())
+                    d["brain"] = os.path.join("brains",
+                                              os.path.basename(blob))
+                    d["note"] = ("full brain stored once at best/%s "
+                                 "(migrated from v1.48 layout)."
+                                 % d["brain"])
+                    fixed += 1
+                except OSError:
+                    dangling += 1
+            else:
+                d["note"] = ("record preserved; brain was lost by the "
+                             "pre-v1.56 archive layout (the file it "
+                             "pointed to was deleted when another NxEr "
+                             "took that record).")
+                dangling += 1
+                # let the next sweep re-archive if this NxEr still lives
+                mt = (d.get("record") or {}).get("metric")
+                if mt:
+                    self._best_saved.pop(mt, None)
+            try:
+                with open(f, "w") as fh:
+                    json.dump(d, fh)
+            except OSError:
+                pass
+        if fixed or dangling:
+            print("[best] v1.56 repair: %d record(s) relinked, %d had no "
+                  "recoverable brain (will re-archive if the NxEr lives), "
+                  "%d already fine" % (fixed, dangling, ok))
+            self._save_best_index()
 
     def find_nxer_by_name(self, name):
         with self._lock:
