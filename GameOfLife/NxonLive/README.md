@@ -1,6 +1,6 @@
 # Multi Neuraxon Game of Life 5 — client / server
 
-**Version mngol5-v1.56 / GoL Server V 1.076** — 
+**Version mngol5-v1.57 / GoL Server V 1.077** 
 
 ```
 mngol5/

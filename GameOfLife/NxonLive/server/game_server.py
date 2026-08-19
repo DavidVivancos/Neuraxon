@@ -25,7 +25,7 @@ from .names import NameAllocator
 from .persistence import Persistence
 
 
-SERVER_VERSION = "GoL Server V 1.076"   # bumped each release
+SERVER_VERSION = "GoL Server V 1.077"   # bumped each release
 
 class GameServer:
     def __init__(self, config_path, state_dir):
@@ -646,13 +646,30 @@ class GameServer:
     def _load_best_index(self):
         """Read state/best/_index.json if present so per-metric high
         water marks survive a restart (otherwise we'd re-save the same
-        top NxEr the first hour after every reboot)."""
+        top NxEr the first hour after every reboot).
+
+        v1.56 — a high-water mark with no corresponding record file is
+        dropped. Releases v1.48-v1.55 accidentally shipped an _index.json
+        from a sandbox test inside state/best/, carrying a fitness mark of
+        0.9001 — effectively the saturation ceiling of the legacy metric —
+        so unpacking over a live install could silently suppress archiving
+        of that metric for the lifetime of the world. A mark is only
+        meaningful if the record it describes is actually on disk."""
         path = os.path.join(self._best_dir, "_index.json")
         try:
             with open(path) as f:
-                return {k: float(v) for k, v in json.load(f).items()}
+                idx = {k: float(v) for k, v in json.load(f).items()}
         except (OSError, ValueError):
             return {}
+        kept = {}
+        for m, v in idx.items():
+            if glob.glob(os.path.join(self._best_dir, "%s_*.json" % m)):
+                kept[m] = v
+        dropped = len(idx) - len(kept)
+        if dropped:
+            print("[best] dropped %d orphaned high-water mark(s) with no "
+                  "record file; those metrics will re-archive" % dropped)
+        return kept
 
     def _save_best_index(self):
         path = os.path.join(self._best_dir, "_index.json")
@@ -757,7 +774,21 @@ class GameServer:
                     nid, value = top[0]["id"], top[0]["value"]
             if nid is None or value is None:
                 continue
-            if value <= self._best_saved.get(m, 0.0):
+            # v1.57 — require a MEANINGFUL improvement, not any improvement.
+            # time_lived / explored / food_found / food_taken increase every
+            # tick for any living NxEr, so a long-lived champion set a "new
+            # record" on literally every sweep: the 6.87-day V1.076 run
+            # archived 3,104 times (1,076 for time_lived alone), which was
+            # 88% of all console output and a glob+delete+write each time.
+            # A relative gain threshold collapses that to a handful of
+            # writes while keeping every genuine record change.
+            prev = self._best_saved.get(m)
+            if prev is not None:
+                need = abs(prev) * float(
+                    self.cfg.get("best_min_gain", 0.02))
+                if value <= prev + max(need, 1e-9):
+                    continue
+            elif value <= 0.0:
                 continue
             a = self.engine.nxers.get(nid)
             name = (a.name if a else

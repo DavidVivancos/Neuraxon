@@ -464,13 +464,26 @@ class App:
             now - eng._uptime_t0)
         eng._uptime_t0 = now
         # current snapshot of the live world
-        alive_total = sum(1 for a in eng.nxers.values() if a.alive)
-        alive_managed = sum(1 for a in eng.nxers.values()
+        # v1.57 — take ONE list copy first. These lines used to iterate
+        # engine.nxers directly from the asyncio event loop while the game
+        # loop was spawning/killing NxErs in that same dict, which raised
+        # "RuntimeError: dictionary changed size during iteration" and
+        # crashed the admin page at random (seen repeatedly in production
+        # logs). list() over .values() is a single C-level copy, far
+        # cheaper than taking the engine lock and — unlike the lock — it
+        # cannot stall the world. A torn read is harmless here: these are
+        # display counters, not science.
+        try:
+            snap = list(eng.nxers.values())
+        except RuntimeError:
+            snap = list(eng.nxers.values())    # one retry; mutation is brief
+        alive_total = sum(1 for a in snap if a.alive)
+        alive_managed = sum(1 for a in snap
                             if a.alive and a.is_managed)
         # average lifespan among the dead we still have records for
         dead_with_age = [
             (eng.tick - a.born_tick) if hasattr(a, "born_tick") else 0
-            for a in eng.nxers.values()
+            for a in snap
             if not a.alive and getattr(a, "born_tick", None) is not None
         ]
         avg_lifespan_ticks = (sum(dead_with_age) / len(dead_with_age)

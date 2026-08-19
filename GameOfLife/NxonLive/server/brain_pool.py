@@ -260,6 +260,7 @@ def _brain_science_into(b, acc):
             syns = getattr(sph.network, "synapses", None)
             if not syns:
                 continue
+            acc["w_total"] += len(syns)      # v1.57 — true synapse count
             step = 1 if len(syns) <= 200 else len(syns) // 200
             for i in range(0, len(syns), step):
                 s = syns[i]
@@ -373,6 +374,16 @@ def _m_from_acc(a):
         out["W_mean_abs"] = a["w_abs"] / wn
         out["W_mean"] = a["w_sum"] / wn
         out["W_pos_frac"] = a["w_pos"] / wn
+        # v1.57 — the sample count, so the per-brain and population
+        # computations can be reconciled. In the V1.076 run per-brain
+        # W_mean_abs read 0.0107 while the population read 0.3365 (31x),
+        # and the gap widened over the run, while every M-metric agreed
+        # within 1.7x. Both paths use identical arithmetic on the same
+        # accumulator, so the divergence has to come from WHICH synapses
+        # each one walks — and without w_n that is untestable. Logging it
+        # makes the discrepancy diagnosable from the data alone.
+        out["W_n"] = wn
+        out["W_n_syn_total"] = a.get("w_total", wn)
     return {k: round(v, 5) for k, v in out.items()}
 
 
@@ -403,7 +414,7 @@ def _new_sci_acc():
         "dead_sum", "dead_n",
         "mamp_ok_sum", "mamp_ok_n", "mamp_les_sum", "mamp_les_n",
         # v1.53 — sampled synaptic weights (plasticity drift diagnostic)
-        "w_sum", "w_abs", "w_sq", "w_n", "w_pos",
+        "w_sum", "w_abs", "w_sq", "w_n", "w_pos", "w_total",
     )}
 
 

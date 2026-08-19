@@ -381,6 +381,35 @@ _MUTABLE = {
     "agmp_eta": (0.0005, 0.02),
     "homeostatic_rate": (0.00005, 0.002),
     "target_firing_rate": (0.02, 0.25),
+    # v1.57 — knobs chosen to attack the M claims that actually FAIL.
+    # The 6.87-day V1.076 run showed M1_E passing only 14% of the time
+    # (median 0.103 against a 0.18-0.28 band) while the substrate carries
+    # explicit excitatory-fraction targets nobody was searching; and the
+    # three plasticity knobs added in v1.55 turned out to move nothing,
+    # while the real weight-magnitude controls (weight_homeostasis_*,
+    # weight_saturation_threshold) sat unsearched the whole time.
+    #
+    # M1_E / M1_I — the worst-failing claims, directly targeted:
+    "target_excitatory_fraction": (0.10, 0.35),
+    "max_excitatory_fraction": (0.18, 0.45),
+    "min_excitatory_fraction": (0.05, 0.25),
+    # weight magnitude — the genuine levers (v1.55 searched the wrong ones):
+    "weight_homeostasis_target": (0.15, 0.90),
+    "weight_homeostasis_rate": (0.002, 0.10),
+    "weight_saturation_threshold": (0.35, 0.95),
+    # plasticity balance (LTP vs LTD) — sets the drift direction of |w|:
+    "hebbian_ltp_rate": (0.02, 0.30),
+    "ltd_neutral_scale": (0.02, 0.30),
+    # structural plasticity — synapse counts grew ~4x across the last run
+    # and nothing was searching the rate that drives it:
+    "synapse_formation_prob": (0.002, 0.08),
+    # excitability / timing:
+    "refractory_period_ticks": (2.0, 12.0),
+    "adaptive_threshold_adjustment": (0.02, 0.30),
+    "oscillator_strength": (0.0, 0.35),
+    # M6: neurons pin to this cap and lose all timescale spread. Varying
+    # it changes where (and whether) that saturation lands.
+    "max_intrinsic_timescale": (30.0, 400.0),
 }
 
 # v1.55 — some NAS knob names are not the attribute the substrate reads.
@@ -709,6 +738,34 @@ class Engine:
         self._da_max = float(cfg.get("dopamine_burst_max", 0.85))
         self._reward_eat_da = float(cfg.get("reward_eat_dopamine", 0.5))
         self._reward_mate_da = float(cfg.get("reward_mate_dopamine", 0.7))
+        # v1.57 — M-CLAIM SELECTION. Until now nothing in the world cared
+        # whether a brain satisfied the M claims: m_fit was measured and
+        # logged, but survival depended only on foraging luck, and the
+        # 6.87-day V1.076 run showed the most M-compliant quartile actually
+        # STARVING MORE (43% of deaths vs 23% for the least compliant).
+        # Compliance was a liability.
+        #
+        # This makes the M targets a real selection pressure, on the two
+        # channels that actually kill NxErs (63% idle, 37% starved):
+        #   * metabolic: a compliant brain spends less energy per tick
+        #     (efficient neural coding is cheaper — the biological
+        #     rationale, and it directly offsets the starvation penalty);
+        #   * idle tolerance: a compliant brain gets longer before the
+        #     stuck-cull fires.
+        # Both scale with m_fit_ema (0..1, continuous and strongly
+        # heritable at r=+0.43), are bounded, and are off when
+        # m_selection_enabled is false — so a run can be split cleanly into
+        # with/without segments.
+        self._m_sel = bool(cfg.get("m_selection_enabled", True))
+        self._m_sel_drain = float(cfg.get("m_selection_drain_relief", 0.35))
+        self._m_sel_idle = float(cfg.get("m_selection_idle_bonus", 0.50))
+        self._m_sel_mate = float(cfg.get("m_selection_mate_relief", 0.25))
+        # Rescale m_fit against a floor before using it as an advantage.
+        # In the V1.076 run m_fit spanned 0.742..0.991 across deciles, so
+        # feeding it in raw would hand ~the same relief to everyone and
+        # exert almost no selection. Mapping [floor,1] -> [0,1] turns that
+        # narrow band into a real gradient (0.74 -> 0.14, 0.99 -> 0.97).
+        self._m_sel_floor = float(cfg.get("m_selection_floor", 0.70))
         # v1.34 — science history logger (set by GameServer after init;
         # None means logging disabled). The engine only ever ENQUEUES
         # records (cheap); a background thread does the file I/O.
@@ -1168,7 +1225,7 @@ class Engine:
                     if (o is not None and o.alive
                             and o.is_male != nx.is_male
                             and self.tick >= o.mate_cooldown_until
-                            and o.food >= self.bio_mate_min_food
+                            and o.food >= self._mate_gate(o)
                             and o.id not in nx.parents
                             and nx.id not in o.parents):
                         ddx = o.pos[0] - nx.pos[0]
@@ -1285,7 +1342,7 @@ class Engine:
                     forced = True
         else:
             md = None
-            if self.tick >= nx.mate_cooldown_until and nx.food >= self.bio_mate_min_food:
+            if self.tick >= nx.mate_cooldown_until and nx.food >= self._mate_gate(nx):
                 md = self._nearest_mate_dir(nx)
             if md is not None:
                 mvx, mvy = md                          # court: move to mate
@@ -1464,11 +1521,11 @@ class Engine:
                     break
         if (nx.mating_intent_until_tick > self.tick
                 and self.tick >= nx.mate_cooldown_until
-                and nx.food >= self.bio_mate_min_food):
+                and nx.food >= self._mate_gate(nx)):
             for o in _neighbours():
                 if (o.is_male != nx.is_male
                         and self.tick >= o.mate_cooldown_until
-                        and o.food >= self.bio_mate_min_food
+                        and o.food >= self._mate_gate(o)
                         and o.mating_intent_until_tick > self.tick
                         and o.id not in nx.parents
                         and nx.id not in o.parents):
@@ -1695,6 +1752,10 @@ class Engine:
         bio_max = self.bio_max_atrophy
         bio_ramp = self.bio_metab_ramp
         bio_drain = self.bio_base_drain
+        # v1.57 — hoisted so the per-NxEr loop stays cheap
+        m_sel = self._m_sel
+        m_drain = self._m_sel_drain
+        m_idle = self._m_sel_idle
         energy_cap = self.bio_energy_cap          # v1.46
         idle_death = self.bio_idle_death_ticks    # v1.46 (0 = off)
         dt = self.dt
@@ -1714,7 +1775,10 @@ class Engine:
             if nx.food > energy_cap:        # v1.46 — cap hoarding
                 nx.food = energy_cap
             idle_ticks = tick - nx.last_move_tick
-            if idle_death and idle_ticks > idle_death:
+            # v1.57 — M-claim selection advantage. adv is 0 until this NxEr
+            # has its first science sample, so newborns get no free pass.
+            adv = self.m_advantage(nx) if m_sel else 0.0
+            if idle_death and idle_ticks > (idle_death * (1.0 + m_idle * adv)):
                 self._kill(nx, "idle")      # v1.46 — cull the stuck
                 continue
             idle = idle_ticks * dt
@@ -1723,7 +1787,7 @@ class Engine:
             atrophy = 1.0 + bio_ramp * idle
             if atrophy > bio_max:
                 atrophy = bio_max
-            nx.food -= bio_drain * atrophy
+            nx.food -= bio_drain * atrophy * (1.0 - m_drain * adv)
             nx.net.branching_ratio = br
             nx.stats.branching = br
             if nx.food <= 0:
@@ -1831,6 +1895,9 @@ class Engine:
                 # v1.54 — per-NxEr M-claim compliance
                 "m_score": nx.m_score_ema,
                 "m_fit": nx.m_fit_ema,          # v1.55 continuous
+                "m_sel_adv": (round(nx.m_fit_ema, 4)     # v1.57
+                              if (self._m_sel and nx.m_fit_ema is not None)
+                              else 0.0),
                 "m_in_band": nx.m_in_band,
                 "m_n_checked": nx.m_n_checked,
                 "m_deviation": nx.m_deviation,
@@ -1862,6 +1929,7 @@ class Engine:
                 # v1.54 — does this architecture BUILD an M-compliant brain?
                 "m_score": nx.m_score_ema,
                 "m_fit": nx.m_fit_ema,          # v1.55 continuous
+                "m_sel_adv": round(self.m_advantage(nx), 4),   # v1.57
                 "m_score_last": nx.m_score,
                 "m_in_band": nx.m_in_band,
                 "m_n_checked": nx.m_n_checked,
@@ -1965,6 +2033,29 @@ class Engine:
             "age_checkpoints": list(_AGE_CKPTS),
         }
         self.history.provenance(rec)
+
+    def m_advantage(self, nx):
+        """v1.57 — selection advantage in [0,1] from this NxEr's smoothed
+        M-claim compliance. 0 until its brain has been scored, so newborns
+        earn nothing for free."""
+        if not self._m_sel:
+            return 0.0
+        mf = getattr(nx, "m_fit_ema", None)
+        if mf is None:
+            return 0.0
+        lo = self._m_sel_floor
+        adv = (mf - lo) / max(1e-6, 1.0 - lo)
+        return 0.0 if adv < 0.0 else (1.0 if adv > 1.0 else adv)
+
+    def _mate_gate(self, nx):
+        """v1.57 — food needed before this NxEr will mate. M-compliant
+        brains get a discount, so satisfying the M claims raises
+        reproductive rate as well as survival. Falls back to the flat
+        threshold when selection is off or the NxEr has no score yet."""
+        base = self.bio_mate_min_food
+        if not self._m_sel or self._m_sel_mate <= 0.0:
+            return base
+        return base * (1.0 - self._m_sel_mate * self.m_advantage(nx))
 
     def _score_m_compliance(self, per_brain):
         """v1.54 — give every NxEr its own M-compliance score.
@@ -2104,6 +2195,7 @@ class Engine:
                 out["W_std"] = round(math.sqrt(wvar), 5)
                 out["W_pos_frac"] = round(sci["w_pos"] / wn, 4)
                 out["W_n_sampled"] = wn
+                out["W_n_syn_total"] = sci.get("w_total", wn)   # v1.57
             # M8 sphere specialisation — sensory firing fraction minus
             # association firing fraction (sensory should sit higher)
             sa = (sci["sensory_act"] / sci["sensory_n"]
