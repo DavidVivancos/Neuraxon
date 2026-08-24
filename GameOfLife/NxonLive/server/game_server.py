@@ -25,7 +25,7 @@ from .names import NameAllocator
 from .persistence import Persistence
 
 
-SERVER_VERSION = "GoL Server V 1.077"   # bumped each release
+SERVER_VERSION = "GoL Server V 1.078"   # bumped each release
 
 class GameServer:
     def __init__(self, config_path, state_dir):

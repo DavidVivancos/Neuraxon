@@ -222,6 +222,7 @@ class NxEr:
         self.m_score_ema = None    # smoothed — the one to correlate on
         self.m_fit = None          # v1.55 continuous graded compliance (no ties)
         self.m_fit_ema = None      # v1.55 smoothed graded compliance
+        self.m_fit_w = None        # v1.58 hard-band-weighted compliance
         self.m_in_band = 0
         self.m_n_checked = 0
         self.m_deviation = None    # mean band-widths outside, when out
@@ -359,58 +360,58 @@ def _params_to_dict(p):
 # offspring_mutation_strength > 0; default keeps the historic behaviour.
 _MUTABLE = {
     # key: (lo, hi) clamp
-    # v1.55 — thr_exc lower bound extended 0.25 -> 0.12. The 10-day run
-    # showed M-compliance still climbing at the lowest value that actually
-    # reached the brain (0.30, the old USER_TUNABLE clamp), so the optimum
-    # was outside the searchable box.
-    "firing_threshold_excitatory": (0.12, 0.80),
-    "firing_threshold_inhibitory": (-1.30, -0.30),
-    "post_spike_mp_reset": (0.0, 1.0),
-    "intrinsic_timescale_default": (5.0, 40.0),
-    "learning_rate": (0.0005, 0.08),
-    "connection_probability": (0.10, 0.60),
-    "sensorimotor_coupling": (0.1, 3.0),
-    # v1.55 — the parameters that ACTUALLY drive plasticity. AGMP uses
-    # agmp_eta (NOT learning_rate, which it ignores entirely), and the
-    # homeostatic scaling loop uses homeostatic_rate + target_firing_rate.
-    # The 10-day run showed mean |w| tripling (0.11 -> 0.42) toward the
-    # +/-1 clip while mean w stayed at 0: silent neurons get their weights
-    # scaled UP forever, which amplifies competing drive and keeps them
-    # silent. These three knobs are the only lever on that loop, so the
-    # NAS now searches them.
-    "agmp_eta": (0.0005, 0.02),
-    "homeostatic_rate": (0.00005, 0.002),
-    "target_firing_rate": (0.02, 0.25),
-    # v1.57 — knobs chosen to attack the M claims that actually FAIL.
-    # The 6.87-day V1.076 run showed M1_E passing only 14% of the time
-    # (median 0.103 against a 0.18-0.28 band) while the substrate carries
-    # explicit excitatory-fraction targets nobody was searching; and the
-    # three plasticity knobs added in v1.55 turned out to move nothing,
-    # while the real weight-magnitude controls (weight_homeostasis_*,
-    # weight_saturation_threshold) sat unsearched the whole time.
     #
-    # M1_E / M1_I — the worst-failing claims, directly targeted:
+    # v1.58 — PRUNED. Across the V1.076 and V1.077 runs (15,119 trials,
+    # 23 knobs) only a handful moved any outcome; the rest sat at
+    # |r| < 0.05 against m_fit, m_score, M1_E and fitness_hi alike.
+    # Sampling them added architectural variance for no information — the
+    # population's mean compliance fell from ~0.52 to ~0.44 when the 13
+    # extra knobs went in — so they are retired to _MUTABLE_RETIRED below,
+    # where they stay documented and one line from being restored.
+    #
+    # refractory_period_ticks is the dominant parameter found so far:
+    # r = -0.766 with m_fit (58.7% of variance) and r = -0.752 with M1_E.
+    # M1_E (band 0.18-0.28) reads 0.219 at refr 2.5 and 0.181 at 3.5, but
+    # only 0.151 at 4.6 — so the band is satisfiable ONLY below ~4. The
+    # old floor of 2.0 still showed M1_E descending, i.e. the optimum may
+    # lie under the box, so the range now opens at 1.0.
+    "refractory_period_ticks": (1.0, 5.0),
+    # second-strongest, and the only other knob above |r| = 0.05
+    "firing_threshold_excitatory": (0.12, 0.80),
+    # weak but repeatedly significant (t = +3.8 / -3.7 in v1.077)
+    "sensorimotor_coupling": (0.1, 3.0),
+    "post_spike_mp_reset": (0.0, 1.0),
+    # direct M1_E levers: small effects (t = +3.5 / +3.2) but they act on
+    # exactly the claim that fails most, so they stay in the search
     "target_excitatory_fraction": (0.10, 0.35),
     "max_excitatory_fraction": (0.18, 0.45),
-    "min_excitatory_fraction": (0.05, 0.25),
-    # weight magnitude — the genuine levers (v1.55 searched the wrong ones):
-    "weight_homeostasis_target": (0.15, 0.90),
-    "weight_homeostasis_rate": (0.002, 0.10),
-    "weight_saturation_threshold": (0.35, 0.95),
-    # plasticity balance (LTP vs LTD) — sets the drift direction of |w|:
-    "hebbian_ltp_rate": (0.02, 0.30),
-    "ltd_neutral_scale": (0.02, 0.30),
-    # structural plasticity — synapse counts grew ~4x across the last run
-    # and nothing was searching the rate that drives it:
-    "synapse_formation_prob": (0.002, 0.08),
-    # excitability / timing:
-    "refractory_period_ticks": (2.0, 12.0),
-    "adaptive_threshold_adjustment": (0.02, 0.30),
-    "oscillator_strength": (0.0, 0.35),
-    # M6: neurons pin to this cap and lose all timescale spread. Varying
-    # it changes where (and whether) that saturation lands.
-    "max_intrinsic_timescale": (30.0, 400.0),
+    # structural; near-null so far but cheap and mechanistically central
+    "connection_probability": (0.10, 0.60),
+    "learning_rate": (0.0005, 0.08),
 }
+
+# v1.58 — retired knobs. Each was sampled across its full range for at
+# least one multi-day run and showed |r| < 0.05 with every logged outcome.
+# Kept here so the negative result is not lost and so any can be moved
+# back into _MUTABLE in one edit if a hypothesis warrants it.
+_MUTABLE_RETIRED = {
+    "firing_threshold_inhibitory": (-1.30, -0.30),   # r = -0.007
+    "intrinsic_timescale_default": (5.0, 40.0),      # r = -0.011
+    "agmp_eta": (0.0005, 0.02),                      # r = -0.020
+    "homeostatic_rate": (0.00005, 0.002),            # r = +0.001
+    "target_firing_rate": (0.02, 0.25),              # r = +0.019
+    "weight_homeostasis_target": (0.15, 0.90),       # r = -0.004
+    "weight_homeostasis_rate": (0.002, 0.10),        # r = +0.021
+    "weight_saturation_threshold": (0.35, 0.95),     # r = +0.001
+    "hebbian_ltp_rate": (0.02, 0.30),                # r = -0.007
+    "ltd_neutral_scale": (0.02, 0.30),               # r = +0.013
+    "synapse_formation_prob": (0.002, 0.08),         # r = -0.005
+    "adaptive_threshold_adjustment": (0.02, 0.30),   # r = +0.003
+    "oscillator_strength": (0.0, 0.35),              # r = -0.000
+    "max_intrinsic_timescale": (30.0, 400.0),        # r = -0.009
+    "min_excitatory_fraction": (0.05, 0.25),         # r = +0.007
+}
+
 
 # v1.55 — some NAS knob names are not the attribute the substrate reads.
 # Sampling them was a silent no-op: the value was logged in nas_trials but
@@ -757,15 +758,39 @@ class Engine:
         # m_selection_enabled is false — so a run can be split cleanly into
         # with/without segments.
         self._m_sel = bool(cfg.get("m_selection_enabled", True))
-        self._m_sel_drain = float(cfg.get("m_selection_drain_relief", 0.35))
+        self._m_sel_drain = float(cfg.get("m_selection_drain_relief", 0.60))
         self._m_sel_idle = float(cfg.get("m_selection_idle_bonus", 0.50))
         self._m_sel_mate = float(cfg.get("m_selection_mate_relief", 0.25))
+        # v1.58 — the V1.077 run showed 35% drain relief was nowhere near
+        # enough: starvation still climbed from 25% (least compliant decile)
+        # to 57% (most compliant), so compliance stayed a net liability and
+        # no champion passed half the run. Three changes:
+        #   * relief raised to 0.60;
+        #   * relief concentrated where it decides life or death — scaled up
+        #     as an NxEr approaches starvation rather than paid flat to
+        #     already-full agents;
+        #   * a foraging bonus, because the deficit is on the INCOME side:
+        #     whatever makes a brain compliant also makes it worse at
+        #     finding food, so relief alone only slows the bleed.
+        self._m_sel_hunger = float(cfg.get("m_selection_hunger_focus", 1.5))
+        self._m_sel_forage = float(cfg.get("m_selection_forage_bonus", 0.35))
         # Rescale m_fit against a floor before using it as an advantage.
         # In the V1.076 run m_fit spanned 0.742..0.991 across deciles, so
         # feeding it in raw would hand ~the same relief to everyone and
         # exert almost no selection. Mapping [floor,1] -> [0,1] turns that
         # narrow band into a real gradient (0.74 -> 0.14, 0.99 -> 0.97).
         self._m_sel_floor = float(cfg.get("m_selection_floor", 0.70))
+        # v1.58 — adaptive NAS state (see _nas_sample)
+        self._nas_adaptive = bool(cfg.get("nas_adaptive", True))
+        self._nas_elite_prob = float(cfg.get("nas_elite_prob", 0.70))
+        self._nas_elite_frac = float(cfg.get("nas_elite_frac", 0.25))
+        self._nas_sd_inflate = float(cfg.get("nas_sd_inflate", 1.5))
+        self._nas_min_hist = int(cfg.get("nas_min_history", 60))
+        if not isinstance(getattr(self, "_last_per_brain", None), dict):
+            self._last_per_brain = {}      # v1.58 — W audit source
+        if not isinstance(getattr(self, "_nas_hist", None), deque):
+            self._nas_hist = deque(
+                maxlen=int(cfg.get("nas_history", 600)))
         # v1.34 — science history logger (set by GameServer after init;
         # None means logging disabled). The engine only ever ENQUEUES
         # records (cheap); a background thread does the file I/O.
@@ -1065,12 +1090,54 @@ class Engine:
         return nx
 
     def _nas_sample(self):
-        """v1.51 — draw one architecture from the search space (the same
-        knobs the offline NAS tuned for trial-53). Uniform over each range
-        so explorers cover the space; mating then recombines whatever
-        survives."""
-        return {k: round(random.uniform(lo, hi), 5)
-                for k, (lo, hi) in _MUTABLE.items()}
+        """Draw one architecture from the search space.
+
+        v1.58 — ADAPTIVE. Uniform sampling meant the explorer stream was
+        permanently pulling the population back toward the middle of every
+        range, fighting selection: in the V1.077 run selection drove the
+        inherited refractory period from 6.67 down to 6.15 (r = -0.55)
+        while immigration kept injecting a uniform mean of 7.0, and the
+        compliance optimum is nearer 3. Coverage is what found that effect,
+        so it is not abandoned — instead each explorer is drawn either from
+        a distribution fitted to the best trials seen so far (exploit) or
+        uniformly (explore), with the mix set by nas_elite_prob.
+
+        This is a plain estimation-of-distribution / cross-entropy step:
+        keep the top nas_elite_frac of a rolling history by m_fit, take the
+        per-knob mean and sd, widen by nas_sd_inflate so the distribution
+        cannot collapse, and clip to the declared range.
+        """
+        if (not self._nas_adaptive
+                or len(self._nas_hist) < self._nas_min_hist
+                or random.random() >= self._nas_elite_prob):
+            return {k: round(random.uniform(lo, hi), 5)
+                    for k, (lo, hi) in _MUTABLE.items()}
+        # elite set: best nas_elite_frac of the rolling history
+        hist = sorted(self._nas_hist, key=lambda t: -t[0])
+        k_elite = max(8, int(len(hist) * self._nas_elite_frac))
+        elite = hist[:k_elite]
+        out = {}
+        for k, (lo, hi) in _MUTABLE.items():
+            vals = [a.get(k) for _, a in elite if a.get(k) is not None]
+            if len(vals) < 4:
+                out[k] = round(random.uniform(lo, hi), 5)
+                continue
+            m = sum(vals) / len(vals)
+            var = sum((v - m) ** 2 for v in vals) / len(vals)
+            sd = (var ** 0.5) * self._nas_sd_inflate
+            # never let a dimension collapse: keep >=10% of its range
+            sd = max(sd, 0.10 * (hi - lo))
+            v = random.gauss(m, sd)
+            out[k] = round(lo if v < lo else (hi if v > hi else v), 5)
+        return out
+
+    def _nas_record(self, arch, score):
+        """v1.58 — feed a finished trial back into the sampler's history."""
+        if arch and score is not None:
+            try:
+                self._nas_hist.append((float(score), arch))
+            except (TypeError, ValueError):
+                pass
 
     def _spawn_explorer(self):
         """System-spawned NxEr carrying a sampled architecture, tagged so
@@ -1419,7 +1486,13 @@ class Engine:
             if (rem > 0
                     and (self.tick - nx.last_eat_tick) >= cd):
                 f["remaining"] = rem - 1
-                nx.food += 1.0
+                # v1.58 — compliant brains extract more from the same food
+                # item. This is the income-side counterpart to drain relief:
+                # M-compliance correlated with WORSE foraging (top decile
+                # starved 57% vs 25%), so an efficiency bonus attacks the
+                # actual deficit instead of only slowing the loss.
+                nx.food += (1.0 + self._m_sel_forage * self.m_advantage(nx)
+                            if self._m_sel else 1.0)
                 nx.stats.food_found += 1
                 self.lifetime["total_food_eaten"] += 1
                 if self._learning:        # v1.52 — dopamine reward on food
@@ -1756,6 +1829,7 @@ class Engine:
         m_sel = self._m_sel
         m_drain = self._m_sel_drain
         m_idle = self._m_sel_idle
+        m_hunger = self._m_sel_hunger
         energy_cap = self.bio_energy_cap          # v1.46
         idle_death = self.bio_idle_death_ticks    # v1.46 (0 = off)
         dt = self.dt
@@ -1787,7 +1861,19 @@ class Engine:
             atrophy = 1.0 + bio_ramp * idle
             if atrophy > bio_max:
                 atrophy = bio_max
-            nx.food -= bio_drain * atrophy * (1.0 - m_drain * adv)
+            # v1.58 — weight the relief toward hungry NxErs: an agent at
+            # 10% energy gets the full discount, one at the cap gets a
+            # fraction of it. Same average cost, aimed where it saves lives.
+            if adv > 0.0:
+                _need = 1.0 - (nx.food / energy_cap if energy_cap else 0.0)
+                if _need < 0.0:
+                    _need = 0.0
+                _rel = m_drain * adv * (1.0 + m_hunger * _need) / (1.0 + m_hunger)
+                if _rel > 0.95:
+                    _rel = 0.95
+                nx.food -= bio_drain * atrophy * (1.0 - _rel)
+            else:
+                nx.food -= bio_drain * atrophy
             nx.net.branching_ratio = br
             nx.stats.branching = br
             if nx.food <= 0:
@@ -1895,7 +1981,8 @@ class Engine:
                 # v1.54 — per-NxEr M-claim compliance
                 "m_score": nx.m_score_ema,
                 "m_fit": nx.m_fit_ema,          # v1.55 continuous
-                "m_sel_adv": (round(nx.m_fit_ema, 4)     # v1.57
+                "m_fit_w": nx.m_fit_w,          # v1.58 hard-band weighted
+                "m_sel_adv": (round(self.m_advantage(nx), 4)   # v1.58 fix
                               if (self._m_sel and nx.m_fit_ema is not None)
                               else 0.0),
                 "m_in_band": nx.m_in_band,
@@ -1911,6 +1998,17 @@ class Engine:
         # minority so this is not sampled (one compact line each), giving a
         # clean architecture -> performance table without flooding the log.
         nt = getattr(nx, "nas_trial", None)
+        # v1.58 — close the search loop: every finished explorer trains the
+        # sampler, whether or not history logging is enabled. m_fit is the
+        # target (continuous, tie-free, heritable r=+0.58); fall back to
+        # m_score then fitness_hi if the brain was never scored.
+        if nt is not None:
+            _sc = nx.m_fit_ema
+            if _sc is None:
+                _sc = nx.m_score_ema
+            if _sc is None:
+                _sc = _fitness_hi(nx.stats)
+            self._nas_record(nt.get("arch"), _sc)
         if nt is not None and self.history is not None:
             st = nx.stats
             born = getattr(nx, "born_tick", 0)
@@ -1929,6 +2027,7 @@ class Engine:
                 # v1.54 — does this architecture BUILD an M-compliant brain?
                 "m_score": nx.m_score_ema,
                 "m_fit": nx.m_fit_ema,          # v1.55 continuous
+                "m_fit_w": nx.m_fit_w,          # v1.58 hard-band weighted
                 "m_sel_adv": round(self.m_advantage(nx), 4),   # v1.57
                 "m_score_last": nx.m_score,
                 "m_in_band": nx.m_in_band,
@@ -2083,6 +2182,14 @@ class Engine:
             n = 0
             dev = 0.0
             graded = 0.0
+            # v1.58 — weighted variant. Equal weighting lets a brain score
+            # well while failing the claims that never pass: across runs
+            # M1_E passed 14% and M6 0%, while M2_gate_xlink_std passed
+            # 100%. m_fit_w up-weights the hard bands so selection pushes
+            # where the science actually needs movement. Logged alongside
+            # the equal-weight m_fit, which stays the comparable series.
+            gw = 0.0
+            wsum = 0.0
             for k, v in m.items():
                 band = M_BANDS.get(k)
                 if band is None or v is None:
@@ -2090,9 +2197,12 @@ class Engine:
                 n += 1
                 lo, hi = band
                 w = max(1e-9, hi - lo)
+                bw = _M_HARD.get(k, 1.0)
+                wsum += bw
                 if lo <= v <= hi:
                     hits += 1
                     graded += 1.0
+                    gw += bw
                 else:
                     # how far outside, normalised by the band's width
                     d = ((lo - v) if v < lo else (v - hi)) / w
@@ -2104,6 +2214,7 @@ class Engine:
                     # NxErs tied there exactly, unrankable). This is
                     # continuous and never ties.
                     graded += 1.0 / (1.0 + d)
+                    gw += bw / (1.0 + d)
             if n == 0:
                 continue
             score = hits / n
@@ -2113,6 +2224,7 @@ class Engine:
             nx.m_n_checked = n
             nx.m_deviation = round(dev / n, 4)
             nx.m_fit = round(graded / n, 4)
+            nx.m_fit_w = round(gw / wsum, 4) if wsum > 0 else None
             prev = getattr(nx, "m_score_ema", None)
             nx.m_score_ema = round(
                 score if prev is None else (1 - alpha) * prev + alpha * score,
@@ -2143,6 +2255,7 @@ class Engine:
         except Exception:
             sci, per_brain = None, {}
         # v1.54 — score each NxEr against the M bands from its OWN brain
+        self._last_per_brain = per_brain or {}     # v1.58 — for W audit
         if per_brain:
             try:
                 self._score_m_compliance(per_brain)
@@ -2191,11 +2304,40 @@ class Engine:
                 mean_w = sci["w_sum"] / wn
                 wvar = max(0.0, sci["w_sq"] / wn - mean_w * mean_w)
                 out["W_mean"] = round(mean_w, 5)
-                out["W_mean_abs"] = round(sci["w_abs"] / wn, 5)
+                mean_w_abs = sci["w_abs"] / wn
+                out["W_mean_abs"] = round(mean_w_abs, 5)
                 out["W_std"] = round(math.sqrt(wvar), 5)
                 out["W_pos_frac"] = round(sci["w_pos"] / wn, 4)
                 out["W_n_sampled"] = wn
                 out["W_n_syn_total"] = sci.get("w_total", wn)   # v1.57
+                # v1.58 — SELF-AUDIT. The population figure is by
+                # construction the synapse-weighted mean of the per-brain
+                # figures, so recomputing it FROM per_brain in the same
+                # pass must reproduce it exactly. It has not: per-brain read
+                # 0.0107 against a population 0.3365 (31x), and synapse
+                # count was ruled out as the cause. If W_audit_ratio is ~1
+                # the aggregation is sound and the gap is a property of
+                # which brains get logged; if it is far from 1 there is a
+                # real fault in one of the two paths. Either answer closes
+                # the question that has blocked every W_* conclusion.
+                try:
+                    _num = _den = 0.0
+                    for _m in (getattr(self, "_last_per_brain", None) or {}).values():
+                        _wn = _m.get("W_n")
+                        _wa = _m.get("W_mean_abs")
+                        if _wn and _wa is not None:
+                            _num += _wa * _wn
+                            _den += _wn
+                    if _den > 0:
+                        _recomp = _num / _den
+                        out["W_audit_recomputed"] = round(_recomp, 6)
+                        out["W_audit_ratio"] = round(
+                            mean_w_abs / _recomp, 4) if _recomp else None
+                        out["W_audit_n_brains"] = len(
+                            getattr(self, "_last_per_brain", None) or {})
+                        out["W_audit_n_syn"] = int(_den)
+                except Exception:
+                    pass
             # M8 sphere specialisation — sensory firing fraction minus
             # association firing fraction (sensory should sit higher)
             sa = (sci["sensory_act"] / sci["sensory_n"]
@@ -2705,6 +2847,18 @@ def _fitness(s):
 # v1.53 — ages (in ticks) at which each NxEr's cumulative food_found is
 # sampled, so a within-life foraging curve can be reconstructed at death.
 # Roughly doubling, covering ~1 min to ~2.2 h of lived time at 20 tps.
+# v1.58 — per-band weights for m_fit_w. Bands that persistently fail get
+# more say, so compliance pressure lands where the claims are unmet.
+# Observed pass rates: M2_gate_xlink_std 100%, M8 85%, M5 64%, M1_N 62%,
+# M2_mean_gate 61%, M1_I 43%, M1_E 14%, M6 0%.
+_M_HARD = {
+    "M1_E": 3.0,
+    "M6_acw_heterogeneity": 3.0,
+    "M1_I": 2.0,
+    "M5_branching": 1.5,
+    "M1_N": 1.5,
+}
+
 _AGE_CKPTS = (1250, 2500, 5000, 10000, 20000, 40000, 80000, 160000)
 
 

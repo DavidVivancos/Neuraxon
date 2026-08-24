@@ -1,6 +1,6 @@
 # Multi Neuraxon Game of Life 5 — client / server
 
-**Version mngol5-v1.57 / GoL Server V 1.077** 
+**Version mngol5-v1.58 / GoL Server V 1.078** 
 
 ```
 mngol5/
@@ -62,3 +62,4 @@ server stays responsive and clients keep streaming.
 On a 4-core server, leave it `0` (→ 3 workers): the heavy brain phase
 runs ~3x faster and the world view loads smoothly even at 100% sim CPU.
 One bad tick or a dead worker can never kill the 24/7 loop.
+
