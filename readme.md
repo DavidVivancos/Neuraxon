@@ -37,7 +37,7 @@
 
 **Neuraxon Game of Life 5.1 v196 Research Version Mulit Nxon 2.0 (Based on Neuraxon 2.0)  + First g factor introduced + Evolutionary NAS:** (https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/5)
 
-**Neuraxon Live -> Nxon GoL Server + Client V 1.057 v1077 Including NxonKaleido Brain viz :** ([https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/NxonLive](https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/NxonLive))
+**Neuraxon Live -> Nxon GoL Server + Client V 1.058 v1078 Including NxonKaleido Brain viz :** ([https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/NxonLive](https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/NxonLive))
 
 Play online at: https://nxon.online/
 
