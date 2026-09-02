@@ -25,7 +25,7 @@ from .names import NameAllocator
 from .persistence import Persistence
 
 
-SERVER_VERSION = "GoL Server V 1.078"   # bumped each release
+SERVER_VERSION = "GoL Server V 1.079"   # bumped each release
 
 class GameServer:
     def __init__(self, config_path, state_dir):
@@ -65,6 +65,11 @@ class GameServer:
         except OSError:
             pass
         self._best_saved = self._load_best_index()
+        self._elite = {}                    # v1.59 name -> index record
+        self._elite_n = 40
+        self._elite_min_samples = 5
+        self._elite_reverify = 200000
+        self._elite_cfg_done = False
         # v1.56 — migrate/repair folders written by the v1.48-v1.55 layout
         try:
             self._repair_best_dir()
@@ -679,6 +684,105 @@ class GameServer:
         except OSError:
             pass
 
+    def _elite_dir(self):
+        d = os.path.join(self._best_dir, "elite")
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            pass
+        return d
+
+    def _service_elite(self):
+        """v1.59 — keep a rolling archive of the most M-compliant LIVING
+        brains, indexed and re-verified.
+
+        The V1.078 run saved 3 brains out of 25,431 lifetimes (0.0118%).
+        4,332 of those brains reached m_fit >= 0.99 and NONE were archived,
+        because best/ only tracks RANK_METRICS (food_found, explored,
+        time_lived, ...) and the compliance criterion the last four releases
+        were built around is not among them. The science produced 8,263
+        architecture records and three reusable brains.
+
+        Two design points, both learned the hard way elsewhere:
+          * archive from the LIVING population, not at death — a harvest
+            gated on dying loses exactly the long-lived champions it wants;
+          * record a SECOND reading later (see verify_* columns). A single
+            in-world measurement cannot separate a genuinely compliant brain
+            from a lucky one, and an unreplicated result is not a result.
+        """
+        eng = self.engine
+        cand = []
+        for a in eng.nxers.values():
+            if not a.alive:
+                continue
+            sc = getattr(a, "m_fit_w", None) or getattr(a, "m_fit_ema", None)
+            if sc is None or getattr(a, "m_samples", 0) < self._elite_min_samples:
+                continue
+            cand.append((float(sc), a))
+        if not cand:
+            return
+        cand.sort(key=lambda t: -t[0])
+        keep = cand[:self._elite_n]
+        edir = self._elite_dir()
+        for sc, a in keep:
+            prev = self._elite.get(a.name)
+            if prev is not None:
+                # second reading — does the brain reproduce its score?
+                if (eng.tick - prev["tick"]) >= self._elite_reverify:
+                    prev["verify_score"] = round(sc, 4)
+                    prev["verify_tick"] = eng.tick
+                    prev["verify_m1e"] = (a.m_last or {}).get("M1_E")
+                continue
+            if len(self._elite) >= self._elite_n * 2:
+                continue                      # cap disk churn
+            try:
+                model = eng.export_model_for(a)
+                fn = os.path.join(edir, "%s_t%d.json" % (a.name, eng.tick))
+                with open(fn, "w") as f:
+                    json.dump(model, f)
+            except Exception as e:
+                print("[elite] export failed:", e)
+                continue
+            m = a.m_last or {}
+            self._elite[a.name] = {
+                "name": a.name, "file": os.path.basename(fn),
+                "tick": eng.tick, "score": round(sc, 4),
+                "m_fit": a.m_fit_ema, "m_fit_w": a.m_fit_w,
+                "m_score": a.m_score_ema, "m_samples": a.m_samples,
+                "m_in_band": a.m_in_band, "m_n_checked": a.m_n_checked,
+                "age": eng.tick - getattr(a, "born_tick", 0),
+                "food_found": a.stats.food_found,
+                "offspring": len(a.offspring_ids),
+                "M1_E": m.get("M1_E"), "M1_N": m.get("M1_N"),
+                "M2_gate": m.get("M2_mean_gate"),
+                "M5_branch": m.get("M5_branching"),
+                "M6_acw": m.get("M6_acw_heterogeneity"),
+                "W_mean_abs": m.get("W_mean_abs"), "W_n": m.get("W_n"),
+                "verify_score": None, "verify_tick": None, "verify_m1e": None,
+                "arch": (a.nas_trial or {}).get("arch"),
+            }
+        self._write_elite_index()
+
+    def _write_elite_index(self):
+        """CSV so the archive is queryable without opening 700 KB blobs."""
+        cols = ["name", "file", "tick", "score", "m_fit", "m_fit_w",
+                "m_score", "m_samples", "m_in_band", "m_n_checked", "age",
+                "food_found", "offspring", "M1_E", "M1_N", "M2_gate",
+                "M5_branch", "M6_acw", "W_mean_abs", "W_n",
+                "verify_score", "verify_tick", "verify_m1e"]
+        try:
+            rows = sorted(self._elite.values(),
+                          key=lambda r: -(r.get("score") or 0))
+            with open(os.path.join(self._elite_dir(), "INDEX.csv"), "w") as f:
+                f.write(",".join(cols + ["arch_json"]) + "\n")
+                for r in rows:
+                    vals = ["" if r.get(c) is None else str(r.get(c))
+                            for c in cols]
+                    arch = json.dumps(r.get("arch") or {}).replace('"', "'")
+                    f.write(",".join(vals) + ',"' + arch + '"\n')
+        except OSError:
+            pass
+
     def _brain_store_dir(self):
         d = os.path.join(self._best_dir, "brains")
         try:
@@ -846,6 +950,18 @@ class GameServer:
                                  bool(a and a.alive)))
             except OSError as e:
                 print("[GameServer] best-archive write failed:", e)
+        # v1.59 — harvest the compliance elites from the LIVING population
+        if not self._elite_cfg_done:
+            self._elite_n = int(self.cfg.get("elite_brains", 40))
+            self._elite_min_samples = int(
+                self.cfg.get("elite_min_samples", 5))
+            self._elite_reverify = int(
+                self.cfg.get("elite_reverify_ticks", 200000))
+            self._elite_cfg_done = True
+        try:
+            self._service_elite()
+        except Exception as e:
+            print("[elite] skipped:", e)
         if archived:
             self._save_best_index()
             for m, nm, v, live in archived:

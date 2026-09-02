@@ -388,6 +388,40 @@ _MUTABLE = {
     # structural; near-null so far but cheap and mechanistically central
     "connection_probability": (0.10, 0.60),
     "learning_rate": (0.0005, 0.08),
+    # v1.59 — the excitability family. Every knob that has ever moved an
+    # outcome here (refractory period 58.7% of variance, excitatory
+    # threshold 7.9%) is an EXCITABILITY parameter; these are the rest of
+    # that family and they act directly on M1_E, the claim that keeps
+    # leaving its band. All exist on the substrate and none has ever been
+    # searched.
+    "spontaneous_firing_rate": (0.001, 0.05),
+    "spontaneous_current_magnitude": (0.4, 2.5),
+    "threshold_mod_k": (0.05, 0.8),
+    "sensory_input_gain": (0.3, 2.0),
+    "resting_potential_decay": (0.05, 0.45),
+    "adaptation_rate": (0.01, 0.25),
+    # weight magnitude — reached at last by a HARD cap rather than by the
+    # rate knobs that kept coming back null. An independent search
+    # programme on the same substrate family measures healthy brains at
+    # |w| 0.008-0.020, i.e. using ~2% of the available range, which
+    # matches our per-brain 0.0107 and suggests the ceiling is far too high.
+    "max_weight_magnitude": (0.10, 1.00),
+    "tau_ltp": (5.0, 40.0),
+    "tau_ltd": (10.0, 80.0),
+    "synapse_death_prob": (0.001, 0.05),
+    "branch_threshold": (0.30, 0.95),
+}
+
+# v1.59 — REJECTED by the gene round-trip gate (see tools/test_gene_roundtrip.py).
+# num_hidden_neurons was going to be searched, because smaller networks
+# repeatedly outperform larger ones on this substrate family elsewhere. It
+# does NOT survive save -> load: build a brain with 37 and the reloaded
+# params report 18. A gene that cannot survive serialisation is not a gene —
+# searching it would have produced architecture records describing brains
+# that were never built and archived brains that cannot be re-evaluated for
+# the thing they were selected for. Re-admit only once it round-trips.
+_MUTABLE_REJECTED = {
+    "num_hidden_neurons": (8, 40),      # lost on reload: 37 -> 18
 }
 
 # v1.58 — retired knobs. Each was sampled across its full range for at
@@ -786,6 +820,7 @@ class Engine:
         self._nas_elite_frac = float(cfg.get("nas_elite_frac", 0.25))
         self._nas_sd_inflate = float(cfg.get("nas_sd_inflate", 1.5))
         self._nas_min_hist = int(cfg.get("nas_min_history", 60))
+        self._brain_smpl = int(cfg.get("brain_sample_n", 12))
         if not isinstance(getattr(self, "_last_per_brain", None), dict):
             self._last_per_brain = {}      # v1.58 — W audit source
         if not isinstance(getattr(self, "_nas_hist", None), deque):
@@ -2202,7 +2237,18 @@ class Engine:
                 if lo <= v <= hi:
                     hits += 1
                     graded += 1.0
-                    gw += bw
+                    # v1.59 — CENTRED credit. Flat in-band credit gave
+                    # selection no gradient inside a band, so it was free to
+                    # push a metric to the edge and then through it: in the
+                    # V1.078 run M1_E started in band (0.193) and left it
+                    # (0.133) while m_fit rose, because seven other bands
+                    # outvoted the one being sacrificed. Full credit at the
+                    # midpoint, decaying toward the edges, gives a restoring
+                    # force instead.
+                    mid = 0.5 * (lo + hi)
+                    half = max(1e-9, 0.5 * (hi - lo))
+                    off = abs(v - mid) / half          # 0 centre .. 1 edge
+                    gw += bw * (1.0 - _M_EDGE * off * off)
                 else:
                     # how far outside, normalised by the band's width
                     d = ((lo - v) if v < lo else (v - hi)) / w
@@ -2256,6 +2302,42 @@ class Engine:
             sci, per_brain = None, {}
         # v1.54 — score each NxEr against the M bands from its OWN brain
         self._last_per_brain = per_brain or {}     # v1.58 — for W audit
+        # v1.59 — sample LIVING brains. Every per-brain conclusion in the
+        # last four reports came from brains logged at DEATH, and those
+        # disagree with the live population by 38x on W_mean_abs and 1.7x
+        # on M1_E while the aggregation itself is provably exact (audit
+        # ratio 1.0000 over 12,707 samples). Dying brains are not a
+        # representative sample. These rows are drawn from the living
+        # population at the same instant the population aggregate is
+        # computed, so the two are comparable by construction — and
+        # repeated rows for the same NxEr let brain variance be separated
+        # from measurement noise, which we have never been able to do.
+        try:
+            if per_brain and self.history is not None and self._brain_smpl > 0:
+                ids = list(per_brain.keys())
+                if len(ids) > self._brain_smpl:
+                    ids = random.sample(ids, self._brain_smpl)
+                for _i in ids:
+                    _a = self.nxers.get(_i)
+                    if _a is None or not _a.alive:
+                        continue
+                    _m = per_brain[_i]
+                    self.history.write("brain_samples", {
+                        "tick": self.tick, "id": _i, "name": _a.name,
+                        "age": self.tick - getattr(_a, "born_tick", 0),
+                        "explorer": _a.nas_trial is not None,
+                        "m_fit": _a.m_fit, "m_fit_w": _a.m_fit_w,
+                        "m_score": _a.m_score, "food": round(_a.food, 1),
+                        "M1_E": _m.get("M1_E"), "M1_N": _m.get("M1_N"),
+                        "M2_gate": _m.get("M2_mean_gate"),
+                        "M5_branch": _m.get("M5_branching"),
+                        "M6_acw": _m.get("M6_acw_heterogeneity"),
+                        "W_mean_abs": _m.get("W_mean_abs"),
+                        "W_n": _m.get("W_n"),
+                        "W_n_syn_total": _m.get("W_n_syn_total"),
+                    })
+        except Exception:
+            pass
         if per_brain:
             try:
                 self._score_m_compliance(per_brain)
@@ -2765,15 +2847,20 @@ class Engine:
                 "can_sea": a.can_sea,
                 "stats": a.stats.as_dict(),
                 "params": _params_to_dict(a.params),
-                "parents": a.parents,
-                "offspring_ids": a.offspring_ids,
+                "parents": list(a.parents),
+                "offspring_ids": list(a.offspring_ids),
                 # v1.53 — born_tick was never saved, so every NxEr restored
                 # from a snapshot came back with born_tick = 0 and reported
                 # an age of "the whole world's tick count". That corrupted
                 # lifespan in obituaries/nas_trials after any reboot, and
                 # would have fired every within-life age checkpoint at once.
                 "born_tick": getattr(a, "born_tick", 0),
-                "food_by_age": getattr(a, "food_by_age", {}),
+                # v1.59 — COPY, don't reference. These are mutated by the
+                # engine (food_by_age at the age checkpoints, offspring_ids on
+                # mating) while the snapshot JSON-encodes on a daemon thread,
+                # which lost a save in the V1.078 run with
+                # "snapshot failed: dictionary changed size during iteration".
+                "food_by_age": dict(getattr(a, "food_by_age", {}) or {}),
             }
             if keep_brains:
                 bd = self.pool.export(a.id)
@@ -2851,6 +2938,8 @@ def _fitness(s):
 # more say, so compliance pressure lands where the claims are unmet.
 # Observed pass rates: M2_gate_xlink_std 100%, M8 85%, M5 64%, M1_N 62%,
 # M2_mean_gate 61%, M1_I 43%, M1_E 14%, M6 0%.
+_M_EDGE = 0.5   # v1.59 — credit lost at a band edge vs its centre
+
 _M_HARD = {
     "M1_E": 3.0,
     "M6_acw_heterogeneity": 3.0,
