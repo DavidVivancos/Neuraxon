@@ -1,5 +1,7 @@
 # Neuraxon Game of Life Researh Version<br>
 CHANGE LOG:<br>
+July-Agi 2026:
+Several Releases of Nxon Live = Nxon GoL Server + Client  up to mngol5-v1.59 / GoL Server V 1.079 current Sept 2 2026
 
 June 24th 2026:<br>
 Neuraxon Game of Life — v5.10 / Internal version 196 , Evolutionary NAS improvements
