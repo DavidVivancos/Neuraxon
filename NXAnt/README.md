@@ -1,3 +1,88 @@
+# NxonAnt 1.04 — integer trit-LUT Neuraxon for the NAS
+
+v1.04 keeps the pure-integer trinary CA from v1.03 (exact cross-node
+determinism, no floating point) 
+
+- **`banded`** — the old bounded band-score (saturates; kept for reference).
+- **`unbounded`** (default) — in-band reward **plus a centre-seeking margin
+  term**, so there is always a strictly-better move (nudging a metric toward its
+  band centre). Verified non-saturating: successive walks from each winner climb
+  84,700 → 90,665 → 91,125 with no ceiling.
+- **`external`** — the score is supplied by an external evaluator. Call
+  `NxonScore.register_external_scorer(fn)` with the real NAS fitness and
+  set `OBJECTIVE_MODE='external'`. **This is the mode to use for the 
+  NAS**: the ant colony then optimizes the actual game-performance fitness, which
+  never saturates, so the tree keeps growing as long as brains keep improving.
+
+The chosen mode is recorded in the system file so offline/review reproduce it.
+
+## Release parameters 
+
+| param | value | NAS search range |
+|---|---|---|
+| input neurons | 22 | fixed (12 sensory channels → 22 input units) |
+| output neurons | 7 | fixed (7 motor actions) |
+| hidden neurons | 18 | 12–64 |
+| connection_probability | 0.35 | 0.18–0.45 |
+| sphere_topology | chc6 | 3–18 sphere variants |
+| cross_sphere_coupling κ | 1.3 | 0.6–2.2 |
+| cryst_capacity λc | 1.5 | 0.8–4.0 |
+| free_energy_beta βF | 1.2 | 0.6–2.0 |
+| refractory_period_ticks | 4 | 4–16 |
+| learning_rate | 0.018 | 0.004–0.060 |
+
+plus the ~60-parameter search space (planning depth, intrinsic
+/ novelty / progress reward shaping, fovea, dopamine, etc.). Population and walk
+sizing are your call; the ant is cheap (one integer sim ≈ 1 ms, a 100–120-step
+walk ≈ 0.15 s), so a large population fits the 1-second budget with room to spare.
+
+## Files
+
+| File | Role |
+|---|---|
+| `NxonGenome.py` | trit-LUT genome, epoch from digest **or task file** , value-changing mutation , `K12`, ROOT (blank brain). |
+| `NxonTrit.py` | integer trit-CA `run_sim` + `mining_walk` with the corrected anti-attractor rule . |
+| `NxonScore.py` | integer band-score + **pluggable objective** (banded / unbounded / external). |
+| `NxonNode.py` | consensus verifier: re-run the walk, re-score, validity rules, registry, self-contained system file, multi-node network demo, `--task` / `--objective`. |
+| `Miner_nxon.py` | miner: pick parent, `base_L_K` nonce, run the walk, broadcast + deposit; honest / spam. |
+| `NxonOverseerOffline.py` | rebuild LUTs from derivations, Pareto re-rank, MultiNeuraxon2 assembly, curriculum tightening. |
+| `NxonReview1.py` | independent reproducibility check. |
+| `example_task.json` | a minimal task file (N=40, ticks=100) for the `--task` path. |
+
+## Run it
+
+```bash
+# Digest-wired, unbounded objective (colony never saturates):
+python3 NxonNode.py --nodes 3 --miners 6 --ticks 12 --walk-steps 120
+
+# Task-wired (Q3): wiring/placement/drive from a task file:
+python3 NxonNode.py --nodes 3 --miners 5 --ticks 10 --walk-steps 100 --task example_task.json
+
+# Force the old bounded objective to SEE the stall (Q5, for contrast):
+python3 NxonNode.py --objective banded ...
+
+# Offline curation + independent reproducibility check on the agreed system file:
+python3 NxonOverseerOffline.py nxon104_out/system_file_node_00.json
+python3 NxonReview1.py         nxon104_out/system_file_node_00.json
+
+# Bench the integer sim + walk:
+python3 NxonTrit.py 48 128 120
+```
+
+Both the digest-wired and task-wired runs reach full multi-node agreement with
+byte-identical system files, and both round-trip through the reviewer with
+**VERDICT PASS — 0 mismatches**.
+
+
+
+## Still stubbed for production
+`K12` is SHA3-256 (swap in real KangarooTwelve; call sites unchanged); the
+node/registry are in-process (commit/registration become signed transactions).
+The integer sim already removes the one hard blocker — cross-node determinism is
+automatic, not a deployment requirement.
+
+
+
 # NxonAnt 1.03 — Integer trit-LUT Neuraxon (node-consensus)
 
 v1.03 replaces the floating-point chc6 brain with a **pure-integer trinary
@@ -76,5 +161,6 @@ The productive-tick age clock advances once per tick that accepts ≥ 1 solution
   (integer).
 - No training data / no output comparison → we measure neuron-state dynamics per
   phase, never compare to an expected output.
+
 
 

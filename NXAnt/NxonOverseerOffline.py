@@ -1,4 +1,4 @@
-# Neuraxon Ant Colony 1.03 internal version 10
+# Neuraxon Ant Colony 1.04 internal version 11
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -43,7 +43,12 @@ def load(path):
 def rebuild_luts(data):
     """Replay the walk from ROOT to reconstruct every solution's LUT. Returns
     {hash: lut}, the epoch, and a mismatch count (recorded vs recomputed score)."""
-    epoch = G.build_epoch(data["salted_digest"], N=data["N"], ticks=data["ticks"])
+    if data.get("objective_mode"):
+        NxonScore.OBJECTIVE_MODE = data["objective_mode"]
+    if data.get("task"):
+        epoch = G.build_epoch(None, task=data["task"])
+    else:
+        epoch = G.build_epoch(data["salted_digest"], N=data["N"], ticks=data["ticks"])
     walk_steps = data["walk_steps"]
     luts = {data["root"]: G.root_lut(epoch)}
     # Solutions must be rebuilt parent-before-child; sort by accept order.
@@ -144,7 +149,7 @@ def main():
     data = load(path)
 
     print("=" * 76)
-    print("NxonAnt 1.03 — OFFLINE OVERSEER (curation of the agreed population)")
+    print("NxonAnt 1.04 — OFFLINE OVERSEER (curation of the agreed population)")
     print("=" * 76)
     print("System file:        {}".format(path))
     print("Recorded solutions: {}".format(len(data["solutions"])))

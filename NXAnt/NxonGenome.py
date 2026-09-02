@@ -1,4 +1,4 @@
-# Neuraxon Ant Colony 1.03 internal version 10
+# Neuraxon Ant Colony 1.04 internal version 11
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -103,9 +103,23 @@ def k12_int(*parts) -> int:
 # =============================================================================
 
 def build_epoch(salted_digest, N=48, ticks=128,
-                warmup=32, driven=48, silence=24, transfer=24):
+                warmup=32, driven=48, silence=24, transfer=24,
+                task=None):
     """Everything a node needs to run the sim, deterministically derived from the
-    public salted spectrum digest so every node builds the identical epoch."""
+    public salted spectrum digest so every node builds the identical epoch.
+
+    v1.04 (Q3): if `task` is provided (a dict, typically loaded from a task
+    file via load_task_file), the WIRING, PLACEMENT, DRIVE TABLE and PHASE MAP
+    come from the task file instead of being generated from the digest. This
+    matches the new algorithm, where a task file fixes the neuron connections
+    for the whole network. The task file is itself a public, agreed artifact
+    (its own hash pins it), so every node still builds the identical epoch. When
+    `task` is None, the structure is derived from the digest as before (handy for
+    tests / standalone runs).
+    """
+    if task is not None:
+        return _epoch_from_task(task)
+
     if warmup + driven + silence + transfer != ticks:
         raise ValueError("phase lengths must sum to ticks")
     if N < N_INPUT + N_OUTPUT + 1:
@@ -173,6 +187,110 @@ def build_epoch(salted_digest, N=48, ticks=128,
         "phase_ticks": {WARMUP: warmup, DRIVEN: driven,
                         SILENCE: silence, TRANSFER: transfer},
         "salted_digest": str(salted_digest),
+        "task_hash": None,
+        "task": None,
+    }
+
+
+def load_task_file(path):
+    """Load a task file (JSON) describing the network for the epoch.
+
+    Expected schema (all integer, all public):
+      {
+        "N": int, "ticks": int,
+        "n_input": int, "n_output": int,          # optional; default 10 / 7
+        "input_ids":  [int, ...],                 # placement
+        "output_ids": [int, ...],
+        "sourceNeuron": [[a,b,c], ...]  length N  # wiring: 3 sources per neuron
+                                                  #   (rows for input neurons ignored)
+        "phase_of": ["WARMUP"|"DRIVEN"|"SILENCE"|"TRANSFER", ...] length ticks
+        "T": [[trit x n_input], ...] length ticks # drive per tick
+      }
+    Any of input_ids/output_ids/phase_of/T may be omitted; sane defaults are
+    filled so a minimal task file only needs N, ticks and sourceNeuron.
+    """
+    import json
+    with open(path) as f:
+        task = json.load(f)
+    task["_task_path"] = path
+    return task
+
+
+def _epoch_from_task(task):
+    import json
+    N = int(task["N"])
+    ticks = int(task["ticks"])
+    n_in = int(task.get("n_input", N_INPUT))
+    n_out = int(task.get("n_output", N_OUTPUT))
+
+    if "input_ids" in task:
+        input_ids = list(task["input_ids"])
+    else:
+        input_ids = list(range(n_in))
+    if "output_ids" in task:
+        output_ids = list(task["output_ids"])
+    else:
+        output_ids = list(range(n_in, n_in + n_out))
+    input_set = set(input_ids)
+    output_set = set(output_ids)
+    hidden_ids = [i for i in range(N) if i not in input_set and i not in output_set]
+    noninput_ids = hidden_ids + output_ids
+
+    wiring = task["sourceNeuron"]
+    if len(wiring) != N:
+        raise ValueError("sourceNeuron must have N rows")
+    src0 = [0] * N
+    src1 = [0] * N
+    src2 = [0] * N
+    for n in noninput_ids:
+        a, b, c = wiring[n][0], wiring[n][1], wiring[n][2]
+        src0[n], src1[n], src2[n] = int(a), int(b), int(c)
+
+    if "phase_of" in task:
+        phase_of = list(task["phase_of"])
+    else:
+        w = ticks * 32 // 128; d = ticks * 48 // 128; s = ticks * 24 // 128
+        tr = ticks - w - d - s
+        phase_of = ([WARMUP] * w + [DRIVEN] * d + [SILENCE] * s + [TRANSFER] * tr)
+    pt = {WARMUP: 0, DRIVEN: 0, SILENCE: 0, TRANSFER: 0}
+    for ph in phase_of:
+        pt[ph] += 1
+
+    if "T" in task:
+        T = [list(row) for row in task["T"]]
+    else:
+        T = []
+        for t in range(ticks):
+            ph = phase_of[t]
+            row = [NEUTRAL] * n_in
+            if ph == DRIVEN:
+                base = (t // 4) % 2
+                for k in range(n_in):
+                    row[k] = POS if ((k + base) % 2 == 0) else NEG
+            elif ph == TRANSFER:
+                for k in range(n_in):
+                    row[k] = POS if (((k * (t % 3)) % 3) == 0) else NEUTRAL
+            T.append(row)
+
+    # Hash the wiring-defining content so the task file is pinned in the system
+    # file (every node must use the identical task).
+    canon = json.dumps({"N": N, "ticks": ticks, "input_ids": input_ids,
+                        "output_ids": output_ids, "sourceNeuron": wiring,
+                        "phase_of": phase_of, "T": T},
+                       sort_keys=True, separators=(",", ":"))
+    task_hash = hashlib.sha256(canon.encode()).hexdigest()[:16]
+
+    return {
+        "N": N, "ticks": ticks,
+        "input_ids": input_ids, "output_ids": output_ids,
+        "hidden_ids": hidden_ids, "noninput_ids": noninput_ids,
+        "src0": src0, "src1": src1, "src2": src2,
+        "phase_of": phase_of, "T": T, "phase_ticks": pt,
+        "salted_digest": "task:" + task_hash,
+        "task_hash": task_hash,
+        "task": {"N": N, "ticks": ticks, "n_input": n_in, "n_output": n_out,
+                 "input_ids": input_ids, "output_ids": output_ids,
+                 "sourceNeuron": wiring, "phase_of": phase_of, "T": T},
     }
 
 
@@ -211,14 +329,22 @@ def copy_lut(lut):
 
 
 def mutate_lines(lut, rng, L, noninput_ids):
-    """Flip L LUT lines in place; return an undo list so the walk can revert."""
+    """Flip L LUT lines to a DIFFERENT trit; return an undo list.
+
+    v1.04 (Q4): a mutation is guaranteed to CHANGE the value. The old code drew a
+    uniform trit, so ~1/3 of the time it "mutated" a line to its current value —
+    a wasted step. Here we draw uniformly from the TWO other trits, so every
+    mutation is a real change (matching bpp9000). With trit v in {0,1,2}, the two
+    alternatives are (v+1)%3 and (v+2)%3; pick one by a single bit.
+    """
     undo = []
     m = len(noninput_ids)
     for _ in range(L):
         n = noninput_ids[rng.below(m)]
         line = rng.below(N_LINES)
         old = lut[n][line]
-        new = rng.below(3)
+        # Guaranteed change: choose between the two other trit values.
+        new = (old + 1 + rng.below(2)) % 3
         lut[n][line] = new
         undo.append((n, line, old))
     return undo

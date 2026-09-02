@@ -1,4 +1,4 @@
-# Neuraxon Ant Colony 1.03 internal version 10
+# Neuraxon Ant Colony 1.04 internal version 11
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -59,6 +59,7 @@ class Registry:
         self.children = defaultdict(list)
         self.age_clock = 0
         self.root_hash = None
+        self.walk_steps = WALK_STEPS         # actual value set by the owning Node
 
     def seed_root(self, lut):
         h = G.hash_lut(lut, self.epoch)
@@ -111,10 +112,13 @@ class Registry:
                          "submitter": r["submitter"],
                          "pubkey": r["pubkey"], "nonce": r["nonce"]})
         payload = {
-            "version": "1.03-trit-consensus",
+            "version": "1.04-trit-consensus",
             "salted_digest": self.epoch["salted_digest"],
             "N": self.epoch["N"], "ticks": self.epoch["ticks"],
-            "walk_steps": WALK_STEPS,
+            "walk_steps": self.walk_steps,
+            "objective_mode": NxonScore.OBJECTIVE_MODE,
+            "task_hash": self.epoch.get("task_hash"),
+            "task": self.epoch.get("task"),          # embedded when wiring is task-based
             "age_clock": self.age_clock, "root": self.root_hash,
             "solutions": rows,
         }
@@ -133,6 +137,7 @@ class Node:
         self.id = node_id
         self.epoch = epoch
         self.registry = Registry(epoch)
+        self.registry.walk_steps = walk_steps
         self.walk_steps = walk_steps
         self.ant_budget = ant_budget
 
@@ -228,21 +233,33 @@ class DepositLedger:
 
 def run_network(num_nodes=3, num_miners=6, ticks=15, ant_budget=1.0,
                 walk_steps=WALK_STEPS, seed=42, N=48, sim_ticks=128,
-                output_dir="nxon103_out",
-                salted_digest="salted_spectrum_digest_PUBLIC_v1"):
+                output_dir="nxon104_out",
+                salted_digest="salted_spectrum_digest_PUBLIC_v1",
+                task_path=None):
     import Miner_nxon as MN
     os.makedirs(output_dir, exist_ok=True)
 
-    epoch = G.build_epoch(salted_digest, N=N, ticks=sim_ticks)
+    if task_path is not None:
+        task = G.load_task_file(task_path)
+        epoch = G.build_epoch(salted_digest, task=task)
+        N = epoch["N"]
+        sim_ticks = epoch["ticks"]
+    else:
+        epoch = G.build_epoch(salted_digest, N=N, ticks=sim_ticks)
 
     print("=" * 76)
-    print("NxonAnt 1.03 — INTEGER trit-LUT Neuraxon, NODE-CONSENSUS NETWORK")
+    print("NxonAnt 1.04 — INTEGER trit-LUT Neuraxon, NODE-CONSENSUS NETWORK")
     print("=" * 76)
     print("Pure-integer trinary CA (no floats) -> exact cross-node determinism.")
     print("Every node re-runs the anti-attractor WALK, recomputes the integer")
     print("score, applies the validity rules, and must agree. No secret.")
     print("Nodes: {}  Miners: {}  Ticks: {}  Walk: {} steps  Sim: N={} ticks={}".format(
         num_nodes, num_miners, ticks, walk_steps, N, sim_ticks))
+    print("Objective: {}  (unbounded => colony never saturates; best score wins)".format(
+        NxonScore.OBJECTIVE_MODE))
+    print("Wiring: {}".format(
+        "task file (hash {})".format(epoch["task_hash"]) if epoch.get("task_hash")
+        else "derived from salted digest"))
     print()
 
     root = G.root_lut(epoch)
@@ -342,7 +359,7 @@ def run_network(num_nodes=3, num_miners=6, ticks=15, ant_budget=1.0,
 
 def main():
     p = argparse.ArgumentParser(
-        description="NxonAnt 1.03 — integer trit-LUT node-consensus network")
+        description="NxonAnt 1.04 — integer trit-LUT node-consensus network")
     p.add_argument("--nodes", type=int, default=3)
     p.add_argument("--miners", type=int, default=6)
     p.add_argument("--ticks", type=int, default=15)
@@ -351,12 +368,20 @@ def main():
     p.add_argument("--neurons", type=int, default=48)
     p.add_argument("--sim-ticks", type=int, default=128)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--output-dir", type=str, default="nxon103_out")
+    p.add_argument("--task", type=str, default=None,
+                   help="path to a task file (JSON) fixing wiring/placement/"
+                        "drive; overrides --neurons/--sim-ticks (Q3).")
+    p.add_argument("--objective", type=str, default=None,
+                   choices=["banded", "unbounded", "external"],
+                   help="override the scoring objective (default unbounded).")
+    p.add_argument("--output-dir", type=str, default="nxon104_out")
     args = p.parse_args()
+    if args.objective:
+        NxonScore.OBJECTIVE_MODE = args.objective
     run_network(num_nodes=args.nodes, num_miners=args.miners, ticks=args.ticks,
                 walk_steps=args.walk_steps, ant_budget=args.ant_budget,
                 seed=args.seed, N=args.neurons, sim_ticks=args.sim_ticks,
-                output_dir=args.output_dir)
+                output_dir=args.output_dir, task_path=args.task)
 
 
 if __name__ == "__main__":

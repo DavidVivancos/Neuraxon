@@ -1,4 +1,4 @@
-# Neuraxon Ant Colony 1.03 internal version 10
+# Neuraxon Ant Colony 1.04 internal version 11
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/

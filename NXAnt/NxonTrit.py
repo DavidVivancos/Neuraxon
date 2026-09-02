@@ -1,4 +1,4 @@
-# Neuraxon Ant Colony 1.03 internal version 10
+# Neuraxon Ant Colony 1.04 internal version 11
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -147,7 +147,24 @@ def score_lut(lut, epoch):
 
 def mining_walk(parent_lut, pubkey, nonce, epoch, walk_steps, deadline=None):
     """Anti-attractor walk from parent_lut. Returns (best_lut, best_score,
-    best_metrics, sims_done). Deterministic from K12(pubkey||nonce)."""
+    best_metrics, sims_done). Deterministic from K12(pubkey||nonce).
+
+    v1.04 (Q2): the accept rule now matches bpp9000 exactly.
+      - First K steps  : accept ONLY IF the move is WORSE-OR-EQUAL (r <= cur).
+                         This deliberately walks DOWN/sideways out of the current
+                         basin — the anti-attractor escape. (v1.03 wrongly used
+                         accept=True, which also kept improving moves during the
+                         escape and so didn't reliably leave the basin.)
+      - After K steps  : accept ONLY IF STRICTLY BETTER (r > cur) — pure climb.
+    The global best LUT/score seen anywhere along the walk is what we return, so
+    the downhill escape never costs us the best genome found.
+
+    Note on "is equal accepted after K": bpp9000 climbs on strictly-better. Equal
+    moves after K are rejected here (ACCEPT_EQUAL_AFTER_K=False) so the walk can't
+    drift laterally across an equal-score plateau and burn the budget; flip the
+    flag if you want plateau-walking.
+    """
+    ACCEPT_EQUAL_AFTER_K = False
     base, L, K = G.parse_nonce(nonce)
     rng = G.HashRng(G.k12(b"walk", str(pubkey), str(nonce)))
     lut = G.copy_lut(parent_lut)
@@ -167,17 +184,18 @@ def mining_walk(parent_lut, pubkey, nonce, epoch, walk_steps, deadline=None):
         r = NxonScore.consensus_score_int(m)
         sims += 1
         if s < K:
-            accept = True                 # allow worse — escape attractors
+            accept = (r <= cur)                       # escape: worse-or-equal only
         else:
-            accept = (r > cur)            # better only — climb
+            accept = (r > cur) or (ACCEPT_EQUAL_AFTER_K and r == cur)  # climb
         if accept:
             cur = r
+            cur_metrics = m
         else:
             G.apply_undo(lut, undo)
         if cur > best:
             best = cur
             best_lut = G.copy_lut(lut)
-            best_metrics = m if accept else run_sim(best_lut, epoch)
+            best_metrics = cur_metrics
     return best_lut, best, best_metrics, sims
 
 

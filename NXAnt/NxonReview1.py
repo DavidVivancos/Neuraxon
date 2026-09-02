@@ -1,4 +1,4 @@
-# Neuraxon Ant Colony 1.03 internal version 10
+# Neuraxon Ant Colony 1.04 internal version 11
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -35,11 +35,16 @@ def main():
     with open(path) as f:
         data = json.load(f)
 
-    epoch = G.build_epoch(data["salted_digest"], N=data["N"], ticks=data["ticks"])
+    if data.get("objective_mode"):
+        NxonScore.OBJECTIVE_MODE = data["objective_mode"]
+    if data.get("task"):
+        epoch = G.build_epoch(None, task=data["task"])
+    else:
+        epoch = G.build_epoch(data["salted_digest"], N=data["N"], ticks=data["ticks"])
     walk_steps = data["walk_steps"]
 
     print("=" * 74)
-    print("NXON REVIEW 1.03 (trit) — Independent Reproducibility Check")
+    print("NXON REVIEW 1.04 (trit) — Independent Reproducibility Check")
     print("=" * 74)
     print("System file:  {}".format(path))
     print("Salted digest:{}".format(data["salted_digest"]))

@@ -1,4 +1,4 @@
-# Neuraxon Ant Colony 1.03 internal version 10
+# Neuraxon Ant Colony 1.04 internal version 11
 # Based on the Papers:
 #   "Neuraxon V2.0: A New Neural Growth & Computation Blueprint" by David Vivancos & Jose Sanchez
 #   https://vivancos.com/ & https://josesanchezgarcia.com/ for Qubic Science https://qubic.org/
@@ -55,15 +55,38 @@ def _to_fp_bands():
 TARGET_BANDS = _to_fp_bands()
 
 
-def consensus_score_int(metrics):
-    """THE consensus scalar. Pure-integer, NON-NEGATIVE, higher = healthier,
-    0 = floor (so ROOT can start at 0 and children climb above it).
+# ============================================================================
+# OBJECTIVE MODE  (v1.04, Q1 + Q5)
+# ============================================================================
+# "banded"    — bounded band-score. SATURATES at a ceiling once every metric is
+#               centred; fine for a self-contained trit demo, but the colony
+#               STALLS at the ceiling because no child can then strictly beat its
+#               parent (exactly the Q5 problem).
+# "unbounded" — keeps climbing past the band ceiling. On top of the in-band
+#               reward it adds a small MARGIN term (how deep inside each band the
+#               metric sits) so there is always a strictly-better move. Mirrors
+#               the real ARC NAS fitness, which is unbounded ("best score wins").
+# "external"  — the score is supplied by an external evaluator (the real
+#               ARC-AGI3 NAS fitness). See register_external_scorer().
+OBJECTIVE_MODE = "unbounded"
 
-    `metrics` values are FIXED-POINT integers (value x METRIC_SCALE) produced by
-    the trit sim. Each metric rewards up to PENALTY_RESOLUTION x weight when
-    centred in its band, decaying to 0 one band-width outside. Every node
-    computes this identically from the same metrics.
-    """
+# Weight of the margin term in "unbounded" mode. Small so band membership still
+# dominates ranking, but nonzero so gradient never disappears past the ceiling.
+MARGIN_WEIGHT = 1
+
+_EXTERNAL_SCORER = None
+
+
+def register_external_scorer(fn):
+    """Plug in the real ARC-AGI3 NAS fitness as the consensus scalar. `fn` takes
+    the fixed-point metrics dict and returns an INTEGER (higher = better). Use
+    with OBJECTIVE_MODE='external'."""
+    global _EXTERNAL_SCORER
+    _EXTERNAL_SCORER = fn
+
+
+def _band_reward(metrics):
+    """In-band reward (bounded part). 0 = floor; ceiling when all centred."""
     total = 0
     for key, (lo, hi) in TARGET_BANDS.items():
         if key not in metrics:
@@ -79,12 +102,44 @@ def consensus_score_int(metrics):
             dist = v - hi
         else:
             dist = 0
-        if dist >= width:
-            reward = 0
-        else:
-            reward = (PENALTY_RESOLUTION * (width - dist)) // width
+        reward = 0 if dist >= width else (PENALTY_RESOLUTION * (width - dist)) // width
         total += w * reward
     return total
+
+
+def _margin_reward(metrics):
+    """Centre-seeking term: how deep INSIDE each band a metric sits (0 at edge,
+    max at exact centre). A walk can always nudge toward centres, so this term
+    keeps a strictly-better move available past the band ceiling. Pure integer."""
+    total = 0
+    for key, (lo, hi) in TARGET_BANDS.items():
+        if key not in metrics:
+            continue
+        w = METRIC_WEIGHTS_INT.get(key, 10)
+        v = metrics[key]
+        if v < lo or v > hi:
+            continue
+        centre = (lo + hi) // 2
+        half = max((hi - lo) // 2, 1)
+        depth = half - abs(v - centre)
+        total += w * ((PENALTY_RESOLUTION * depth) // half)
+    return total
+
+
+def consensus_score_int(metrics):
+    """THE consensus scalar (integer, higher = healthier, 0 = floor).
+
+    `metrics` values are FIXED-POINT integers (value x METRIC_SCALE) from the
+    trit sim. Mode-dependent (OBJECTIVE_MODE). In 'unbounded'/'external' there is
+    no saturating ceiling, which is what lets the ant colony keep growing (Q5).
+    Every node computes this identically from the same metrics.
+    """
+    if OBJECTIVE_MODE == "external" and _EXTERNAL_SCORER is not None:
+        return int(_EXTERNAL_SCORER(metrics))
+    band = _band_reward(metrics)
+    if OBJECTIVE_MODE == "banded":
+        return band
+    return band + MARGIN_WEIGHT * _margin_reward(metrics)
 
 
 def band_satisfaction(metrics):
