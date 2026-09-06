@@ -16,7 +16,7 @@
 **A New Neural Growth & Computation Blueprint By Qubic Open Science David Vivancos & José Sanchez**  
 *Continuous-time • Trinary-state • Multi-timescale • Neuromodulated • Structurally plastic*
 
-**Full theoretical foundation:** [Neuraxon v2.0 Paper (ResearchGate)](https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint)
+**Full theoretical foundation:** [Neuraxon v2.0 Paper (ResearchGate)](https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint) preprint soon at IEEE Xplore
 
 **Core implementation:** [`neuraxon2.py`](https://github.com/DavidVivancos/Neuraxon/blob/main/neuraxon2.py) (pure Python, no external dependencies, backward-compatible with v1).
 
