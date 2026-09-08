@@ -1,6 +1,6 @@
 # Multi Neuraxon Game of Life 5 — client / server
 
-**Version mngol5-v1.59 / GoL Server V 1.079** — harvest the brains, measure the living, hold the band. 
+**Version mngol5-v1.60 / GoL Server V 1.080** 
 
 A 24/7 server that runs one Neuraxon Game-of-Life world forever and
 streams it to many web clients. Built on the proven **v184** neural

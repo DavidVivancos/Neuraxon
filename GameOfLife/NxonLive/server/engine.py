@@ -2248,7 +2248,8 @@ class Engine:
                     mid = 0.5 * (lo + hi)
                     half = max(1e-9, 0.5 * (hi - lo))
                     off = abs(v - mid) / half          # 0 centre .. 1 edge
-                    gw += bw * (1.0 - _M_EDGE * off * off)
+                    _cred = 1.0 - _M_EDGE * off * off
+                    gw += bw * (_cred if _cred > -1.0 else -1.0)
                 else:
                     # how far outside, normalised by the band's width
                     d = ((lo - v) if v < lo else (v - hi)) / w
@@ -2417,6 +2418,38 @@ class Engine:
                             mean_w_abs / _recomp, 4) if _recomp else None
                         out["W_audit_n_brains"] = len(
                             getattr(self, "_last_per_brain", None) or {})
+                        # v1.60 — THE DECIDING DIAGNOSTIC. The audit says the
+                        # aggregate is exactly the weighted mean of per_brain
+                        # (ratio 1.0000 over 8,573 samples), yet a random
+                        # sample of LIVING brains reads W_mean_abs 0.0125
+                        # against the aggregate's 0.263 (21x) and M1_E 0.219
+                        # (in band) against 0.171. Not death-sampling, not a
+                        # subpopulation, not the weighting. The remaining
+                        # hypothesis: per_brain is keyed by worker-pool brain
+                        # id and still contains brains whose NxEr has died —
+                        # long-lived ones, carrying the largest accumulated
+                        # weights — which the living sample skips. Recompute
+                        # over ONLY the live ids: if the two differ, four
+                        # runs of population M-metrics are contaminated.
+                        _ln = _ld = 0.0
+                        _nlive = 0
+                        for _bid, _m2 in (
+                                getattr(self, "_last_per_brain", None) or {}
+                        ).items():
+                            _a2 = self.nxers.get(_bid)
+                            if _a2 is None or not _a2.alive:
+                                continue
+                            _nlive += 1
+                            _w2 = _m2.get("W_n")
+                            _v2 = _m2.get("W_mean_abs")
+                            if _w2 and _v2 is not None:
+                                _ln += _v2 * _w2
+                                _ld += _w2
+                        out["W_audit_n_live"] = _nlive
+                        out["W_audit_n_stale"] = (
+                            out["W_audit_n_brains"] - _nlive)
+                        if _ld > 0:
+                            out["W_audit_live_only"] = round(_ln / _ld, 6)
                         out["W_audit_n_syn"] = int(_den)
                 except Exception:
                     pass
@@ -2938,7 +2971,11 @@ def _fitness(s):
 # more say, so compliance pressure lands where the claims are unmet.
 # Observed pass rates: M2_gate_xlink_std 100%, M8 85%, M5 64%, M1_N 62%,
 # M2_mean_gate 61%, M1_I 43%, M1_E 14%, M6 0%.
-_M_EDGE = 0.5   # v1.59 — credit lost at a band edge vs its centre
+# v1.60 — 0.5 was an order of magnitude too weak: a brain sitting on a band
+# edge lost half of ONE band's credit out of nineteen, so M1_E kept leaking
+# out (r = -0.888) while the refractory period was still selected upward
+# (r = +0.444). At 2.5 the edge costs more than the other bands can repay.
+_M_EDGE = 2.5
 
 _M_HARD = {
     "M1_E": 3.0,

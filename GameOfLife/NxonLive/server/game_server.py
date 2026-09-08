@@ -25,7 +25,7 @@ from .names import NameAllocator
 from .persistence import Persistence
 
 
-SERVER_VERSION = "GoL Server V 1.079"   # bumped each release
+SERVER_VERSION = "GoL Server V 1.080"   # bumped each release
 
 class GameServer:
     def __init__(self, config_path, state_dir):
@@ -723,18 +723,42 @@ class GameServer:
             return
         cand.sort(key=lambda t: -t[0])
         keep = cand[:self._elite_n]
+        # v1.60 — a second archive keyed on AGE. Three releases of selection
+        # have never once saved a long-lived brain: max lifespan sits at
+        # 34-48% of a run and the compliance archive skims mid-pack ages.
+        # The oldest brains are the ones we most want to study and have
+        # never kept.
+        seen = set(id(a) for _, a in keep)
+        for _age, a in sorted(
+                ((eng.tick - getattr(a, "born_tick", 0), a) for _, a in cand),
+                key=lambda t: -t[0])[:max(4, self._elite_n // 4)]:
+            if id(a) not in seen:
+                keep.append((float(getattr(a, "m_fit_w", 0.0) or 0.0), a))
         edir = self._elite_dir()
         for sc, a in keep:
             prev = self._elite.get(a.name)
             if prev is not None:
-                # second reading — does the brain reproduce its score?
-                if (eng.tick - prev["tick"]) >= self._elite_reverify:
+                # v1.60 — second reading. v1.59 produced 0 of 80 because it
+                # only ran for entries still in the live top-N, and those
+                # brains were long dead. Now it fires for any archived entry
+                # whose NxEr is still alive and old enough, whatever its rank.
+                if (prev.get("verify_score") is None
+                        and (eng.tick - prev["tick"]) >= self._elite_reverify):
                     prev["verify_score"] = round(sc, 4)
                     prev["verify_tick"] = eng.tick
                     prev["verify_m1e"] = (a.m_last or {}).get("M1_E")
+                    prev["verify_age"] = eng.tick - getattr(a, "born_tick", 0)
                 continue
-            if len(self._elite) >= self._elite_n * 2:
-                continue                      # cap disk churn
+            # v1.60 — EVICT the weakest instead of refusing new entries.
+            # v1.59 filled with the first 80 brains that cleared the sample
+            # threshold and then went blind: every entry came from ticks
+            # 1,570-3,482 of a 1,761,204-tick run, i.e. the first 0.2%.
+            if len(self._elite) >= self._elite_n:
+                worst = min(self._elite.values(),
+                            key=lambda r: r.get("score") or 0.0)
+                if (worst.get("score") or 0.0) >= sc:
+                    continue                  # nothing here beats the floor
+                self._drop_elite(worst)
             try:
                 model = eng.export_model_for(a)
                 fn = os.path.join(edir, "%s_t%d.json" % (a.name, eng.tick))
@@ -758,10 +782,19 @@ class GameServer:
                 "M5_branch": m.get("M5_branching"),
                 "M6_acw": m.get("M6_acw_heterogeneity"),
                 "W_mean_abs": m.get("W_mean_abs"), "W_n": m.get("W_n"),
-                "verify_score": None, "verify_tick": None, "verify_m1e": None,
+                "verify_score": None, "verify_tick": None,
+                "verify_m1e": None, "verify_age": None,
                 "arch": (a.nas_trial or {}).get("arch"),
             }
         self._write_elite_index()
+
+    def _drop_elite(self, rec):
+        """v1.60 — remove an evicted entry and its blob."""
+        try:
+            os.remove(os.path.join(self._elite_dir(), rec["file"]))
+        except OSError:
+            pass
+        self._elite.pop(rec.get("name"), None)
 
     def _write_elite_index(self):
         """CSV so the archive is queryable without opening 700 KB blobs."""
@@ -769,7 +802,7 @@ class GameServer:
                 "m_score", "m_samples", "m_in_band", "m_n_checked", "age",
                 "food_found", "offspring", "M1_E", "M1_N", "M2_gate",
                 "M5_branch", "M6_acw", "W_mean_abs", "W_n",
-                "verify_score", "verify_tick", "verify_m1e"]
+                "verify_score", "verify_tick", "verify_m1e", "verify_age"]
         try:
             rows = sorted(self._elite.values(),
                           key=lambda r: -(r.get("score") or 0))
