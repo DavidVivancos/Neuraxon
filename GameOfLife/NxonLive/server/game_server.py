@@ -25,7 +25,7 @@ from .names import NameAllocator
 from .persistence import Persistence
 
 
-SERVER_VERSION = "GoL Server V 1.080"   # bumped each release
+SERVER_VERSION = "GoL Server V 1.081"   # bumped each release
 
 class GameServer:
     def __init__(self, config_path, state_dir):
@@ -729,10 +729,12 @@ class GameServer:
         # The oldest brains are the ones we most want to study and have
         # never kept.
         seen = set(id(a) for _, a in keep)
+        age_keep = set()
         for _age, a in sorted(
                 ((eng.tick - getattr(a, "born_tick", 0), a) for _, a in cand),
                 key=lambda t: -t[0])[:max(4, self._elite_n // 4)]:
             if id(a) not in seen:
+                age_keep.add(a.name)
                 keep.append((float(getattr(a, "m_fit_w", 0.0) or 0.0), a))
         edir = self._elite_dir()
         for sc, a in keep:
@@ -742,6 +744,8 @@ class GameServer:
                 # only ran for entries still in the live top-N, and those
                 # brains were long dead. Now it fires for any archived entry
                 # whose NxEr is still alive and old enough, whatever its rank.
+                if prev.get("slot") == "age":
+                    prev["age"] = eng.tick - getattr(a, "born_tick", 0)
                 if (prev.get("verify_score") is None
                         and (eng.tick - prev["tick"]) >= self._elite_reverify):
                     prev["verify_score"] = round(sc, 4)
@@ -754,8 +758,17 @@ class GameServer:
             # threshold and then went blind: every entry came from ticks
             # 1,570-3,482 of a 1,761,204-tick run, i.e. the first 0.2%.
             if len(self._elite) >= self._elite_n:
-                worst = min(self._elite.values(),
-                            key=lambda r: r.get("score") or 0.0)
+                # v1.61 — never evict an age-slot entry on score. v1.60 added
+                # an age archive but gave those picks their (low) compliance
+                # score, so the score-eviction deleted them immediately: the
+                # oldest brain archived reached 118,956 ticks while the oldest
+                # NxEr lived 932,860. The brains we most want were harvested
+                # and then thrown away within one sweep.
+                pool = [r for r in self._elite.values()
+                        if r.get("slot") != "age"]
+                if not pool:
+                    continue
+                worst = min(pool, key=lambda r: r.get("score") or 0.0)
                 if (worst.get("score") or 0.0) >= sc:
                     continue                  # nothing here beats the floor
                 self._drop_elite(worst)
@@ -784,6 +797,7 @@ class GameServer:
                 "W_mean_abs": m.get("W_mean_abs"), "W_n": m.get("W_n"),
                 "verify_score": None, "verify_tick": None,
                 "verify_m1e": None, "verify_age": None,
+                "slot": "age" if a.name in age_keep else "score",
                 "arch": (a.nas_trial or {}).get("arch"),
             }
         self._write_elite_index()
@@ -802,7 +816,8 @@ class GameServer:
                 "m_score", "m_samples", "m_in_band", "m_n_checked", "age",
                 "food_found", "offspring", "M1_E", "M1_N", "M2_gate",
                 "M5_branch", "M6_acw", "W_mean_abs", "W_n",
-                "verify_score", "verify_tick", "verify_m1e", "verify_age"]
+                "verify_score", "verify_tick", "verify_m1e", "verify_age",
+                "slot"]
         try:
             rows = sorted(self._elite.values(),
                           key=lambda r: -(r.get("score") or 0))

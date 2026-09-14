@@ -814,6 +814,20 @@ class Engine:
         # exert almost no selection. Mapping [floor,1] -> [0,1] turns that
         # narrow band into a real gradient (0.74 -> 0.14, 0.99 -> 0.97).
         self._m_sel_floor = float(cfg.get("m_selection_floor", 0.70))
+        # v1.61 — ELDER SUPPORT. The V1.080 run showed mortality is
+        # AGE-dependent, not crowding: hazard climbs 0.20 -> 0.37 -> 0.45
+        # -> 0.67 -> 0.88 across age windows, and identically for NxErs born
+        # in the first and second halves of the run (0.195/0.200 rising to
+        # 0.867/0.888). So it is senescence, and no brain escapes it — the
+        # best compliance decile still only doubles median lifespan
+        # (18,975 -> 32,198) against a wall where 88% die per window past
+        # 100k ticks. Three releases of selection pressure could not move
+        # max lifespan past ~45% of a run because selection cannot beat a
+        # hazard that rises with age regardless of brain quality.
+        # This grants a metabolic discount that grows with age, offsetting
+        # the ramp so an old, compliant NxEr can actually persist.
+        self._elder_relief = float(cfg.get("elder_drain_relief", 0.55))
+        self._elder_half = float(cfg.get("elder_half_life_ticks", 120000.0))
         # v1.58 — adaptive NAS state (see _nas_sample)
         self._nas_adaptive = bool(cfg.get("nas_adaptive", True))
         self._nas_elite_prob = float(cfg.get("nas_elite_prob", 0.70))
@@ -1865,6 +1879,8 @@ class Engine:
         m_drain = self._m_sel_drain
         m_idle = self._m_sel_idle
         m_hunger = self._m_sel_hunger
+        m_elder = self._elder_relief
+        m_half = self._elder_half
         energy_cap = self.bio_energy_cap          # v1.46
         idle_death = self.bio_idle_death_ticks    # v1.46 (0 = off)
         dt = self.dt
@@ -1899,11 +1915,18 @@ class Engine:
             # v1.58 — weight the relief toward hungry NxErs: an agent at
             # 10% energy gets the full discount, one at the cap gets a
             # fraction of it. Same average cost, aimed where it saves lives.
-            if adv > 0.0:
+            # v1.61 — elder discount: 0 at birth, -> _elder_relief with age
+            _eld = 0.0
+            if m_elder > 0.0:
+                _age = tick - nx.born_tick
+                if _age > 0:
+                    _eld = m_elder * (_age / (_age + m_half))
+            if adv > 0.0 or _eld > 0.0:
                 _need = 1.0 - (nx.food / energy_cap if energy_cap else 0.0)
                 if _need < 0.0:
                     _need = 0.0
                 _rel = m_drain * adv * (1.0 + m_hunger * _need) / (1.0 + m_hunger)
+                _rel = _rel + _eld - _rel * _eld      # combine, stay < 1
                 if _rel > 0.95:
                     _rel = 0.95
                 nx.food -= bio_drain * atrophy * (1.0 - _rel)
