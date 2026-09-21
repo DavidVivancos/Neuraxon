@@ -400,6 +400,7 @@ def _brain_science(b, acc, per_brain=None, bid=None):
     if per_brain is not None and bid is not None and loc.get("n_brains", 0):
         m = _m_from_acc(loc)
         if m:
+            m["_acc"] = dict(loc)     # v1.62 — raw sums, for live-only rebuild
             per_brain[bid] = m
 
 

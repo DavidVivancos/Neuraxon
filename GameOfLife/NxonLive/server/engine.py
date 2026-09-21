@@ -2325,6 +2325,39 @@ class Engine:
         except Exception:
             sci, per_brain = None, {}
         # v1.54 — score each NxEr against the M bands from its OWN brain
+        # v1.62 — DROP STALE BRAINS BEFORE AGGREGATING. The v1.60 diagnostic
+        # fired in production: W_audit_n_stale averaged 217 (max 408) — on
+        # every science sample ~25% of the brains in the worker pool belonged
+        # to NxErs already dead. Every population M-series since v1.54 was
+        # contaminated by them, and the "M1_E leaking out of band" that three
+        # releases tried to fix (living brains read 0.22, in band; the
+        # aggregate read 0.12) is very likely this artefact: dead brains
+        # freeze silent and drag the mean down. Rebuild the aggregate from
+        # LIVING brains only, and tell the pool to drop the rest.
+        if per_brain:
+            _live = {}
+            _stale = []
+            for _bid, _m in per_brain.items():
+                _a = self.nxers.get(_bid)
+                if _a is not None and _a.alive:
+                    _live[_bid] = _m
+                else:
+                    _stale.append(_bid)
+            for _bid in _stale:
+                try:
+                    self.pool.remove(_bid)
+                except Exception:
+                    pass
+            if _stale and sci:
+                # recompute the summable accumulator from living brains only
+                _acc = {}
+                for _m in _live.values():
+                    for _k, _v in (_m.get("_acc") or {}).items():
+                        _acc[_k] = _acc.get(_k, 0) + _v
+                if _acc.get("n_brains"):
+                    sci = _acc
+            self._n_stale_dropped = len(_stale)
+            per_brain = _live
         self._last_per_brain = per_brain or {}     # v1.58 — for W audit
         # v1.59 — sample LIVING brains. Every per-brain conclusion in the
         # last four reports came from brains logged at DEATH, and those
@@ -2503,6 +2536,7 @@ class Engine:
             if les is not None and ok > 0.05:
                 out["M10_lesion_retention"] = round(les / ok, 3)
             out["_n_brains_sampled"] = sci.get("n_brains", 0)
+            out["_n_stale_dropped"] = int(getattr(self, "_n_stale_dropped", 0))
 
         # ---- v1.54: population distribution of per-NxEr M-compliance ----
         # The population averages above can sit in-band while almost no

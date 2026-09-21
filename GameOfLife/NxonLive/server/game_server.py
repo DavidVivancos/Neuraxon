@@ -25,7 +25,7 @@ from .names import NameAllocator
 from .persistence import Persistence
 
 
-SERVER_VERSION = "GoL Server V 1.081"   # bumped each release
+SERVER_VERSION = "GoL Server V 1.082"   # bumped each release
 
 class GameServer:
     def __init__(self, config_path, state_dir):
@@ -769,7 +769,12 @@ class GameServer:
                 if not pool:
                     continue
                 worst = min(pool, key=lambda r: r.get("score") or 0.0)
-                if (worst.get("score") or 0.0) >= sc:
+                # v1.62 — an age pick enters regardless of score. v1.61
+                # protected age entries from EVICTION but still made them
+                # beat the score floor to get IN, so 0 of 40 archive slots
+                # ever held an elder while the oldest NxEr lived 1.49M ticks.
+                if (a.name not in age_keep
+                        and (worst.get("score") or 0.0) >= sc):
                     continue                  # nothing here beats the floor
                 self._drop_elite(worst)
             try:
