@@ -133,56 +133,154 @@ class Registry:
 # =============================================================================
 
 class Node:
-    def __init__(self, node_id, epoch, walk_steps=WALK_STEPS, ant_budget=ANT_BUDGET_S):
+    def __init__(self, node_id, epoch, walk_steps=WALK_STEPS, ant_budget=ANT_BUDGET_S,
+                 verify_workers=1):
         self.id = node_id
         self.epoch = epoch
         self.registry = Registry(epoch)
         self.registry.walk_steps = walk_steps
         self.walk_steps = walk_steps
         self.ant_budget = ant_budget
+        # 1 = serial (unchanged behaviour). 0 = one worker per core.
+        # Parallelism is a speed decision only: the results are identical
+        # either way, which the tests assert.
+        self.verify_workers = verify_workers
+        self._pool = None
 
     def seed_root(self, lut):
         return self.registry.seed_root(lut)
 
-    def verify(self, submission, tick):
-        """Re-run the miner's walk and judge vs the pre-tick snapshot.
+    def _verify_parent(self, submission):
+        """Registry-side pre-checks. Cheap, and they need the snapshot.
 
-        Returns (accepted, reason, score, child_lut, child_hash)."""
+        Returns (parent, early_result). Exactly one of the two is None.
+        """
         reg = self.registry
         parent_ref = submission["parentRef"]
         parent = reg.solutions.get(parent_ref)
         if parent is None:
-            return (False, "unknown_parent", None, None, None)
+            return (None, (False, "unknown_parent", None, None, None))
         if not reg.is_live(parent_ref):                          # R5
-            return (False, "parent_too_old", None, None, None)
+            return (None, (False, "parent_too_old", None, None, None))
+        return (parent, None)
 
-        # 2) re-run the identical anti-attractor walk from the parent LUT.
-        best_lut, best_score, _, _ = TR.mining_walk(
-            parent["lut"], submission["pubkey"], submission["nonce"],
-            self.epoch, self.walk_steps,
-            deadline=time.time() + self.ant_budget * 3)
-        child_hash = G.hash_lut(best_lut, self.epoch)
+    def _verify_rules(self, submission, tick, parent, walk):
+        """Validity rules on the recomputed integer scalar.
 
-        # 4) validity rules on the integer scalar.
+        Judged against the PRE-TICK snapshot only -- reg.solutions is not
+        mutated until process_tick's commit pass -- so the outcome does not
+        depend on how many other submissions have been judged first. That is
+        what makes the walks above safe to run in any order, or concurrently.
+        """
+        reg = self.registry
+        best_lut, best_score, child_hash = walk
         if not (best_score > parent["score"]):                  # R1
             return (False, "not_improvement", best_score, best_lut, child_hash)
-        floor = reg.earlier_tick_sibling_floor(parent_ref, tick)  # R2 / R3
+        floor = reg.earlier_tick_sibling_floor(
+            submission["parentRef"], tick)                       # R2 / R3
         if floor is not None and best_score < floor:
             return (False, "below_sibling_floor", best_score, best_lut, child_hash)
         if child_hash in reg.solutions:
             return (False, "duplicate", best_score, best_lut, child_hash)
         return (True, "ok", best_score, best_lut, child_hash)
 
+    def verify(self, submission, tick):
+        """Re-run the miner's walk and judge vs the pre-tick snapshot.
+
+        Returns (accepted, reason, score, child_lut, child_hash)."""
+        parent, early = self._verify_parent(submission)
+        if early is not None:
+            return early
+
+        # No deadline here on purpose. verify() IS the consensus value, so it
+        # must not read the clock: a node that walks slower than another would
+        # truncate earlier, score differently, and diverge. walk_steps already
+        # bounds the work and is part of the agreed epoch parameters, so the
+        # walk terminates deterministically on every node regardless of speed.
+        walk = TR.walk_and_hash(
+            (parent["lut"], submission["pubkey"], submission["nonce"]),
+            self.epoch, self.walk_steps)
+        return self._verify_rules(submission, tick, parent, walk)
+
+    def _walk_pool(self, workers):
+        """One pool per node, created on first use and reused across ticks."""
+        if self._pool is not None:
+            return self._pool
+        try:
+            from concurrent.futures import ProcessPoolExecutor
+            self._pool = ProcessPoolExecutor(
+                max_workers=workers,
+                initializer=TR.pool_init,
+                initargs=(self.epoch, self.walk_steps))
+        except Exception:
+            # No pool available: restricted sandbox, no fork, not enough
+            # memory. Serial produces the identical answer, so this is not
+            # fatal -- it is just slower.
+            self._pool = None
+        return self._pool
+
+    def close(self):
+        """Release worker processes. Safe to call more than once."""
+        if self._pool is not None:
+            self._pool.shutdown(wait=True)
+            self._pool = None
+
+    def _run_walks(self, jobs):
+        """Run the verifier walks, concurrently when that is worth it.
+
+        Parallelism must never change the answer, so every failure path here
+        degrades to the serial walk rather than propagating.
+        """
+        if not jobs:
+            return []
+        workers = self.verify_workers
+        if not workers:                       # 0 or None -> one per core
+            workers = os.cpu_count() or 1
+        workers = min(workers, len(jobs))
+        if workers > 1:
+            pool = self._walk_pool(workers)
+            if pool is not None:
+                try:
+                    return list(pool.map(TR.walk_and_hash, jobs))
+                except Exception:
+                    # A broken pool must not change consensus: drop it and
+                    # redo the whole batch in-process.
+                    self.close()
+        return [TR.walk_and_hash(j, self.epoch, self.walk_steps) for j in jobs]
+
     def process_tick(self, submissions, tick, order=None):
         """Judge all submissions vs the SAME pre-tick snapshot, then commit the
-        accepted set (order-independent -> every node agrees)."""
+        accepted set (order-independent -> every node agrees).
+
+        Three passes. The middle one holds essentially all of the cost and is
+        the only one that can be parallelised; the outer two touch the registry
+        and stay in the caller's order, so results are returned exactly as the
+        serial version returned them.
+        """
         reg = self.registry
         idx = list(range(len(submissions))) if order is None else order
+
+        # Pass 1: registry-side pre-checks against the pre-tick snapshot.
+        parents, early = {}, {}
+        for i in idx:
+            parents[i], early[i] = self._verify_parent(submissions[i])
+
+        # Pass 2: the walks -- pure, independent, and ~all of the runtime.
+        pending = [i for i in idx if early[i] is None]
+        walks = dict(zip(pending, self._run_walks([
+            (parents[i]["lut"], submissions[i]["pubkey"],
+             submissions[i]["nonce"]) for i in pending])))
+
+        # Pass 3: the validity rules, in the caller's order.
         accepted = []
         results = []
         for i in idx:
             sub = submissions[i]
-            ok, reason, score, child_lut, child_hash = self.verify(sub, tick)
+            if early[i] is not None:
+                ok, reason, score, child_lut, child_hash = early[i]
+            else:
+                ok, reason, score, child_lut, child_hash = self._verify_rules(
+                    sub, tick, parents[i], walks[i])
             results.append((sub, ok, reason, score))
             if ok:
                 accepted.append((sub, score, child_lut, child_hash))
@@ -235,7 +333,7 @@ def run_network(num_nodes=3, num_miners=6, ticks=15, ant_budget=1.0,
                 walk_steps=WALK_STEPS, seed=42, N=48, sim_ticks=128,
                 output_dir="nxon104_out",
                 salted_digest="salted_spectrum_digest_PUBLIC_v1",
-                task_path=None):
+                task_path=None, verify_workers=1):
     import Miner_nxon as MN
     os.makedirs(output_dir, exist_ok=True)
 
@@ -263,7 +361,8 @@ def run_network(num_nodes=3, num_miners=6, ticks=15, ant_budget=1.0,
     print()
 
     root = G.root_lut(epoch)
-    nodes = [Node("node_{:02d}".format(i), epoch, walk_steps, ant_budget)
+    nodes = [Node("node_{:02d}".format(i), epoch, walk_steps, ant_budget,
+                  verify_workers=verify_workers)
              for i in range(num_nodes)]
     for nd in nodes:
         nd.seed_root(root)
@@ -351,6 +450,9 @@ def run_network(num_nodes=3, num_miners=6, ticks=15, ant_budget=1.0,
             pk, deposits.submitted[pk], deposits.accepted[pk],
             deposits.balance[pk], deposits.forfeited[pk]))
 
+    for nd in nodes:
+        nd.close()
+
     print()
     print("System files -> offline tool:  python3 NxonOverseerOffline.py {}".format(
         paths[0]))
@@ -375,13 +477,19 @@ def main():
                    choices=["banded", "unbounded", "external"],
                    help="override the scoring objective (default unbounded).")
     p.add_argument("--output-dir", type=str, default="nxon104_out")
+    p.add_argument("--verify-workers", type=int, default=1,
+                   help="processes for the per-submission verify walks. "
+                        "1 = serial (default), 0 = one per core. Results are "
+                        "identical either way; this only changes how long a "
+                        "tick takes.")
     args = p.parse_args()
     if args.objective:
         NxonScore.OBJECTIVE_MODE = args.objective
     run_network(num_nodes=args.nodes, num_miners=args.miners, ticks=args.ticks,
                 walk_steps=args.walk_steps, ant_budget=args.ant_budget,
                 seed=args.seed, N=args.neurons, sim_ticks=args.sim_ticks,
-                output_dir=args.output_dir, task_path=args.task)
+                output_dir=args.output_dir, task_path=args.task,
+                verify_workers=args.verify_workers)
 
 
 if __name__ == "__main__":
