@@ -157,10 +157,14 @@ class Node:
             return (False, "parent_too_old", None, None, None)
 
         # 2) re-run the identical anti-attractor walk from the parent LUT.
+        # No deadline here on purpose. verify() IS the consensus value, so it
+        # must not read the clock: a node that walks slower than another would
+        # truncate earlier, score differently, and diverge. walk_steps already
+        # bounds the work and is part of the agreed epoch parameters, so the
+        # walk terminates deterministically on every node regardless of speed.
         best_lut, best_score, _, _ = TR.mining_walk(
             parent["lut"], submission["pubkey"], submission["nonce"],
-            self.epoch, self.walk_steps,
-            deadline=time.time() + self.ant_budget * 3)
+            self.epoch, self.walk_steps)
         child_hash = G.hash_lut(best_lut, self.epoch)
 
         # 4) validity rules on the integer scalar.
