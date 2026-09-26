@@ -225,3 +225,44 @@ if __name__ == "__main__":
         walk, sims, t1 - t0))
     print("walk best score:", bs, "(root was", NxonScore.consensus_score_int(rm), ")",
           "| bands {:.0%}".format(NxonScore.band_satisfaction(bm)))
+
+
+# =============================================================================
+# PARALLEL VERIFY SUPPORT
+# =============================================================================
+# process_tick judges every submission against the SAME pre-tick snapshot and
+# defers commits to a second pass, so the per-submission walks are mutually
+# independent. mining_walk is pure -- same inputs, same outputs, no clock, no
+# shared state -- so those walks can run in worker processes.
+#
+# These helpers live in NxonTrit rather than NxonNode on purpose: NxonNode is
+# usually run as __main__, and a worker started with the "spawn" method (the
+# default on Windows and macOS) must be able to import the callable by module
+# path. A function defined in __main__ cannot be pickled that way.
+
+_POOL_EPOCH = None
+_POOL_WALK_STEPS = None
+
+
+def pool_init(epoch, walk_steps):
+    """Seed a worker process once, so the epoch is not re-pickled per job."""
+    global _POOL_EPOCH, _POOL_WALK_STEPS
+    _POOL_EPOCH = epoch
+    _POOL_WALK_STEPS = walk_steps
+
+
+def walk_and_hash(job, epoch=None, walk_steps=None):
+    """Run one verifier walk and hash the resulting child LUT.
+
+    job is (parent_lut, pubkey, nonce). Returns (best_lut, best_score,
+    child_hash). epoch/walk_steps default to whatever pool_init stored, so the
+    same function serves both the in-process and the worker-process path.
+    """
+    parent_lut, pubkey, nonce = job
+    if epoch is None:
+        epoch = _POOL_EPOCH
+    if walk_steps is None:
+        walk_steps = _POOL_WALK_STEPS
+    best_lut, best_score, _, _ = mining_walk(
+        parent_lut, pubkey, nonce, epoch, walk_steps)
+    return best_lut, best_score, G.hash_lut(best_lut, epoch)
