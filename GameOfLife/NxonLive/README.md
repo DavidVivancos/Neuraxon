@@ -1,6 +1,6 @@
 # Multi Neuraxon Game of Life 5 — client / server
 
-**Version mngol5-v1.62 / GoL Server V 1.082** 
+**Version mngol5-v1.63 / GoL Server V 1.083** 
 
 A 24/7 server that runs one Neuraxon Game-of-Life world forever and
 streams it to many web clients. Built on the proven **v184** neural

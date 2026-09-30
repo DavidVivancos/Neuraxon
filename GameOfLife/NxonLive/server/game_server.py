@@ -25,7 +25,7 @@ from .names import NameAllocator
 from .persistence import Persistence
 
 
-SERVER_VERSION = "GoL Server V 1.082"   # bumped each release
+SERVER_VERSION = "GoL Server V 1.083"   # bumped each release
 
 class GameServer:
     def __init__(self, config_path, state_dir):
@@ -734,6 +734,13 @@ class GameServer:
                 ((eng.tick - getattr(a, "born_tick", 0), a) for _, a in cand),
                 key=lambda t: -t[0])[:max(4, self._elite_n // 4)]:
             if id(a) not in seen:
+                # v1.63 — cap elders at a quarter of the archive. v1.62 let
+                # age picks enter unconditionally and never be evicted, so
+                # they filled all 40 slots and pushed every compliance
+                # champion out.
+                if sum(1 for r in self._elite.values()
+                       if r.get("slot") == "age") >= max(2, self._elite_n // 4):
+                    continue
                 age_keep.add(a.name)
                 keep.append((float(getattr(a, "m_fit_w", 0.0) or 0.0), a))
         edir = self._elite_dir()

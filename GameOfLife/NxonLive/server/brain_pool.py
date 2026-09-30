@@ -23,6 +23,11 @@
 # ===================================================================
 import os
 import math
+try:
+    _TS_DECAY = float(os.environ.get("MNGOL5_TS_DECAY", "0.05"))  # v1.63
+except ValueError:
+    _TS_DECAY = 0.05
+_rej_ctr = [0]
 import multiprocessing as mp
 
 
@@ -485,6 +490,28 @@ def _worker_main(conn):
             b = brains.get(msg[1])
             conn.send(b.to_dict() if b is not None else None)
         elif op == "step":
+            # v1.63 — TIMESCALE REJUVENATION: tests the last standing
+            # hypothesis for the mortality wall. The substrate grows each
+            # neuron's intrinsic_timescale multiplicatively with no decay
+            # until all pin to a shared ceiling (spread exactly 0 by step
+            # ~250). Elder support (55% energy discount) moved the age-hazard
+            # ramp by <0.005, so senescence is not metabolic. Each neuron's
+            # timescale now relaxes toward its own birth value
+            # (membrane_time_constant, individually varied), applied from the
+            # worker at runtime — no vendored substrate file is edited.
+            if _TS_DECAY > 0.0:
+                _rej_ctr[0] += 1
+                if _rej_ctr[0] % 8 == 0:
+                    for _b in brains.values():
+                        try:
+                            for _sp in _b.spheres.values():
+                                for _n in _sp.network.all_neurons:
+                                    _bs = getattr(_n, "membrane_time_constant", None)
+                                    _cu = getattr(_n, "intrinsic_timescale", None)
+                                    if _bs and _cu is not None:
+                                        _n.intrinsic_timescale = _cu + _TS_DECAY * (_bs - _cu)
+                        except Exception:
+                            pass
             smods = msg[2] if len(msg) > 2 else None   # v1.52 id->dopamine
             out = []
             for i, sens in msg[1]:

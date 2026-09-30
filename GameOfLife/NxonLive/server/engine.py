@@ -991,6 +991,7 @@ class Engine:
         _agmp_on = (cfg.get("agmp_enabled", True)
                     or cfg.get("learning_enabled", True))
         os.environ["MNGOL5_AGMP"] = "1" if _agmp_on else "0"
+        os.environ["MNGOL5_TS_DECAY"] = str(float(cfg.get("timescale_decay", 0.05)))  # v1.63
         if not _agmp_on:
             print("[Engine] AGMP plasticity DISABLED via config "
                   "(cheaper brain step; reversible)")
