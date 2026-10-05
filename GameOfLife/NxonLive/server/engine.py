@@ -223,6 +223,9 @@ class NxEr:
         self.m_fit = None          # v1.55 continuous graded compliance (no ties)
         self.m_fit_ema = None      # v1.55 smoothed graded compliance
         self.m_fit_w = None        # v1.58 hard-band-weighted compliance
+        # v1.64 behavioural markers: the brain's OWN motor policy
+        self._tick_n = 0; self._mot_n = 0
+        self._chemo_sum = 0.0; self._chemo_n = 0; self._coll_n = 0
         self.m_in_band = 0
         self.m_n_checked = 0
         self.m_deviation = None    # mean band-widths outside, when out
@@ -814,6 +817,9 @@ class Engine:
         # exert almost no selection. Mapping [floor,1] -> [0,1] turns that
         # narrow band into a real gradient (0.74 -> 0.14, 0.99 -> 0.97).
         self._m_sel_floor = float(cfg.get("m_selection_floor", 0.70))
+        self._autopilot = float(cfg.get("autopilot", 0.2))          # v1.64
+        self._coll_cost = float(cfg.get("collision_cost", 0.5))     # v1.64
+        self._death_redesign = bool(cfg.get("death_redesign", True))  # v1.64
         # v1.61 — ELDER SUPPORT. The V1.080 run showed mortality is
         # AGE-dependent, not crowding: hazard climbs 0.20 -> 0.37 -> 0.45
         # -> 0.67 -> 0.88 across age windows, and identically for NxErs born
@@ -1444,9 +1450,26 @@ class Engine:
         #     explores instead of orbiting it.
         li = nx._last_sensory
         forced = False
+        # v1.64 — BRAIN/WORLD COUPLING. Until now the survival-relevant
+        # behaviours were SCRIPTED: hungry + food sensed => move straight to
+        # it (mvx,mvy = fdx,fdy); hungry + nothing => scripted search; fed =>
+        # scripted courtship. The brain's motor output was discarded exactly
+        # when it mattered, so good and bad brains foraged identically and
+        # died at the same constant rate. Measure what the BRAIN wanted,
+        # then let the script fire only with probability `autopilot`.
+        bmx = int(max(-1, min(1, mvx))); bmy = int(max(-1, min(1, mvy)))
+        nx._tick_n += 1
+        if bmx or bmy:
+            nx._mot_n += 1
+        if li is not None and (li[1] or li[2]) and (bmx or bmy):
+            _fx, _fy = li[1], li[2]
+            nx._chemo_sum += ((bmx * _fx + bmy * _fy)
+                              / math.sqrt((bmx*bmx + bmy*bmy) * (_fx*_fx + _fy*_fy)))
+            nx._chemo_n += 1
+        _auto = random.random() < self._autopilot
         hungry = nx.food < (self.bio_start_food * self.bio_hunger_threshold)
         food_sensed = li is not None and (li[1] or li[2])
-        if hungry:
+        if hungry and _auto:
             if food_sensed and self.tick >= nx.wander_until_tick:
                 mvx, mvy = int(li[1]), int(li[2])      # forage to food
                 rest = 0
@@ -1459,7 +1482,8 @@ class Engine:
                     forced = True
         else:
             md = None
-            if self.tick >= nx.mate_cooldown_until and nx.food >= self._mate_gate(nx):
+            if (_auto and self.tick >= nx.mate_cooldown_until
+                    and nx.food >= self._mate_gate(nx)):
                 md = self._nearest_mate_dir(nx)
             if md is not None:
                 mvx, mvy = md                          # court: move to mate
@@ -1491,6 +1515,16 @@ class Engine:
                        and occupant != nx.id
                        and occupant in self.nxers
                        and self.nxers[occupant].alive)
+            # v1.64 — COLLISIONS COST. Bumping into rock, water you cannot
+            # enter, or another NxEr used to fail silently. It now costs
+            # energy and is a cause of death, so steering well is rewarded.
+            if (dx or dy) and (blocked or not self._can_enter(nx, nxp, nyp)):
+                nx._coll_n += 1
+                if self._coll_cost > 0.0:
+                    nx.food -= self._coll_cost
+                    if nx.food <= 0:
+                        self._kill(nx, "collision")
+                        return
             if (not blocked) and self._can_enter(nx, nxp, nyp):
                 # vacate the old cell and claim the new one
                 old = (nx.pos[0], nx.pos[1])
@@ -1904,7 +1938,18 @@ class Engine:
             # v1.57 — M-claim selection advantage. adv is 0 until this NxEr
             # has its first science sample, so newborns get no free pass.
             adv = self.m_advantage(nx) if m_sel else 0.0
-            if idle_death and idle_ticks > (idle_death * (1.0 + m_idle * adv)):
+            _cull = idle_death and idle_ticks > (idle_death * (1.0 + m_idle * adv))
+            if _cull and self._death_redesign:
+                # v1.64 — only cull a brain that is BOTH motor-silent AND
+                # out of band on M1_E and M5. The old cull killed 45% of all
+                # NxErs, proven champions as readily as broken brains.
+                _ml = nx.m_last or {}
+                _e = _ml.get("M1_E"); _b = _ml.get("M5_branching")
+                _silent = (nx._mot_n / max(1, nx._tick_n)) < 0.05
+                _oob = (_e is not None and _b is not None
+                        and not (0.18 <= _e <= 0.28) and not (0.92 <= _b <= 1.10))
+                _cull = _silent and (_oob or _e is None)
+            if _cull:
                 self._kill(nx, "idle")      # v1.46 — cull the stuck
                 continue
             idle = idle_ticks * dt
@@ -2041,6 +2086,7 @@ class Engine:
                 "m_score": nx.m_score_ema,
                 "m_fit": nx.m_fit_ema,          # v1.55 continuous
                 "m_fit_w": nx.m_fit_w,          # v1.58 hard-band weighted
+                **Engine.behav(nx),             # v1.64 behaviour
                 "m_sel_adv": (round(self.m_advantage(nx), 4)   # v1.58 fix
                               if (self._m_sel and nx.m_fit_ema is not None)
                               else 0.0),
@@ -2087,6 +2133,7 @@ class Engine:
                 "m_score": nx.m_score_ema,
                 "m_fit": nx.m_fit_ema,          # v1.55 continuous
                 "m_fit_w": nx.m_fit_w,          # v1.58 hard-band weighted
+                **Engine.behav(nx),             # v1.64 behaviour
                 "m_sel_adv": round(self.m_advantage(nx), 4),   # v1.57
                 "m_score_last": nx.m_score,
                 "m_in_band": nx.m_in_band,
@@ -2191,6 +2238,17 @@ class Engine:
             "age_checkpoints": list(_AGE_CKPTS),
         }
         self.history.provenance(rec)
+
+    @staticmethod
+    def behav(nx):
+        """v1.64 — does the brain act in the world? chemotaxis = mean cosine
+        between the brain's intended step and the food direction (+1 toward,
+        0 random, -1 away); motor_frac = share of ticks with any brain-driven
+        step; collisions = blocked moves."""
+        return {"chemotaxis": round(nx._chemo_sum / nx._chemo_n, 4) if nx._chemo_n else None,
+                "chemo_n": nx._chemo_n,
+                "motor_frac": round(nx._mot_n / max(1, nx._tick_n), 4),
+                "collisions": nx._coll_n}
 
     def m_advantage(self, nx):
         """v1.57 — selection advantage in [0,1] from this NxEr's smoothed
@@ -2393,6 +2451,7 @@ class Engine:
                         "W_mean_abs": _m.get("W_mean_abs"),
                         "W_n": _m.get("W_n"),
                         "W_n_syn_total": _m.get("W_n_syn_total"),
+                        **Engine.behav(_a),     # v1.64
                     })
         except Exception:
             pass
