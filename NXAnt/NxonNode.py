@@ -211,7 +211,11 @@ class Node:
             self._pool = ProcessPoolExecutor(
                 max_workers=workers,
                 initializer=TR.pool_init,
-                initargs=(self.epoch, self.walk_steps))
+                initargs=(self.epoch, self.walk_steps, {
+                    "objective_mode": NxonScore.OBJECTIVE_MODE,
+                    "margin_weight": NxonScore.MARGIN_WEIGHT,
+                    "external_scorer": NxonScore._EXTERNAL_SCORER,
+                }))
         except Exception:
             # No pool available: restricted sandbox, no fork, not enough
             # memory. Serial produces the identical answer, so this is not
@@ -236,8 +240,13 @@ class Node:
         workers = self.verify_workers
         if not workers:                       # 0 or None -> one per core
             workers = os.cpu_count() or 1
-        workers = min(workers, len(jobs))
-        if workers > 1:
+        # Size the pool from the CONFIGURED worker count. Using
+        # min(workers, len(jobs)) here would permanently fix the pool at
+        # whatever the first parallel batch happened to be -- a node set to 4
+        # workers whose first tick had 2 submissions would stay at 2 forever,
+        # because the pool is created once and reused. The batch size decides
+        # only whether parallelism is worth it at all.
+        if min(workers, len(jobs)) > 1:
             pool = self._walk_pool(workers)
             if pool is not None:
                 try:

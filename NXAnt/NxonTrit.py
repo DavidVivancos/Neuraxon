@@ -244,11 +244,26 @@ _POOL_EPOCH = None
 _POOL_WALK_STEPS = None
 
 
-def pool_init(epoch, walk_steps):
-    """Seed a worker process once, so the epoch is not re-pickled per job."""
+def pool_init(epoch, walk_steps, score_config=None):
+    """Seed a worker process once, so the epoch is not re-pickled per job.
+
+    score_config carries the SCORING configuration, and it is not optional in
+    practice. OBJECTIVE_MODE, MARGIN_WEIGHT and the external scorer are module
+    globals set at runtime by --objective in main(). A worker started with
+    "spawn" (default on Windows and macOS) or "forkserver" (default on Linux
+    from Python 3.14) re-imports NxonScore and gets the module DEFAULT, so it
+    would score with a different objective than the parent -- and two nodes
+    differing only in --verify-workers or in OS would then commit different
+    values. Forked workers inherit the globals and hide the problem.
+    """
     global _POOL_EPOCH, _POOL_WALK_STEPS
     _POOL_EPOCH = epoch
     _POOL_WALK_STEPS = walk_steps
+    if score_config is not None:
+        NxonScore.OBJECTIVE_MODE = score_config["objective_mode"]
+        NxonScore.MARGIN_WEIGHT = score_config["margin_weight"]
+        if score_config.get("external_scorer") is not None:
+            NxonScore.register_external_scorer(score_config["external_scorer"])
 
 
 def walk_and_hash(job, epoch=None, walk_steps=None):
