@@ -510,6 +510,7 @@ cunxonStatus_t allocate_sphere(SphereDev& sd,
     int tb = 256;
     int nb = (n + tb - 1) / tb;
     k_init_curand<<<nb, tb, 0, stream>>>(N.rng, n, base_seed);
+    CUNXON_CUDA_CHECK(cudaGetLastError());
 
     /* Per-neuron type assignment */
     std::vector<int8_t> h_type(n);
@@ -906,6 +907,7 @@ static cunxonStatus_t step_impl(cunxonNetworkImpl_* net,
     /* (B) advance oscillators ----------------------------------------------- */
     for (auto& sd : net->spheres)
         k_oscillator_advance<<<1, 1, 0, sd.stream>>>(sd.O, dt_ms);
+        CUNXON_CUDA_CHECK(cudaGetLastError());
 
     /* (C) ChronoPlastic warp + Isyn scatter into branches ------------------ */
     for (auto& sd : net->spheres) {
@@ -914,6 +916,7 @@ static cunxonStatus_t step_impl(cunxonNetworkImpl_* net,
         int tb = 256, nb = (n_syn + tb - 1)/tb;
         k_chrono_warp_and_isyn<<<nb, tb, 0, sd.stream>>>(
             sd.N, sd.S, n_syn, sd.p_dev, dt_ms, sd.d_energy);
+        CUNXON_CUDA_CHECK(cudaGetLastError());
     }
 
     /* (D) dendritic gather --------------------------------------------------- */
@@ -922,6 +925,7 @@ static cunxonStatus_t step_impl(cunxonNetworkImpl_* net,
         int tb = 256, nb = (n + tb - 1)/tb;
         k_dendritic_gather<<<nb, tb, 0, sd.stream>>>(
             sd.N, sd.S, n, sd.n_branches, sd.p_dev);
+        CUNXON_CUDA_CHECK(cudaGetLastError());
     }
 
     /* sync per-sphere streams before inter-sphere phase */
@@ -934,17 +938,20 @@ static cunxonStatus_t step_impl(cunxonNetworkImpl_* net,
         SphereDev& dst = net->spheres[ld.dst];
         k_ctc_gate<<<1, 1, 0, inter_stream>>>(
             src.O, dst.O, (int)ld.p.coherence_band, ld.p.coherence_strength, ld.g_ctc);
+        CUNXON_CUDA_CHECK(cudaGetLastError());
         int tb = 128;
         k_intersphere_project<<<ld.n_dst_ports, tb, 0, inter_stream>>>(
             src.N, src.port_out_relay, ld.n_src_ports,
             ld.W, ld.n_dst_ports, ld.g_ctc, ld.p.gain, ld.p.bias,
             ld.p.transmission_threshold, ld.contrib);
+        CUNXON_CUDA_CHECK(cudaGetLastError());
         int nb = (ld.n_dst_ports + tb - 1) / tb;
         /* dst ports = relay_in + sensory_in (concatenated indices on host) */
         /* We need a flat list of dst port ids:                              */
         /* For simplicity inject directly into ext_in via dst.port_in_relay  */
         k_intersphere_inject<<<nb, tb, 0, inter_stream>>>(
             dst.ext_in, ld.dst_port_ids, ld.n_dst_ports, ld.contrib);
+        CUNXON_CUDA_CHECK(cudaGetLastError());
     }
     cudaStreamSynchronize(inter_stream);
 
@@ -957,6 +964,7 @@ static cunxonStatus_t step_impl(cunxonNetworkImpl_* net,
         int tb = 256, nb = std::max(1, (sd.n_total + tb - 1)/tb);
         k_sphere_activity_stats<<<nb, tb, 0, sd.stream>>>(
             sd.N, sd.n_total, d_stats, d_stats+1, d_stats+2);
+        CUNXON_CUDA_CHECK(cudaGetLastError());
         float h_stats[3] = {0,0,0};
         cudaMemcpyAsync(h_stats, d_stats, 3*sizeof(float),
                         cudaMemcpyDeviceToHost, sd.stream);
@@ -968,11 +976,13 @@ static cunxonStatus_t step_impl(cunxonNetworkImpl_* net,
 
         k_neuromod_update<<<1, 1, 0, sd.stream>>>(
             sd.M, sd.p_dev, dt_ms, mean_abs, exc_frac, chg_rate);
+        CUNXON_CUDA_CHECK(cudaGetLastError());
 
         int n = sd.n_total;
         int nb2 = (n + tb - 1)/tb;
         k_membrane_dsn_ctsn_emit<<<nb2, tb, 0, sd.stream>>>(
             sd.N, sd.M, sd.O, n, sd.p_dev, sd.ext_in, sd.n_in, dt_ms);
+        CUNXON_CUDA_CHECK(cudaGetLastError());
     }
 
     if (training) {
@@ -982,12 +992,15 @@ static cunxonStatus_t step_impl(cunxonNetworkImpl_* net,
             int tb = 256, nb = (n_syn + tb - 1)/tb;
             k_plasticity_stdp<<<nb, tb, 0, sd.stream>>>(sd.S, sd.N, n_syn, sd.M,
                                                        sd.p_dev, dt_ms);
+            CUNXON_CUDA_CHECK(cudaGetLastError());
             /* Associative-neighbour diffusion reads eligibility (= dw_stdp)
              * before AGMP overwrites it with its own running e-trace.       */
             k_plasticity_associative<<<nb, tb, 0, sd.stream>>>(
                 sd.S, sd.n_total, n_syn, sd.p_dev, dt_ms);
+            CUNXON_CUDA_CHECK(cudaGetLastError());
             k_plasticity_agmp<<<nb, tb, 0, sd.stream>>>(sd.S, sd.N, n_syn, sd.M,
                                                        sd.p_dev, dt_ms);
+            CUNXON_CUDA_CHECK(cudaGetLastError());
             /* Structural prune+death+formation: stochastic, RNG-seeded
              * by (step_index, sphere_id) so behaviour is reproducible.    */
             uint64_t step_seed = (net->ctx ? net->ctx->seed : 0xC0FFEEULL)
@@ -996,6 +1009,7 @@ static cunxonStatus_t step_impl(cunxonNetworkImpl_* net,
                                   * 0xBF58476D1CE4E5B9ULL);
             k_structural_prune<<<nb, tb, 0, sd.stream>>>(
                 sd.S, n_syn, sd.p_dev, dt_ms, step_seed);
+            CUNXON_CUDA_CHECK(cudaGetLastError());
         }
         /* Inter-sphere projection plasticity */
         for (auto& ld : net->links) {
@@ -1008,6 +1022,7 @@ static cunxonStatus_t step_impl(cunxonNetworkImpl_* net,
                 ld.W, src.N, src.port_out_relay, ld.n_src_ports,
                 dst.N, ld.dst_port_ids, ld.n_dst_ports,
                 ld.p.plasticity_rate, ld.p.weight_decay, ld.p.weight_clip);
+            CUNXON_CUDA_CHECK(cudaGetLastError());
         }
     }
 
@@ -1158,6 +1173,7 @@ cunxonStatus_t cunxonNetworkReset(cunxonNetwork_t net)
         int tb = 256, nb = (sd.n_total + tb - 1)/tb;
         if (nb > 0)
             k_reset_neuron_dynamic<<<nb, tb, 0, sd.stream>>>(sd.N, sd.n_total);
+            CUNXON_CUDA_CHECK(cudaGetLastError());
         /* neuron scratch */
         cudaMemsetAsync(sd.N.branch_pot, 0,
                         sd.n_total * sd.n_branches * sizeof(float), sd.stream);
