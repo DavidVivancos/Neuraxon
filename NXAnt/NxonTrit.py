@@ -225,3 +225,59 @@ if __name__ == "__main__":
         walk, sims, t1 - t0))
     print("walk best score:", bs, "(root was", NxonScore.consensus_score_int(rm), ")",
           "| bands {:.0%}".format(NxonScore.band_satisfaction(bm)))
+
+
+# =============================================================================
+# PARALLEL VERIFY SUPPORT
+# =============================================================================
+# process_tick judges every submission against the SAME pre-tick snapshot and
+# defers commits to a second pass, so the per-submission walks are mutually
+# independent. mining_walk is pure -- same inputs, same outputs, no clock, no
+# shared state -- so those walks can run in worker processes.
+#
+# These helpers live in NxonTrit rather than NxonNode on purpose: NxonNode is
+# usually run as __main__, and a worker started with the "spawn" method (the
+# default on Windows and macOS) must be able to import the callable by module
+# path. A function defined in __main__ cannot be pickled that way.
+
+_POOL_EPOCH = None
+_POOL_WALK_STEPS = None
+
+
+def pool_init(epoch, walk_steps, score_config=None):
+    """Seed a worker process once, so the epoch is not re-pickled per job.
+
+    score_config carries the SCORING configuration, and it is not optional in
+    practice. OBJECTIVE_MODE, MARGIN_WEIGHT and the external scorer are module
+    globals set at runtime by --objective in main(). A worker started with
+    "spawn" (default on Windows and macOS) or "forkserver" (default on Linux
+    from Python 3.14) re-imports NxonScore and gets the module DEFAULT, so it
+    would score with a different objective than the parent -- and two nodes
+    differing only in --verify-workers or in OS would then commit different
+    values. Forked workers inherit the globals and hide the problem.
+    """
+    global _POOL_EPOCH, _POOL_WALK_STEPS
+    _POOL_EPOCH = epoch
+    _POOL_WALK_STEPS = walk_steps
+    if score_config is not None:
+        NxonScore.OBJECTIVE_MODE = score_config["objective_mode"]
+        NxonScore.MARGIN_WEIGHT = score_config["margin_weight"]
+        if score_config.get("external_scorer") is not None:
+            NxonScore.register_external_scorer(score_config["external_scorer"])
+
+
+def walk_and_hash(job, epoch=None, walk_steps=None):
+    """Run one verifier walk and hash the resulting child LUT.
+
+    job is (parent_lut, pubkey, nonce). Returns (best_lut, best_score,
+    child_hash). epoch/walk_steps default to whatever pool_init stored, so the
+    same function serves both the in-process and the worker-process path.
+    """
+    parent_lut, pubkey, nonce = job
+    if epoch is None:
+        epoch = _POOL_EPOCH
+    if walk_steps is None:
+        walk_steps = _POOL_WALK_STEPS
+    best_lut, best_score, _, _ = mining_walk(
+        parent_lut, pubkey, nonce, epoch, walk_steps)
+    return best_lut, best_score, G.hash_lut(best_lut, epoch)
