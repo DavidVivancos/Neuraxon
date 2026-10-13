@@ -1,6 +1,6 @@
 # Multi Neuraxon Game of Life 5 — client / server
 
-**Version mngol5-v1.64 / GoL Server V 1.084** — connect the brain to the world
+**Version mngol5-v1.65 / GoL Server V 1.085** 
 
 A 24/7 server that runs one Neuraxon Game-of-Life world forever and
 streams it to many web clients. Built on the proven **v184** neural
@@ -46,6 +46,21 @@ Open `https://host:8443/` (client) and `https://host:8443/admin`
 > Built-in TLS works with a cert/key pair. For production, terminating
 > TLS at nginx/Caddy in front and running the app on plain HTTP behind
 > it is also fine — the app honours `X-Forwarded-For` for IP bans.
+
+## Science tools (v1.65)
+
+```bash
+python3 tools/selftest_arms.py            # 18 headless checks, in-process (~3-5 min)
+python3 tools/selftest_arms.py --parallel # the same checks through worker processes
+python3 tools/arm_report.py state         # per-arm answer from a run's history (stdlib only)
+python3 tools/probe_brain.py --newborn state/best/brains/*.json state/best/elite/*.json
+python3 tools/test_gene_roundtrip.py      # every searched gene survives save -> load
+```
+
+The experiment arms (script / mixed / brain / frozen / sham) are set by
+`arms_enabled` and `arm_shares` in `world_config.json`. Set
+`"arms_enabled": false` to run every NxEr on the mixed controller
+(autopilot = `autopilot`).
 
 ## Performance & multi-core (important)
 

@@ -81,7 +81,7 @@
 <canvas id="cv"></canvas>
 
 <div class="panel hide" id="left">
-  <h1>🧠 Neuraxon GoL Live — v 1.084</h1>
+  <h1>🧠 Neuraxon GoL Live — v 1.085</h1>
   <div class="credits"><strong>By <a href="https://vivancos.com/" target="_blank">David Vivancos</a> & <a href="https://josesanchezgarcia.com/" target="_blank">Jose Sanchez</a></strong></div>
   <div class="credits"><strong>for <a href="https://qubic.org/" target="_blank">Qubic</a> Science</strong></div>
   <div class="sub" id="conn">connecting…</div>
@@ -1048,7 +1048,8 @@ async function refreshMine(){
     (v.brain_building?'<div class="stat" style="color:#ffd24a"><span>🧠 Brain</span><b>building…</b></div>':'')
     +Object.entries({'Alive':v.alive?'yes':'DIED','Food':v.food,'Energy':v.energy,
     'Found':s.food_found,'Stolen':s.food_taken,'Explored':s.explored,'Lived':s.time_lived,
-    'Mates':s.mates_performed,'Fitness':s.fitness,'g':s.g,'Brain':(v.brain&&v.brain.topology)||'chc6'})
+    'Mates':s.mates_performed,'Fitness':s.fitness,'g':s.g,'Brain':(v.brain&&v.brain.topology)||'chc6',
+    'Arm':v.arm||'mixed'})
     .map(([k,x])=>`<div class="stat"><span>${k}</span><b>${x}</b></div>`).join('');
   const RK=v.ranks||{}; const top5=!!v.in_top5; let h='';
   for(const[k,lab]of[['food_found','Food'],['food_taken','Stolen'],['explored','Explored'],['mates_performed','Mates'],['fitness','Fitness'],['g','g']]){
@@ -1131,7 +1132,7 @@ window.inspectChild=async function(name, silent){
        <span style="float:right;cursor:pointer;color:#7d88a8" onclick="closeChild()">✕</span></div>`
     +Object.entries({'Alive':v.alive?'yes':'DIED','Food':v.food,'Energy':v.energy,
         'Found':s.food_found,'Stolen':s.food_taken,'Explored':s.explored,'Lived':s.time_lived,
-        'Mates':s.mates_performed,'Fitness':s.fitness,'g':s.g})
+        'Mates':s.mates_performed,'Fitness':s.fitness,'g':s.g,'Arm':v.arm||'mixed'})
       .map(([k,x])=>`<div class="stat"><span>${k}</span><b>${x}</b></div>`).join('')
     +'<div style="font-size:10px;color:#9fb0d0;margin:6px 0 2px">Their ranks</div>'+ranksH
     +`<div class="row" style="margin-top:6px">

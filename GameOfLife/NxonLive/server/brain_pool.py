@@ -424,6 +424,63 @@ def _new_sci_acc():
     )}
 
 
+_FROZEN_NET_PARAMS = (("agmp_enabled", False),
+                      ("homeostatic_rate", 0.0),
+                      ("homeostatic_plasticity_rate", 0.0),
+                      ("weight_homeostasis_enabled", False),
+                      ("synapse_formation_prob", 0.0),
+                      ("synapse_death_prob", 0.0),
+                      ("adaptive_threshold_enabled", False),
+                      ("evolution_interval", 10 ** 9))
+
+
+def _freeze_brain(b):
+    """v1.65 — the FROZEN arm ("code frozen during the run"): clamp every
+    plastic process of ONE brain at its birth state, from our own code (the
+    vendored substrate is not edited). Verified offline over 300 steps:
+    a plastic newborn lost 1,272 of 1,327 synapses and changed its weights
+    by a summed 62.7; the frozen twin lost none and changed by 1.1 (one
+    ITU-circle pass at step 0), with link matrices and thresholds fixed.
+      * synapses: learning_rate 0, and the fast/slow/meta weight ODE time
+        constants set to 1e12 — in this substrate w_fast/w_slow are leaky
+        traces of recent plasticity that DECAY to 0 without it, so zeroing
+        the learning rate alone would erase the brain, not freeze it;
+      * no AGMP, homeostatic scaling, threshold homeostasis, weight
+        homeostasis, synapse formation or death (so no pruning), no ITU
+        circle evolution;
+      * inter-sphere links: plasticity_rate 0, integrity decay 0.
+    Neuron dynamics, neuromodulators, oscillators and spontaneous activity
+    all still run. Each network owns its params object after
+    load_multisphere_from_dict, so freezing one brain never touches another
+    (also verified). Idempotent."""
+    n = 0
+    for sp in b.spheres.values():
+        net = sp.network
+        pp = net.params
+        for attr, val in _FROZEN_NET_PARAMS:
+            if hasattr(pp, attr):
+                setattr(pp, attr, val)
+        for s in net.synapses:
+            s.learning_rate = 0.0
+            s.tau_fast = 1e12
+            s.tau_slow = 1e12
+            s.tau_meta = 1e12
+            if hasattr(s, "_synapse_death_prob"):
+                s._synapse_death_prob = 0.0
+            n += 1
+    for link in b.links.values():
+        try:
+            link.params.plasticity_rate = 0.0
+            link.params.integrity_decay_rate = 0.0
+        except Exception:
+            pass
+    try:
+        b._mngol5_frozen = True
+    except Exception:
+        pass
+    return n
+
+
 def _worker_main(conn):
     os.environ.setdefault("NEURAXON_HEADLESS", "1")
     # numpy shim BEFORE anything imports the substrate (PyPy fix)
@@ -457,6 +514,7 @@ def _worker_main(conn):
 
     brains = {}          # id -> NeuraxonMultiSphere
     inputs = {}          # id -> [input_neuron_id, ...] (cached)
+    frozen = set()       # v1.65 — ids whose brain must be (and stay) frozen
 
     def _ensure_inputs(i, b):
         if i not in inputs:
@@ -480,12 +538,25 @@ def _worker_main(conn):
             try:
                 brains[i] = load_multisphere_from_dict(
                     bdict, rebuild_net_fn=_rebuild_net)
+                if i in frozen:                  # v1.65 — frozen arm
+                    _freeze_brain(brains[i])
             except Exception:
                 pass
             inputs.pop(i, None)
+        elif op == "freeze":
+            # v1.65 — usually arrives BEFORE the builder's load (same pipe,
+            # FIFO); the mark makes the load apply it. Applied at once if
+            # the brain is already here (snapshot restore path).
+            frozen.add(msg[1])
+            if msg[1] in brains:
+                try:
+                    _freeze_brain(brains[msg[1]])
+                except Exception:
+                    pass
         elif op == "del":
             brains.pop(msg[1], None)
             inputs.pop(msg[1], None)
+            frozen.discard(msg[1])
         elif op == "export":
             b = brains.get(msg[1])
             conn.send(b.to_dict() if b is not None else None)
@@ -623,6 +694,7 @@ class BrainPool:
         self._pumps = []
         self._step_timeout = float(step_timeout)
         self._closing = False
+        self._frozen_ip = set()       # v1.65 — frozen ids (in-process mode)
         self._load_q = []
         import threading as _th
         self._load_lock = _th.Lock()
@@ -831,8 +903,25 @@ class BrainPool:
             try:
                 self._brains[i] = self._lb(bdict)
                 self._inputs.pop(i, None)
+                if i in self._frozen_ip:
+                    _freeze_brain(self._brains[i])
             except Exception:
                 pass
+
+    def freeze(self, i):
+        """v1.65 — put brain i in the FROZEN arm (see _freeze_brain). In
+        parallel mode the worker remembers the id and applies the freeze
+        when the builder's brain lands, so order never matters."""
+        if self.parallel:
+            self._fire(i, ("freeze", i))
+        else:
+            self._frozen_ip.add(i)
+            b = self._brains.get(i)
+            if b is not None:
+                try:
+                    _freeze_brain(b)
+                except Exception:
+                    pass
 
     def remove(self, i):
         if self.parallel:
@@ -840,6 +929,7 @@ class BrainPool:
         else:
             self._brains.pop(i, None)
             self._inputs.pop(i, None)
+            self._frozen_ip.discard(i)
 
     def export(self, i):
         if self.parallel:

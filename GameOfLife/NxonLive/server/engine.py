@@ -71,6 +71,10 @@ DIR_OFFSETS = [(-1, -1), (0, -1), (1, -1), (1, 0),
 
 RANK_METRICS = ("food_found", "food_taken", "explored",
                 "time_lived", "mates_performed", "fitness", "g")
+
+# v1.65 — experimental arms (see Engine._init_runtime). Order is fixed so
+# the cumulative share table is deterministic.
+ARMS = ("script", "mixed", "brain", "frozen", "sham")
 # Metrics that start at 0 and only grow — when a NxEr's value is 0
 # here it has literally not scored anything, so "#N" is meaningless;
 # the rank is reported as None and the client shows "—". g is excluded
@@ -226,6 +230,36 @@ class NxEr:
         # v1.64 behavioural markers: the brain's OWN motor policy
         self._tick_n = 0; self._mot_n = 0
         self._chemo_sum = 0.0; self._chemo_n = 0; self._coll_n = 0
+        # v1.65 — EXPERIMENTAL ARM (assigned at birth by the engine, never
+        # inherited): which controller drives the body. `_auto` is the
+        # per-tick probability that the scripted autopilot acts instead of
+        # the brain (1.0 script, 0.2 mixed, 0.0 brain/frozen/sham).
+        self.arm = "mixed"
+        self._auto = 0.2
+        # v1.65 — decision-level telemetry. The brain decides once every
+        # brain_step_every ticks and that output is replayed in between, so
+        # every marker below counts FRESH DECISIONS, not replayed ticks.
+        self._fresh = False           # set in Phase A when the brain stepped
+        self._dec_n = 0               # fresh decisions
+        self._soc1 = 0; self._give1 = 0; self._mate1 = 0
+        self._rest1 = 0; self._sing1 = 0
+        self._same_n = 0              # decision identical to the previous one
+        self._prev_out = None
+        self._hold = False            # brain's replayed step stopped by an obstacle
+        self._rested = False          # brain chose rest this tick (cheaper metabolism)
+        self._forced_n = 0            # ticks on which the script drove the body
+        self._bmove_n = 0             # executed steps chosen by the brain
+        self._smove_n = 0             # executed steps chosen by the script
+        self._coll_wall = 0; self._coll_nx = 0
+        # v1.65 — ENERGY LEDGER: where every unit of food came from and went.
+        self.e_eat = 0.0; self.e_bonus = 0.0       # bites (+ M-selection bonus part)
+        self.e_stin = 0.0; self.e_stout = 0.0      # stolen from others / by others
+        self.e_gvin = 0.0; self.e_gvout = 0.0      # gifts received / given
+        self.e_drain = 0.0; self.e_relief = 0.0    # metabolism paid / saved by M-selection
+        self.e_coll = 0.0; self.e_mate = 0.0       # collisions / mating costs
+        self.e_cap = 0.0                           # income discarded at the energy cap
+        self.n_st_brain = 0; self.n_st_floor = 0   # thefts by brain output / by hunger floor
+        self.n_give = 0; self.n_mate_floor = 0
         self.m_in_band = 0
         self.m_n_checked = 0
         self.m_deviation = None    # mean band-widths outside, when out
@@ -288,6 +322,7 @@ class NxEr:
             "energy": round(energy_pct, 1),
             "heading": self.heading,
             "born_tick": self.born_tick,
+            "arm": getattr(self, "arm", "mixed"),     # v1.65 experiment arm
             "parents": self.parents,
             "offspring_ids": list(self.offspring_ids),
             "brain": {
@@ -818,8 +853,37 @@ class Engine:
         # narrow band into a real gradient (0.74 -> 0.14, 0.99 -> 0.97).
         self._m_sel_floor = float(cfg.get("m_selection_floor", 0.70))
         self._autopilot = float(cfg.get("autopilot", 0.2))          # v1.64
-        self._coll_cost = float(cfg.get("collision_cost", 0.5))     # v1.64
+        self._coll_cost = float(cfg.get("collision_cost", 0.1))     # v1.64/v1.65
         self._death_redesign = bool(cfg.get("death_redesign", True))  # v1.64
+        # v1.65 — WITHIN-RUN CONTROLLED EXPERIMENT. Every NxEr is randomly
+        # assigned at birth to one arm (not inherited, so all arms share
+        # one gene pool and differ ONLY in who drives the body):
+        #   script — autopilot 1.0: the v1.63 scripted body (null control)
+        #   mixed  — autopilot `autopilot` (0.2): script 20%, brain 80%
+        #   brain  — autopilot 0.0: the brain alone; no script, no floors
+        #   frozen — as brain, plus all plasticity clamped at birth
+        #   sham   — as brain, but its exteroceptive input is that of
+        #            another random NxEr (yoked control: same brain, same
+        #            output statistics, input decoupled from its world)
+        self._arms_on = bool(cfg.get("arms_enabled", True))
+        _sh = cfg.get("arm_shares") or {}
+        _def = {"script": 0.20, "mixed": 0.20, "brain": 0.30,
+                "frozen": 0.15, "sham": 0.15}
+        _sh = {k: float(_sh.get(k, _def[k])) for k in ARMS}
+        _tot = sum(v for v in _sh.values() if v > 0) or 1.0
+        self._arm_cum = []
+        _c = 0.0
+        for k in ARMS:
+            if _sh[k] > 0:
+                _c += _sh[k] / _tot
+                self._arm_cum.append((_c, k))
+        self._arm_auto = {"script": 1.0, "mixed": self._autopilot,
+                          "brain": 0.0, "frozen": 0.0, "sham": 0.0}
+        # resting halves metabolism for that tick and is exempt from the
+        # idle-atrophy ramp (v1.64 charged EXTRA for resting and skipped
+        # eating, so a resting brain could only lose)
+        self._rest_mult = float(cfg.get("rest_drain_mult", 0.5))
+        self._alive_count = 0          # v1.65 — cheap capacity pre-check
         # v1.61 — ELDER SUPPORT. The V1.080 run showed mortality is
         # AGE-dependent, not crowding: hazard climbs 0.20 -> 0.37 -> 0.45
         # -> 0.67 -> 0.88 across age windows, and identically for NxErs born
@@ -1135,7 +1199,17 @@ class Engine:
         nx.food = self.bio_start_food
         nx.start_food = self.bio_start_food   # for energy% display
         nx.born_tick = self.tick
+        # v1.65 — the idle clock starts at birth. It started at tick 0, so a
+        # newborn that could not step on its first tick (spawned boxed in)
+        # had an "idle time" equal to the world's age and was culled at once:
+        # all 233 idle deaths of the V1.084 run were newborns under 1,250
+        # ticks old.
+        nx.last_move_tick = self.tick
+        self._assign_arm(nx)
         self.pool.add(nid, _params_to_dict(nx.params))
+        if nx.arm == "frozen":
+            self.pool.freeze(nid)        # applied when the brain lands
+        self._alive_count += 1
         self.nxers[nid] = nx
         self._nxer_names[nid] = nx.name
         self._occupied[(nx.pos[0], nx.pos[1])] = nx.id
@@ -1144,6 +1218,25 @@ class Engine:
         if nx.is_managed:
             self.lifetime["total_managed_registrations"] += 1
         return nx
+
+    def _assign_arm(self, nx, arm=None):
+        """v1.65 — randomise this NxEr into an experimental arm. User-owned
+        NxErs keep the default mixed controller and are excluded from the
+        arm analysis (they are few and not randomised)."""
+        if arm is None:
+            if not self._arms_on or nx.is_managed or not self._arm_cum:
+                arm = "mixed"
+            else:
+                u = random.random()
+                arm = self._arm_cum[-1][1]
+                for c, k in self._arm_cum:
+                    if u < c:
+                        arm = k
+                        break
+        if arm not in ARMS:
+            arm = "mixed"
+        nx.arm = arm
+        nx._auto = self._arm_auto.get(arm, self._autopilot)
 
     def _nas_sample(self):
         """Draw one architecture from the search space.
@@ -1432,8 +1525,17 @@ class Engine:
                                  nx.last_sing_level * 0.85)
         if nx.last_sing_level < 0.05:
             nx.last_sing_level = 0.0
+        # v1.65 — the per-NxEr autopilot probability comes from its arm
+        # (1.0 script, 0.2 mixed, 0.0 brain/frozen/sham). One die per tick
+        # decides whether THIS tick is scripted; every scripted override
+        # below (forage, search, court, explore, theft floor, mating
+        # floor, spontaneous song) is gated by the same die, so a brain-arm
+        # NxEr is never moved, fed or mated by the script.
+        _ap = nx._auto
+        _auto = _ap >= 1.0 or (_ap > 0.0 and random.random() < _ap)
         # rare spontaneous song (Lite has a ~0.2% spontaneous path)
-        if nx.last_sing_level == 0.0 and random.random() < 0.0015:
+        if (_auto and nx.last_sing_level == 0.0
+                and random.random() < 0.0015):
             nx.last_sing_level = 1.0
         # ---- v1.36 BEHAVIOURAL PRIORITY -----------------------------
         # Replaces the old idle-explore safety net + hunger-only floor.
@@ -1450,55 +1552,86 @@ class Engine:
         #     explores instead of orbiting it.
         li = nx._last_sensory
         forced = False
-        # v1.64 — BRAIN/WORLD COUPLING. Until now the survival-relevant
-        # behaviours were SCRIPTED: hungry + food sensed => move straight to
-        # it (mvx,mvy = fdx,fdy); hungry + nothing => scripted search; fed =>
-        # scripted courtship. The brain's motor output was discarded exactly
-        # when it mattered, so good and bad brains foraged identically and
-        # died at the same constant rate. Measure what the BRAIN wanted,
-        # then let the script fire only with probability `autopilot`.
+        # v1.64 — BRAIN/WORLD COUPLING: measure what the BRAIN wanted.
+        # v1.65 — measured per FRESH DECISION. With brain_step_every = 8 the
+        # same output is replayed for 8 ticks; v1.64 counted every replay,
+        # inflating chemo_n ~8x and weighting stale sensory frames.
         bmx = int(max(-1, min(1, mvx))); bmy = int(max(-1, min(1, mvy)))
         nx._tick_n += 1
-        if bmx or bmy:
-            nx._mot_n += 1
-        if li is not None and (li[1] or li[2]) and (bmx or bmy):
-            _fx, _fy = li[1], li[2]
-            nx._chemo_sum += ((bmx * _fx + bmy * _fy)
-                              / math.sqrt((bmx*bmx + bmy*bmy) * (_fx*_fx + _fy*_fy)))
-            nx._chemo_n += 1
-        _auto = random.random() < self._autopilot
+        if nx._fresh:
+            nx._fresh = False
+            nx._hold = False              # a new decision releases the brake
+            nx._dec_n += 1
+            if bmx or bmy:
+                nx._mot_n += 1
+            if social == 1:
+                nx._soc1 += 1
+            if give == 1:
+                nx._give1 += 1
+            if mate == 1:
+                nx._mate1 += 1
+            if rest == 1:
+                nx._rest1 += 1
+            if sing == 1:
+                nx._sing1 += 1
+            _o = (bmx, bmy, social, mate, give, rest, sing)
+            if _o == nx._prev_out:
+                nx._same_n += 1           # output did not change: lock-in marker
+            nx._prev_out = _o
+            if li is not None and (li[1] or li[2]) and (bmx or bmy):
+                _fx, _fy = li[1], li[2]
+                nx._chemo_sum += ((bmx * _fx + bmy * _fy)
+                                  / math.sqrt((bmx*bmx + bmy*bmy) * (_fx*_fx + _fy*_fy)))
+                nx._chemo_n += 1
         hungry = nx.food < (self.bio_start_food * self.bio_hunger_threshold)
         food_sensed = li is not None and (li[1] or li[2])
-        if hungry and _auto:
-            if food_sensed and self.tick >= nx.wander_until_tick:
-                mvx, mvy = int(li[1]), int(li[2])      # forage to food
-                rest = 0
-                forced = True
-            else:
-                ed = self._explore_dir(nx)             # search for food
-                if ed is not None:
-                    mvx, mvy = ed
+        # v1.65 — THE SCRIPT ONLY ACTS ON AN AUTOPILOT TICK. In v1.64 the
+        # final "explore" fallback below sat outside the autopilot gate, so
+        # on every tick the die did not fire the script still replaced the
+        # brain's step with a scripted exploration step: the brain never
+        # moved the body (explored/1000 ticks was ~920 whether the brain
+        # asked to move 5% or 99% of the time). Now a non-autopilot tick
+        # executes exactly the brain's (mvx, mvy) and rest.
+        if _auto:
+            if hungry:
+                if food_sensed and self.tick >= nx.wander_until_tick:
+                    mvx, mvy = int(li[1]), int(li[2])  # forage to food
                     rest = 0
                     forced = True
+                else:
+                    ed = self._explore_dir(nx)         # search for food
+                    if ed is not None:
+                        mvx, mvy = ed
+                        rest = 0
+                        forced = True
+            else:
+                md = None
+                if (self.tick >= nx.mate_cooldown_until
+                        and nx.food >= self._mate_gate(nx)):
+                    md = self._nearest_mate_dir(nx)
+                if md is not None:
+                    mvx, mvy = md                      # court: move to mate
+                    nx.mating_intent_until_tick = self.tick + 60
+                    rest = 0
+                    forced = True
+                else:
+                    ed = self._explore_dir(nx)         # explore
+                    if ed is not None:
+                        mvx, mvy = ed
+                        rest = 0
+                        forced = True
+        if forced:
+            nx._forced_n += 1             # v1.65 — ticks driven by the script
         else:
-            md = None
-            if (_auto and self.tick >= nx.mate_cooldown_until
-                    and nx.food >= self._mate_gate(nx)):
-                md = self._nearest_mate_dir(nx)
-            if md is not None:
-                mvx, mvy = md                          # court: move to mate
-                nx.mating_intent_until_tick = self.tick + 60
-                rest = 0
-                forced = True
-            else:
-                ed = self._explore_dir(nx)             # explore
-                if ed is not None:
-                    mvx, mvy = ed
-                    rest = 0
-                    forced = True
-        if rest == 1 and not forced:
-            nx.food -= 0.005          # resting costs less
-            return
+            if rest == 1:
+                # v1.65 — rest = stand still with half metabolism (applied in
+                # Phase C) and no idle-atrophy ramp. Eating, social and mating
+                # still happen. v1.64 charged an EXTRA 0.005 and returned
+                # early, so a resting brain skipped eating and could only lose.
+                nx._rested = True
+                mvx = mvy = 0
+            elif nx._hold:
+                mvx = mvy = 0             # replayed step already hit an obstacle
         dx = int(max(-1, min(1, mvx)))
         dy = int(max(-1, min(1, mvy)))
         if dx or dy:
@@ -1518,14 +1651,31 @@ class Engine:
             # v1.64 — COLLISIONS COST. Bumping into rock, water you cannot
             # enter, or another NxEr used to fail silently. It now costs
             # energy and is a cause of death, so steering well is rewarded.
-            if (dx or dy) and (blocked or not self._can_enter(nx, nxp, nyp)):
+            # v1.65 — counted by kind; a brain's replayed step stops at the
+            # obstacle (one bump per decision, not one per replayed tick);
+            # cost lowered 0.5 -> 0.1 (at 0.5 collisions were 5x the base
+            # metabolism and triggered 95% of all deaths in V1.084).
+            _passable = self._can_enter(nx, nxp, nyp)
+            if blocked or not _passable:
                 nx._coll_n += 1
+                if blocked:
+                    nx._coll_nx += 1
+                else:
+                    nx._coll_wall += 1
+                if not forced:
+                    nx._hold = True
                 if self._coll_cost > 0.0:
                     nx.food -= self._coll_cost
+                    nx.e_coll += self._coll_cost
                     if nx.food <= 0:
                         self._kill(nx, "collision")
                         return
-            if (not blocked) and self._can_enter(nx, nxp, nyp):
+            else:
+                if forced:
+                    nx._smove_n += 1
+                else:
+                    nx._bmove_n += 1
+            if (not blocked) and _passable:
                 # vacate the old cell and claim the new one
                 old = (nx.pos[0], nx.pos[1])
                 if self._occupied.get(old) == nx.id:
@@ -1575,8 +1725,11 @@ class Engine:
                 # M-compliance correlated with WORSE foraging (top decile
                 # starved 57% vs 25%), so an efficiency bonus attacks the
                 # actual deficit instead of only slowing the loss.
-                nx.food += (1.0 + self._m_sel_forage * self.m_advantage(nx)
-                            if self._m_sel else 1.0)
+                _bonus = (self._m_sel_forage * self.m_advantage(nx)
+                          if self._m_sel else 0.0)
+                nx.food += 1.0 + _bonus
+                nx.e_eat += 1.0 + _bonus          # v1.65 ledger
+                nx.e_bonus += _bonus
                 nx.stats.food_found += 1
                 self.lifetime["total_food_eaten"] += 1
                 if self._learning:        # v1.52 — dopamine reward on food
@@ -1630,24 +1783,43 @@ class Engine:
         # v1.46 — theft is now rate-limited like eating (steal_cooldown_
         # ticks). Both paths below respect it so one NxEr can't drain a
         # neighbour every single tick.
+        # v1.65 — giving shares the theft cooldown (v1.64 let a brain with
+        # give == +1 hand over 1 food EVERY tick, unlogged), every transfer
+        # is booked in both NxErs' ledgers, brain thefts and floor thefts
+        # are counted apart, and the hunger floor only fires on an
+        # autopilot tick (never for brain / frozen / sham NxErs).
+        # V1.084 diagnosis: all seven champions' brains were locked with
+        # social = +1 and give = -1 whatever their input — kleptoparasites,
+        # because theft was the only brain output that reached the world.
         can_steal = (self.tick - nx.last_steal_tick) >= self._steal_cd
         if social == 1 or give == 1:
-            for o in _neighbours():
-                if give == 1 and nx.food > 10:
-                    nx.food -= 1
-                    o.food += 1
-                elif social == 1 and can_steal and o.food > 1:
-                    o.food -= 1
-                    nx.food += 1
-                    nx.stats.food_taken += 1
-                    nx.last_steal_tick = self.tick
-                break
-        elif nx.food < 5 and can_steal:
+            if can_steal:
+                for o in _neighbours():
+                    if give == 1 and nx.food > 10:
+                        nx.food -= 1
+                        o.food += 1
+                        nx.e_gvout += 1.0
+                        o.e_gvin += 1.0
+                        nx.n_give += 1
+                        nx.last_steal_tick = self.tick
+                    elif social == 1 and o.food > 1:
+                        o.food -= 1
+                        nx.food += 1
+                        nx.stats.food_taken += 1
+                        nx.e_stin += 1.0
+                        o.e_stout += 1.0
+                        nx.n_st_brain += 1
+                        nx.last_steal_tick = self.tick
+                    break
+        elif _auto and nx.food < 5 and can_steal:
             for o in _neighbours():
                 if o.food > 5 and random.random() < 0.30:
                     o.food -= 1
                     nx.food += 1
                     nx.stats.food_taken += 1
+                    nx.e_stin += 1.0
+                    o.e_stout += 1.0
+                    nx.n_st_floor += 1
                     nx.last_steal_tick = self.tick
                     break
         # mating — overhauled to match the v189 offline reference so
@@ -1669,12 +1841,17 @@ class Engine:
         # scans wasted work). At 2500+ alive that single line was a
         # measurable fraction of main-thread time. Now we only scan
         # neighbours on the rare tick when the dice actually triggers.
+        # v1.65 — the 0.3% intent floor is a script and only fires on an
+        # autopilot tick; a brain-arm NxEr signals intent with mate == +1
+        # alone. ACCEPTANCE is unchanged and needs both partners' intent
+        # windows open (no separate accept output exists).
         if mate == 1:
             nx.mating_intent_until_tick = self.tick + 60
-        elif random.random() < 0.003:
+        elif _auto and random.random() < 0.003:
             for o in _neighbours():
                 if o.is_male != nx.is_male:
                     nx.mating_intent_until_tick = self.tick + 60
+                    nx.n_mate_floor += 1
                     break
         if (nx.mating_intent_until_tick > self.tick
                 and self.tick >= nx.mate_cooldown_until
@@ -1690,6 +1867,11 @@ class Engine:
                     break
 
     def _mate(self, a, b):
+        # v1.65 — no room, no mating. v1.64 charged both parents food and a
+        # 30,000-tick cooldown BEFORE _spawn_nxer refused the child at the
+        # population cap: ~22% of V1.084 matings produced nobody.
+        if self._alive_count >= int(self.cfg["max_nxers"]):
+            return
         a.stats.mates_performed += 1
         a.last_sing_level = 1.0          # courtship/celebration song
         b.last_sing_level = 1.0
@@ -1699,6 +1881,8 @@ class Engine:
             b._da_accum += self._reward_mate_da
         a.food -= 1                       # offline cost
         b.food -= 1
+        a.e_mate += 1.0                   # v1.65 ledger
+        b.e_mate += 1.0
         cd = int(self.cfg.get("mate_cooldown_ticks", 90))
         a.mate_cooldown_until = self.tick + cd
         b.mate_cooldown_until = self.tick + cd
@@ -1787,6 +1971,14 @@ class Engine:
                     "thr_inh": round(getattr(p, "firing_threshold_inhibitory", 0.0), 4),
                     "thr_exc": round(getattr(p, "firing_threshold_excitatory", 0.0), 4),
                     "refr": getattr(p, "refractory_period_ticks", 0),
+                    # v1.65 — the arm the child was randomised into, and
+                    # which parent's genome it cloned (inheritance copies
+                    # ONE parent's params; v1.64 heritability had to infer
+                    # this from thr_exc).
+                    "arm": child.arm,
+                    "parent_arms": [a.arm, b.arm],
+                    "genetic_parent": (a.id if base_parent is a.params
+                                       else b.id),
                 })
 
     # ---- per-tick ---------------------------------------------------
@@ -1828,6 +2020,7 @@ class Engine:
             self.lifetime["peak_alive"] = n_alive
         if n_managed > self.lifetime["peak_managed"]:
             self.lifetime["peak_managed"] = n_managed
+        self._alive_count = n_alive          # v1.65 — kept current by spawn/kill
         self._events = []
         _t0 = time.perf_counter()          # v1.39 perf: tick + Phase A start
 
@@ -1876,13 +2069,19 @@ class Engine:
         mods = {}                      # v1.52 — id -> dopamine level (rewarded only)
         learning = self._learning
         da_base, da_max = self._da_base, self._da_max
+        shams = None
         for nx in order:
             nx.stats.time_lived_s += self.dt
             if K == 1 or (self.tick + (nx.id // n_shards)) % K == 0:
                 sens = self._sense(nx)
                 nx._last_sensory = sens  # used by _act's hunger floor
+                nx._fresh = True         # v1.65 — a new brain decision is due
                 batch.append((nx.id, sens))
                 due.append(nx)
+                if nx.arm == "sham":
+                    if shams is None:
+                        shams = []
+                    shams.append(len(batch) - 1)
                 # v1.52 — if this NxEr banked reward since its last brain
                 # step, raise phasic dopamine for THIS step so AGMP
                 # consolidates the eligibility traces, then clear the bank.
@@ -1890,6 +2089,23 @@ class Engine:
                     mods[nx.id] = da_base + (nx._da_accum if nx._da_accum
                                              < da_max else da_max)
                     nx._da_accum = 0.0
+
+        # v1.65 — SHAM (yoked control): a sham brain receives the
+        # exteroceptive channels 1-9 (food direction, terrain, sight, smell,
+        # day/night, heading, neighbour, song) of ANOTHER NxEr stepping this
+        # tick, and keeps its own hunger (channel 0). Its _last_sensory
+        # stays TRUE, so chemotaxis and the action layer are scored against
+        # its real world. If brain-arm NxErs do no better than shams, the
+        # brain is not using what it senses.
+        if shams and len(batch) > 1:
+            nb_ = len(batch)
+            for bi in shams:
+                j = random.randrange(nb_ - 1)
+                if j >= bi:
+                    j += 1
+                own = batch[bi][1]
+                other = due[j]._last_sensory
+                batch[bi] = (batch[bi][0], [own[0]] + list(other[1:]))
 
         # --- Phase B: brains in PARALLEL across worker processes -----
         # While this blocks on pipe.recv() the GIL is free, so the
@@ -1921,9 +2137,17 @@ class Engine:
         dt = self.dt
         tick = self.tick
         n_ckpt = len(_AGE_CKPTS)
+        rest_mult = self._rest_mult
         for nx in order:
             outs, br = nx._last_out         # initialized in NxEr.__init__
             self._act(nx, outs)
+            # v1.65 — _act can kill (collision). v1.64 carried on with the
+            # dead NxEr, charged it metabolism and killed it a SECOND time as
+            # "starved": 11,891 of 12,496 deaths were logged twice (24,387
+            # obituary rows, 2,506 NAS rows for 1,276 explorers, the NAS
+            # sampler fed duplicates and deaths/min reported double).
+            if not nx.alive:
+                continue
             # v1.53 — within-life foraging curve: one int compare per NxEr
             # per tick, and a dict write only when an age boundary is
             # crossed (at most 8 times in a whole lifetime).
@@ -1933,6 +2157,7 @@ class Engine:
                     nx.food_by_age[_ck] = nx.stats.food_found
                     nx._ck_i += 1
             if nx.food > energy_cap:        # v1.46 — cap hoarding
+                nx.e_cap += nx.food - energy_cap      # v1.65 ledger
                 nx.food = energy_cap
             idle_ticks = tick - nx.last_move_tick
             # v1.57 — M-claim selection advantage. adv is 0 until this NxEr
@@ -1945,19 +2170,24 @@ class Engine:
                 # NxErs, proven champions as readily as broken brains.
                 _ml = nx.m_last or {}
                 _e = _ml.get("M1_E"); _b = _ml.get("M5_branching")
-                _silent = (nx._mot_n / max(1, nx._tick_n)) < 0.05
+                _silent = (nx._mot_n / max(1, nx._dec_n)) < 0.05
                 _oob = (_e is not None and _b is not None
                         and not (0.18 <= _e <= 0.28) and not (0.92 <= _b <= 1.10))
                 _cull = _silent and (_oob or _e is None)
             if _cull:
                 self._kill(nx, "idle")      # v1.46 — cull the stuck
                 continue
-            idle = idle_ticks * dt
-            if idle < 0.0:
-                idle = 0.0
-            atrophy = 1.0 + bio_ramp * idle
-            if atrophy > bio_max:
-                atrophy = bio_max
+            if nx._rested:
+                # v1.65 — a CHOSEN rest: half metabolism, no idle ramp
+                nx._rested = False
+                atrophy = rest_mult
+            else:
+                idle = idle_ticks * dt
+                if idle < 0.0:
+                    idle = 0.0
+                atrophy = 1.0 + bio_ramp * idle
+                if atrophy > bio_max:
+                    atrophy = bio_max
             # v1.58 — weight the relief toward hungry NxErs: an agent at
             # 10% energy gets the full discount, one at the cap gets a
             # fraction of it. Same average cost, aimed where it saves lives.
@@ -1975,9 +2205,14 @@ class Engine:
                 _rel = _rel + _eld - _rel * _eld      # combine, stay < 1
                 if _rel > 0.95:
                     _rel = 0.95
-                nx.food -= bio_drain * atrophy * (1.0 - _rel)
+                _dr = bio_drain * atrophy
+                nx.food -= _dr * (1.0 - _rel)
+                nx.e_drain += _dr * (1.0 - _rel)      # v1.65 ledger
+                nx.e_relief += _dr * _rel
             else:
-                nx.food -= bio_drain * atrophy
+                _dr = bio_drain * atrophy
+                nx.food -= _dr
+                nx.e_drain += _dr
             nx.net.branching_ratio = br
             nx.stats.branching = br
             if nx.food <= 0:
@@ -2046,7 +2281,11 @@ class Engine:
         self._prune_dead()
 
     def _kill(self, nx, cause="starved"):
+        # v1.65 — idempotent: a NxEr dies once (see the Phase C note).
+        if not nx.alive:
+            return
         nx.alive = False
+        self._alive_count -= 1
         self.lifetime["total_deaths"] += 1
         # free the cell so other NxErs (and respawns) can use it
         cell = (nx.pos[0], nx.pos[1])
@@ -2070,7 +2309,9 @@ class Engine:
                 "tick": self.tick, "id": nx.id, "name": nx.name,
                 "born_tick": born, "death_tick": self.tick,
                 "lifespan_ticks": self.tick - born,
-                "cause": cause,        # v1.47 — "starved" | "idle"
+                "cause": cause,        # v1.47 — "starved" | "idle" | "collision"
+                "arm": nx.arm,         # v1.65 — experimental arm
+                "explorer": nx.nas_trial is not None,   # v1.65
                 "managed": nx.is_managed, "is_male": nx.is_male,
                 "n_offspring": len(nx.offspring_ids),
                 "food_found": round(st.food_found, 1),
@@ -2119,6 +2360,8 @@ class Engine:
             born = getattr(nx, "born_tick", 0)
             self.history.write("nas_trials", {
                 "trial": nt["id"], "arch": nt["arch"],
+                "id": nx.id, "name": nx.name,          # v1.65 — joinable
+                "arm": nx.arm,                          # v1.65
                 "born_tick": born, "death_tick": self.tick,
                 "lifespan": self.tick - born, "cause": cause,
                 "n_offspring": len(nx.offspring_ids),
@@ -2236,19 +2479,53 @@ class Engine:
             "dopamine_burst_max": float(getattr(self, "_da_max", 0.0)),
             "fitness_hi": "logged at death (unsaturated companion metric)",
             "age_checkpoints": list(_AGE_CKPTS),
+            # v1.65 — the controlled experiment that defines this run
+            "arms_enabled": bool(getattr(self, "_arms_on", False)),
+            "arm_cumulative_shares": [[round(c, 4), k] for c, k in
+                                      getattr(self, "_arm_cum", [])],
+            "arm_autopilot": dict(getattr(self, "_arm_auto", {})),
+            "metric_units": "brain markers counted per fresh decision",
         }
         self.history.provenance(rec)
 
     @staticmethod
     def behav(nx):
         """v1.64 — does the brain act in the world? chemotaxis = mean cosine
-        between the brain's intended step and the food direction (+1 toward,
-        0 random, -1 away); motor_frac = share of ticks with any brain-driven
-        step; collisions = blocked moves."""
+        between the brain's intended step (bmx, bmy) and the food direction
+        (fdx, fdy), only on decisions where food is sensed and the brain
+        wants to move (+1 toward, 0 unrelated, -1 away), with chemo_n;
+        motor_frac = share of decisions with a non-zero step; collisions =
+        blocked steps (death by collision is its own obituary cause)."""
+        # v1.65 — all brain markers are per FRESH DECISION (dec_n), the
+        # executed-move split says who actually moved the body, and the
+        # ledger says where every unit of energy came from and went.
+        d = max(1, nx._dec_n)
+        mv = nx._bmove_n + nx._smove_n
+        r1 = lambda v: round(v, 1)
         return {"chemotaxis": round(nx._chemo_sum / nx._chemo_n, 4) if nx._chemo_n else None,
                 "chemo_n": nx._chemo_n,
-                "motor_frac": round(nx._mot_n / max(1, nx._tick_n), 4),
-                "collisions": nx._coll_n}
+                "motor_frac": round(nx._mot_n / d, 4),
+                "collisions": nx._coll_n,
+                "arm": nx.arm,
+                "dec_n": nx._dec_n,
+                "out_soc": round(nx._soc1 / d, 4),
+                "out_give": round(nx._give1 / d, 4),
+                "out_mate": round(nx._mate1 / d, 4),
+                "out_rest": round(nx._rest1 / d, 4),
+                "out_sing": round(nx._sing1 / d, 4),
+                "lock_frac": round(nx._same_n / d, 4),
+                "brain_move_frac": round(nx._bmove_n / mv, 4) if mv else None,
+                "script_tick_frac": round(nx._forced_n / max(1, nx._tick_n), 4),
+                "moves": mv,
+                "coll_wall": nx._coll_wall, "coll_nx": nx._coll_nx,
+                "e_eat": r1(nx.e_eat), "e_bonus": r1(nx.e_bonus),
+                "e_stin": r1(nx.e_stin), "e_stout": r1(nx.e_stout),
+                "e_gvin": r1(nx.e_gvin), "e_gvout": r1(nx.e_gvout),
+                "e_drain": r1(nx.e_drain), "e_relief": r1(nx.e_relief),
+                "e_coll": r1(nx.e_coll), "e_mate": r1(nx.e_mate),
+                "e_cap": r1(nx.e_cap),
+                "n_st_brain": nx.n_st_brain, "n_st_floor": nx.n_st_floor,
+                "n_give": nx.n_give, "n_mate_floor": nx.n_mate_floor}
 
     def m_advantage(self, nx):
         """v1.57 — selection advantage in [0,1] from this NxEr's smoothed
@@ -2775,6 +3052,48 @@ class Engine:
             "pool_mode": self.pool.mode_info().get("mode"),
             "perf": self.get_perf(),     # v1.39 per-phase tick timing (ms)
         }
+        # v1.65 — live per-arm summary (the controlled experiment)
+        if self._arms_on:
+            _arms = {}
+            for a in alive:
+                s = _arms.get(a.arm)
+                if s is None:
+                    s = _arms[a.arm] = {"n": 0, "food": 0.0, "ages": [],
+                                        "mot": 0.0, "soc": 0.0, "lock": 0.0,
+                                        "bmf": 0.0, "bmf_n": 0,
+                                        "chemo": 0.0, "chemo_n": 0}
+                s["n"] += 1
+                s["food"] += a.food
+                s["ages"].append(self.tick - a.born_tick)
+                d_ = max(1, a._dec_n)
+                s["mot"] += a._mot_n / d_
+                s["soc"] += a._soc1 / d_
+                s["lock"] += a._same_n / d_
+                mv_ = a._bmove_n + a._smove_n
+                if mv_:
+                    s["bmf"] += a._bmove_n / mv_
+                    s["bmf_n"] += 1
+                if a._chemo_n >= 50:
+                    s["chemo"] += a._chemo_sum / a._chemo_n
+                    s["chemo_n"] += 1
+            arms_out = {}
+            for k, s in _arms.items():
+                ag = sorted(s["ages"])
+                n_ = s["n"]
+                arms_out[k] = {
+                    "alive": n_,
+                    "food_mean": round(s["food"] / n_, 2),
+                    "age_p50": ag[len(ag) // 2],
+                    "age_max": ag[-1],
+                    "motor_frac": round(s["mot"] / n_, 4),
+                    "out_soc": round(s["soc"] / n_, 4),
+                    "lock_frac": round(s["lock"] / n_, 4),
+                    "brain_move_frac": (round(s["bmf"] / s["bmf_n"], 4)
+                                        if s["bmf_n"] else None),
+                    "chemotaxis": (round(s["chemo"] / s["chemo_n"], 4)
+                                   if s["chemo_n"] else None),
+                }
+            rec["arms"] = arms_out
         # v1.44 — offline-GoL M-metrics (M1/M2/M5/M6/M7/M8/M10 + heritability)
         if self._m12_on:
             try:
@@ -3005,6 +3324,11 @@ class Engine:
                 # lifespan in obituaries/nas_trials after any reboot, and
                 # would have fired every within-life age checkpoint at once.
                 "born_tick": getattr(a, "born_tick", 0),
+                "arm": getattr(a, "arm", "mixed"),       # v1.65
+                "explorer": a.nas_trial is not None,      # v1.65
+                # v1.65 — explorers kept their NAS identity only until a
+                # reboot; now the trial (id + arch) survives it.
+                "nas_trial": (dict(a.nas_trial) if a.nas_trial else None),
                 # v1.59 — COPY, don't reference. These are mutated by the
                 # engine (food_by_age at the age checkpoints, offspring_ids on
                 # mating) while the snapshot JSON-encodes on a daemon thread,

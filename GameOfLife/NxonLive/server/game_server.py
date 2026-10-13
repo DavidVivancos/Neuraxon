@@ -25,7 +25,7 @@ from .names import NameAllocator
 from .persistence import Persistence
 
 
-SERVER_VERSION = "GoL Server V 1.084"   # bumped each release
+SERVER_VERSION = "GoL Server V 1.085"   # bumped each release
 
 class GameServer:
     def __init__(self, config_path, state_dir):
@@ -291,6 +291,14 @@ class GameServer:
             # backfill fabricated points at the moment of reboot
             age_now = eng.tick - nx.born_tick
             nx._ck_i = sum(1 for c in _AGE_CKPTS if c <= age_now)
+            # v1.65 — keep the experimental arm across a reboot (pre-v1.65
+            # snapshots have none: those NxErs join the default mixed arm),
+            # and restart the idle clock now, or every restored NxEr would
+            # read as idle since tick 0.
+            eng._assign_arm(nx, nd.get("arm") or "mixed")
+            nx.last_move_tick = eng.tick
+            if isinstance(nd.get("nas_trial"), dict):
+                nx.nas_trial = nd["nas_trial"]
             # rebuild the brain inside its pool worker: load the saved
             # brain if present, else build fresh from params.
             if nd.get("brain"):
@@ -298,6 +306,8 @@ class GameServer:
                 eng.pool.load(nx.id, nd["brain"])
             else:
                 eng.pool.add(nx.id, nd.get("params", {}))
+            if nx.arm == "frozen" and nx.alive:
+                eng.pool.freeze(nx.id)
             st = nd.get("stats", {})
             nx.stats.food_found = st.get("food_found", 0)
             nx.stats.food_taken = st.get("food_taken", 0)
@@ -721,69 +731,20 @@ class GameServer:
             cand.append((float(sc), a))
         if not cand:
             return
-        cand.sort(key=lambda t: -t[0])
-        keep = cand[:self._elite_n]
-        # v1.60 — a second archive keyed on AGE. Three releases of selection
-        # have never once saved a long-lived brain: max lifespan sits at
-        # 34-48% of a run and the compliance archive skims mid-pack ages.
-        # The oldest brains are the ones we most want to study and have
-        # never kept.
-        seen = set(id(a) for _, a in keep)
-        age_keep = set()
-        for _age, a in sorted(
-                ((eng.tick - getattr(a, "born_tick", 0), a) for _, a in cand),
-                key=lambda t: -t[0])[:max(4, self._elite_n // 4)]:
-            if id(a) not in seen:
-                # v1.63 — cap elders at a quarter of the archive. v1.62 let
-                # age picks enter unconditionally and never be evicted, so
-                # they filled all 40 slots and pushed every compliance
-                # champion out.
-                if sum(1 for r in self._elite.values()
-                       if r.get("slot") == "age") >= max(2, self._elite_n // 4):
-                    continue
-                age_keep.add(a.name)
-                keep.append((float(getattr(a, "m_fit_w", 0.0) or 0.0), a))
         edir = self._elite_dir()
-        for sc, a in keep:
-            prev = self._elite.get(a.name)
-            if prev is not None:
-                # v1.60 — second reading. v1.59 produced 0 of 80 because it
-                # only ran for entries still in the live top-N, and those
-                # brains were long dead. Now it fires for any archived entry
-                # whose NxEr is still alive and old enough, whatever its rank.
-                if prev.get("slot") == "age":
-                    prev["age"] = eng.tick - getattr(a, "born_tick", 0)
-                if (prev.get("verify_score") is None
-                        and (eng.tick - prev["tick"]) >= self._elite_reverify):
-                    prev["verify_score"] = round(sc, 4)
-                    prev["verify_tick"] = eng.tick
-                    prev["verify_m1e"] = (a.m_last or {}).get("M1_E")
-                    prev["verify_age"] = eng.tick - getattr(a, "born_tick", 0)
-                continue
-            # v1.60 — EVICT the weakest instead of refusing new entries.
-            # v1.59 filled with the first 80 brains that cleared the sample
-            # threshold and then went blind: every entry came from ticks
-            # 1,570-3,482 of a 1,761,204-tick run, i.e. the first 0.2%.
-            if len(self._elite) >= self._elite_n:
-                # v1.61 — never evict an age-slot entry on score. v1.60 added
-                # an age archive but gave those picks their (low) compliance
-                # score, so the score-eviction deleted them immediately: the
-                # oldest brain archived reached 118,956 ticks while the oldest
-                # NxEr lived 932,860. The brains we most want were harvested
-                # and then thrown away within one sweep.
-                pool = [r for r in self._elite.values()
-                        if r.get("slot") != "age"]
-                if not pool:
-                    continue
-                worst = min(pool, key=lambda r: r.get("score") or 0.0)
-                # v1.62 — an age pick enters regardless of score. v1.61
-                # protected age entries from EVICTION but still made them
-                # beat the score floor to get IN, so 0 of 40 archive slots
-                # ever held an elder while the oldest NxEr lived 1.49M ticks.
-                if (a.name not in age_keep
-                        and (worst.get("score") or 0.0) >= sc):
-                    continue                  # nothing here beats the floor
-                self._drop_elite(worst)
+        # v1.65 — TWO SEPARATE POOLS. K age slots + (N-K) score slots.
+        # V1.084 showed the v1.63 age logic was broken: its 13 age slots were
+        # filled at ticks 697-1,056 by founders aged ~1,000 ticks and could
+        # never be displaced (age entries were exempt from eviction and new
+        # age picks were refused once the quota was met), the brain blob
+        # stayed the one exported at age ~1,000, and the quota overshot
+        # (13 > 10) because it was checked before any pick was added. The
+        # brain that lived the whole run (T, 530,815 ticks) was never kept.
+        K = max(2, self._elite_n // 4)
+        n_score = max(1, self._elite_n - K)
+        cand.sort(key=lambda t: -t[0])
+
+        def _export(a, sc, slot, prev_file=None):
             try:
                 model = eng.export_model_for(a)
                 fn = os.path.join(edir, "%s_t%d.json" % (a.name, eng.tick))
@@ -791,16 +752,23 @@ class GameServer:
                     json.dump(model, f)
             except Exception as e:
                 print("[elite] export failed:", e)
-                continue
+                return None
+            if prev_file and prev_file != os.path.basename(fn):
+                try:
+                    os.remove(os.path.join(edir, prev_file))
+                except OSError:
+                    pass
             m = a.m_last or {}
-            self._elite[a.name] = {
+            age = eng.tick - getattr(a, "born_tick", 0)
+            return {
                 "name": a.name, "file": os.path.basename(fn),
                 "tick": eng.tick, "score": round(sc, 4),
                 "m_fit": a.m_fit_ema, "m_fit_w": a.m_fit_w,
                 "m_score": a.m_score_ema, "m_samples": a.m_samples,
                 "m_in_band": a.m_in_band, "m_n_checked": a.m_n_checked,
-                "age": eng.tick - getattr(a, "born_tick", 0),
+                "age": age, "age_at_export": age,
                 "food_found": a.stats.food_found,
+                "food_taken": a.stats.food_taken,
                 "offspring": len(a.offspring_ids),
                 "M1_E": m.get("M1_E"), "M1_N": m.get("M1_N"),
                 "M2_gate": m.get("M2_mean_gate"),
@@ -809,10 +777,101 @@ class GameServer:
                 "W_mean_abs": m.get("W_mean_abs"), "W_n": m.get("W_n"),
                 "verify_score": None, "verify_tick": None,
                 "verify_m1e": None, "verify_age": None,
-                "slot": "age" if a.name in age_keep else "score",
+                "slot": slot,
+                "arm": getattr(a, "arm", None),            # v1.65
+                "motor_frac": round(a._mot_n / max(1, a._dec_n), 4),
+                "lock_frac": round(a._same_n / max(1, a._dec_n), 4),
                 "arch": (a.nas_trial or {}).get("arch"),
             }
+
+        # ---- score pool: the most M-compliant living brains ------------
+        for sc, a in cand[:n_score]:
+            prev = self._elite.get(a.name)
+            if prev is not None:
+                # v1.60 — second reading for any archived entry still alive
+                if (prev.get("verify_score") is None
+                        and (eng.tick - prev["tick"]) >= self._elite_reverify):
+                    prev["verify_score"] = round(sc, 4)
+                    prev["verify_tick"] = eng.tick
+                    prev["verify_m1e"] = (a.m_last or {}).get("M1_E")
+                    prev["verify_age"] = eng.tick - getattr(a, "born_tick", 0)
+                continue
+            pool = [r for r in self._elite.values() if r.get("slot") != "age"]
+            if len(pool) >= n_score:
+                worst = min(pool, key=lambda r: r.get("score") or 0.0)
+                if (worst.get("score") or 0.0) >= sc:
+                    continue                    # nothing here beats the floor
+                self._drop_elite(worst)
+            rec = _export(a, sc, "score")
+            if rec is not None:
+                self._elite[a.name] = rec
+
+        # ---- age pool: a hall of fame of the LONGEST-LIVED brains -------
+        # Ranked by age (dead entries keep their last age), refreshed: a
+        # living entry's blob is re-exported every time its age doubles, so
+        # the archive holds the OLD brain, not the newborn it once was.
+        for age, a in sorted(((eng.tick - getattr(a, "born_tick", 0), a)
+                              for _, a in cand), key=lambda t: -t[0])[:K]:
+            sc = float(getattr(a, "m_fit_w", 0.0) or 0.0)
+            prev = self._elite.get(a.name)
+            if prev is not None:
+                if prev.get("slot") == "age":
+                    prev["age"] = age
+                    if age >= 2 * max(1, prev.get("age_at_export") or 1):
+                        rec = _export(a, sc, "age", prev.get("file"))
+                        if rec is not None:
+                            self._elite[a.name] = rec
+                continue                        # already held (either pool)
+            ages = [r for r in self._elite.values() if r.get("slot") == "age"]
+            if len(ages) >= K:
+                youngest = min(ages, key=lambda r: r.get("age") or 0)
+                if (youngest.get("age") or 0) >= age:
+                    continue
+                self._drop_elite(youngest)
+            rec = _export(a, sc, "age")
+            if rec is not None:
+                self._elite[a.name] = rec
         self._write_elite_index()
+
+    def _load_elite_index(self):
+        """v1.65 — rebuild the in-memory elite table from INDEX.csv after a
+        restart. Before, a reboot started an empty table, rewrote INDEX.csv
+        from scratch and left every earlier blob orphaned on disk."""
+        import csv
+        fn = os.path.join(self._elite_dir(), "INDEX.csv")
+        if self._elite or not os.path.exists(fn):
+            return
+        num = {"tick", "age", "age_at_export", "food_found", "food_taken",
+               "offspring", "m_samples", "m_in_band", "m_n_checked", "W_n",
+               "verify_tick", "verify_age"}
+        try:
+            with open(fn) as f:
+                for row in csv.DictReader(f):
+                    name = row.get("name")
+                    if not name or not os.path.exists(
+                            os.path.join(self._elite_dir(), row.get("file", ""))):
+                        continue
+                    rec = {}
+                    for k, v in row.items():
+                        if k is None or k == "arch_json":
+                            continue
+                        if v in ("", None):
+                            rec[k] = None
+                        elif k in ("name", "file", "slot", "arm"):
+                            rec[k] = v
+                        else:
+                            try:
+                                rec[k] = int(v) if k in num else float(v)
+                            except ValueError:
+                                rec[k] = v
+                    try:
+                        rec["arch"] = json.loads(
+                            (row.get("arch_json") or "{}").replace("'", '"')) or None
+                    except ValueError:
+                        rec["arch"] = None
+                    self._elite[name] = rec
+        except (OSError, csv.Error):
+            pass
 
     def _drop_elite(self, rec):
         """v1.60 — remove an evicted entry and its blob."""
@@ -826,10 +885,11 @@ class GameServer:
         """CSV so the archive is queryable without opening 700 KB blobs."""
         cols = ["name", "file", "tick", "score", "m_fit", "m_fit_w",
                 "m_score", "m_samples", "m_in_band", "m_n_checked", "age",
-                "food_found", "offspring", "M1_E", "M1_N", "M2_gate",
+                "age_at_export", "food_found", "food_taken", "offspring",
+                "M1_E", "M1_N", "M2_gate",
                 "M5_branch", "M6_acw", "W_mean_abs", "W_n",
                 "verify_score", "verify_tick", "verify_m1e", "verify_age",
-                "slot"]
+                "slot", "arm", "motor_frac", "lock_frac"]
         try:
             rows = sorted(self._elite.values(),
                           key=lambda r: -(r.get("score") or 0))
@@ -1016,8 +1076,9 @@ class GameServer:
             self._elite_min_samples = int(
                 self.cfg.get("elite_min_samples", 5))
             self._elite_reverify = int(
-                self.cfg.get("elite_reverify_ticks", 200000))
+                self.cfg.get("elite_reverify_ticks", 20000))
             self._elite_cfg_done = True
+            self._load_elite_index()       # v1.65 — survive restarts
         try:
             self._service_elite()
         except Exception as e:
