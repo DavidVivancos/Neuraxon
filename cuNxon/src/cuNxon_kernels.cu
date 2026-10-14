@@ -117,8 +117,8 @@ __global__ void k_neuromod_update(NeuromodFieldDev M,
     for (int i = 0; i < 4; ++i) {
         float tonic  = M.tonic[i];
         float phasic = M.phasic[i];
-        tonic  += (dt_ms / p->tau_tonic ) * (baseline[i] - tonic);
-        phasic += (dt_ms / p->tau_phasic) * (0.f         - phasic);
+        tonic  += (dt_ms / fmaxf(p->tau_tonic, 1e-3f)) * (baseline[i] - tonic);
+        phasic += (dt_ms / fmaxf(p->tau_phasic, 1e-3f)) * (0.f         - phasic);
         M.tonic[i]  = tonic;
         M.phasic[i] = phasic;
     }
