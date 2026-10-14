@@ -530,30 +530,41 @@ def _demo(n_train: int = 500, n_infer: int = 200, device: int = 0) -> None:
     asc = net.add_sphere("ASC", SPHERE_ASSOCIATION, pASC)
     mtr = net.add_sphere("MTR", SPHERE_MOTOR,       pMTR)
 
-    # interfaces (same convention as the C++ demo)
+    # interfaces. Index convention matches the C++ demo (example_4sphere.cu):
+    # neurons are laid out input [0, n_in), hidden [n_in, n_in+n_hid),
+    # output [n_in+n_hid, n_total). Relay-out and readout ports MUST point at
+    # the OUTPUT block (the neurons with learning dynamics); pointing them at
+    # 0..N selects pass-through INPUT neurons instead.
+    def _out_block(p):
+        base = p.num_input_neurons + p.num_hidden_neurons
+        return base, base + p.num_output_neurons
+
+    v0, v1 = _out_block(pVIS)
     net.set_interface(vis,
                       sensory_inputs=list(range(pVIS.num_input_neurons)),
                       relay_inputs=[],
-                      relay_outputs=list(range(pVIS.num_output_neurons - 2)),
-                      readout_outputs=list(range(pVIS.num_output_neurons - 2,
-                                                  pVIS.num_output_neurons)))
+                      relay_outputs=list(range(v0, v1 - 2)),
+                      readout_outputs=list(range(v1 - 2, v1)))
+    a0, a1 = _out_block(pAUD)
     net.set_interface(aud,
                       sensory_inputs=list(range(pAUD.num_input_neurons)),
                       relay_inputs=[],
-                      relay_outputs=list(range(pAUD.num_output_neurons - 2)),
-                      readout_outputs=list(range(pAUD.num_output_neurons - 2,
-                                                  pAUD.num_output_neurons)))
+                      relay_outputs=list(range(a0, a1 - 2)),
+                      readout_outputs=list(range(a1 - 2, a1)))
+    c0, c1 = _out_block(pASC)
     net.set_interface(asc,
                       sensory_inputs=[],
                       relay_inputs=list(range(pASC.num_input_neurons)),
-                      relay_outputs=list(range(pASC.num_output_neurons - 3)),
-                      readout_outputs=list(range(pASC.num_output_neurons - 3,
-                                                  pASC.num_output_neurons)))
+                      relay_outputs=list(range(c0, c1 - 3)),
+                      readout_outputs=list(range(c1 - 3, c1)))
+    # MTR: output neurons serve double duty -- readouts AND efference-copy
+    # relay-outs that feed back to ASC (the mtr->asc FEEDBACK link below).
+    m0, m1 = _out_block(pMTR)
     net.set_interface(mtr,
                       sensory_inputs=[],
                       relay_inputs=list(range(pMTR.num_input_neurons)),
-                      relay_outputs=[],
-                      readout_outputs=list(range(pMTR.num_output_neurons)))
+                      relay_outputs=list(range(m0, m1)),
+                      readout_outputs=list(range(m0, m1)))
 
     def mklink(kind, band, gain, delay, c):
         lp = LinkParameters(kind=kind, coherence_band=band, gain=gain,
