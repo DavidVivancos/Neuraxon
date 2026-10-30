@@ -556,6 +556,17 @@ class App:
         canon_host = str(cfg.get("canonical_host", "")).strip().lower()
         force_https = bool(cfg.get("force_https", False))
 
+        def _raw_pq(req):
+            # v1.67 (P13) — the RAW (still percent-encoded) path + query.
+            # rel_url.path_qs is decoded, so a scanner's %0d%0a became a CR/LF
+            # inside the Location header and aiohttp raised ValueError (an
+            # unhandled 500 in the log, 3 times in V 1.086).
+            try:
+                pq = req.rel_url.raw_path_qs
+            except AttributeError:
+                pq = req.raw_path
+            return pq.replace("\r", "").replace("\n", "")
+
         @web.middleware
         async def host_https_mw(req, handler):
             host = (req.headers.get("Host") or "").lower().split(":")[0]
@@ -564,7 +575,7 @@ class App:
             # 1. wrong host -> 308 to canonical
             if canon_host and host and host != canon_host:
                 tgt = ("https://" if force_https or xfp == "https"
-                       else "http://") + canon_host + req.rel_url.path_qs
+                       else "http://") + canon_host + _raw_pq(req)
                 return web.Response(status=308,
                                     headers={"Location": tgt})
             # 2. http when https required -> 308 to https. MUST skip the
@@ -580,7 +591,7 @@ class App:
             if (force_https and xfp == "http" and req.method == "GET"
                     and not is_ws_upgrade):
                 tgt = ("https://" + (canon_host or host) +
-                       req.rel_url.path_qs)
+                       _raw_pq(req))
                 return web.Response(status=308,
                                     headers={"Location": tgt})
             return await handler(req)

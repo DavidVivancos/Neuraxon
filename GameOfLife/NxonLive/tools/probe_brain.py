@@ -1,4 +1,4 @@
-"""v1.65 — OPEN-LOOP BRAIN PROBE: is a brain's motor output coupled to its
+"""v1.65/v1.66 — OPEN-LOOP BRAIN PROBE: is a brain's motor output coupled to its
 input, or is it noise?
 
 In the live world a brain's output is entangled with everything else
@@ -23,6 +23,18 @@ Reported per brain:
   silent_vs_drv motor amplitude with NO input vs with food present
   newborn_*     the same probe on a NEWBORN brain built from the same genes
                 (--newborn) — tells whether life experience changed coupling
+  bare_*        (v1.66, --reflex both) the same probe with the innate reflex
+                current switched OFF, so reflex-arm brains can be split into
+                what the evolved reflex does and what the brain adds
+
+v1.66 reflex arc: files that carry "reflex" genes and an arm of "reflex" or
+"reflex_sham" are probed WITH the innate reflex, computed from the clamped
+input exactly as the server does. --reflex-mode body (the server default)
+sums it with the brain's command per axis (step = sign(brain + reflex)
+beyond +-0.5); --reflex-mode brain injects it as a current into the motor
+output neurons (mvx, mvy, rest). --reflex off probes the bare brain;
+--reflex on forces the arc for any file with reflex genes; --reflex both
+reports both (bare_* = the brain alone).
 
 Usage (from the mngol5 folder):
   python3 tools/probe_brain.py state/best/brains/*.json state/best/elite/*.json
@@ -51,10 +63,14 @@ try:
 except Exception:
     architecture._ARCH = {}
 from neuraxon.multisphere import load_multisphere_from_dict, build_brain  # noqa: E402
-try:
-    from neuraxon.network import _rebuild_net_from_dict as _REBUILD  # noqa: E402
-except Exception:
-    _REBUILD = None
+from server import brain_fix as BF  # noqa: E402
+# v1.67 — the exact-shape loader (the substrate's own loader re-sizes every
+# sphere to >=10 inputs / >=7 outputs and rewires it; V 1.086 brains were
+# rewired once in their worker and saved that way, so this keeps them as they
+# lived). Brains exported by a V 1.087 worker carry "mngol5_fix" (the fix
+# settings they ran with); for those the living fixes are re-applied on load
+# and the relays are held / energy rescued each probe step, as in the worker.
+_REBUILD = BF.rebuild_net_exact
 
 DIRS = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
 
@@ -69,21 +85,57 @@ def sensory(fd, hunger=0.8):
 
 
 def _load(bdict):
-    return load_multisphere_from_dict(bdict, rebuild_net_fn=_REBUILD)
+    b = load_multisphere_from_dict(bdict, rebuild_net_fn=_REBUILD)
+    fx = bdict.get("mngol5_fix") if isinstance(bdict, dict) else None
+    if isinstance(fx, dict):
+        BF.apply_living(b, fx)
+        b._probe_fix = (BF.neuron_list(b), BF.relay_list(b, fx),
+                        bool(fx.get("energy_rescue", True)),
+                        bool(fx.get("sm_same_step", True)))
+    return b
 
 
-def _run(bdict, sens, warm, steps, seed, build=None):
+def reflex_drive(g, sens):
+    """The server's v1.66 reflex current (engine Phase A) for input sens."""
+    if not g:
+        return None
+    gn = g.get("rfx_gain", 0.0)
+    return (gn * (g.get("rfx_xx", 0.0) * sens[1] + g.get("rfx_xy", 0.0) * sens[2]),
+            gn * (g.get("rfx_yx", 0.0) * sens[1] + g.get("rfx_yy", 0.0) * sens[2]),
+            gn * g.get("rfx_rest", 0.0) * (2.0 * sens[5] - 1.0))
+
+
+def _combine(v):
+    return 1 if v > 0.5 else (-1 if v < -0.5 else 0)
+
+
+def _run(bdict, sens, warm, steps, seed, build=None, reflex=None, mode="body"):
     random.seed(seed)
     b = build() if build is not None else _load(bdict)
     ids = [n.id for n in b.sensory_sphere.network.input_neurons]
     ext = {"sensory": {ids[k]: (sens[k] if k < len(sens) else 0.0)
                        for k in range(len(ids))}}
+    rd = reflex_drive(reflex, sens)
+    body = rd if (rd is not None and mode == "body") else None
+    if rd is not None and mode == "brain":
+        oi = [n.id for n in b.motor_sphere.network.output_neurons]
+        if len(oi) >= 6:
+            ext["motor"] = {oi[0]: rd[0], oi[1]: rd[1], oi[5]: rd[2]}
     out = []
+    pf = getattr(b, "_probe_fix", None)
     for t in range(warm + steps):
-        b.simulate_step(ext)
+        if pf is not None:
+            if pf[2]:
+                BF.rescue_energy(pf[0])
+            BF.hold_relays(pf[1])
+        BF.step_brain(b, ext, pf[3] if pf is not None else True)
         if t >= warm:
             o = list(b.motor_sphere.network.get_output_states())
             o = (o + [0] * 7)[:7]
+            if body is not None:
+                o[0] = _combine(o[0] + body[0])
+                o[1] = _combine(o[1] + body[1])
+                o[5] = _combine(o[5] + body[2])
             out.append(o)
     return out
 
@@ -114,12 +166,13 @@ def _dir_class(mx, my):
     return DIRS.index((mx, my))
 
 
-def probe(bdict, warm=16, steps=48, seed=1, build=None):
-    """Return the probe metrics for one brain."""
+def probe(bdict, warm=16, steps=48, seed=1, build=None, reflex=None, mode="body"):
+    """Return the probe metrics for one brain (reflex = genes dict to apply
+    the v1.66 innate reflex in the given mode, or None for the bare brain)."""
     per = {}
     for ci, fd in enumerate(DIRS):
-        per[ci] = _run(bdict, sensory(fd), warm, steps, seed + ci, build)
-    silent = _run(bdict, sensory(None), warm, steps, seed + 99, build)
+        per[ci] = _run(bdict, sensory(fd), warm, steps, seed + ci, build, reflex, mode)
+    silent = _run(bdict, sensory(None), warm, steps, seed + 99, build, reflex, mode)
     cos_sum = 0.0
     cos_n = 0
     moves = 0
@@ -185,8 +238,10 @@ def _brain_dict(path):
     with open(path) as f:
         d = json.load(f)
     if isinstance(d, dict) and "brain" in d and isinstance(d["brain"], dict):
-        return d["brain"], d.get("params"), d.get("name") or os.path.basename(path)
-    return d, None, os.path.basename(path)
+        meta = {"reflex": d.get("reflex") if isinstance(d.get("reflex"), dict) else None,
+                "arm": d.get("arm")}
+        return d["brain"], d.get("params"), d.get("name") or os.path.basename(path), meta
+    return d, None, os.path.basename(path), {"reflex": None, "arm": None}
 
 
 def main():
@@ -198,20 +253,43 @@ def main():
     ap.add_argument("--newborn", action="store_true",
                     help="also probe a newborn brain built from the same genes")
     ap.add_argument("--csv", default=None)
+    ap.add_argument("--reflex", choices=("auto", "on", "off", "both"), default="auto",
+                    help="v1.66 innate reflex: auto = as in the world "
+                         "(reflex / reflex_sham arms only), on = any file with "
+                         "reflex genes, off = bare brain, both = report both")
+    _mode = "body"
+    try:
+        _mode = json.load(open(os.path.join(ROOT, "world_config.json"))).get("reflex_mode", "body")
+    except Exception:
+        pass
+    ap.add_argument("--reflex-mode", choices=("body", "brain"), default=_mode,
+                    help="how the reflex acts (default: world_config.json reflex_mode)")
     a = ap.parse_args()
     rows = []
     for p in a.files:
         try:
-            bd, params, name = _brain_dict(p)
+            bd, params, name, meta = _brain_dict(p)
         except Exception as e:
             print("skip", p, e)
             continue
         if not bd or "spheres" not in bd:
             print("skip (no brain)", p)
             continue
-        r = {"file": os.path.basename(p), "name": name}
+        r = {"file": os.path.basename(p), "name": name, "arm": meta["arm"]}
+        g = meta["reflex"]
+        use = None
+        if g and (a.reflex in ("on", "both") or
+                  (a.reflex == "auto" and meta["arm"] in ("reflex", "reflex_sham"))):
+            use = g
+        r["reflex_applied"] = use is not None
+        if g:
+            r["rfx"] = {k: round(v, 3) for k, v in g.items()}
         try:
-            r.update(probe(bd, a.warm, a.steps, a.seed))
+            r.update(probe(bd, a.warm, a.steps, a.seed, reflex=use, mode=a.reflex_mode))
+            r["reflex_mode"] = a.reflex_mode if use is not None else None
+            if a.reflex == "both" and use is not None:
+                for k, v in probe(bd, a.warm, a.steps, a.seed).items():
+                    r["bare_" + k] = v
         except Exception as e:
             print("probe failed", p, e)
             continue
@@ -220,7 +298,7 @@ def main():
                 from server.engine import make_params
                 pp = make_params(params)
                 nb = probe(None, a.warm, a.steps, a.seed,
-                           build=lambda: build_brain(pp))
+                           build=lambda: build_brain(pp), reflex=use, mode=a.reflex_mode)
                 for k, v in nb.items():
                     r["newborn_" + k] = v
             except Exception as e:
@@ -233,7 +311,8 @@ def main():
             return (sum(v) / len(v), len(v)) if v else (float("nan"), 0)
         print("\n== SUMMARY over %d brains" % len(rows))
         for k in ("chemo_probe", "mi_bits", "move_rate", "eta2_x", "eta2_y",
-                  "amp_silent", "amp_driven", "newborn_chemo_probe",
+                  "amp_silent", "amp_driven", "bare_chemo_probe", "bare_mi_bits",
+                  "newborn_chemo_probe",
                   "newborn_mi_bits", "newborn_move_rate"):
             mu, n = m(k)
             if n:

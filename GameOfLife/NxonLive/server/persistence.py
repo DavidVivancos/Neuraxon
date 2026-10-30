@@ -21,20 +21,35 @@ class Persistence:
         os.makedirs(self.dir, exist_ok=True)
         self.path = os.path.join(self.dir, "snapshot.json")
         self.prev = os.path.join(self.dir, "snapshot.prev.json")
-
-    def save(self, state):
-        # rotate latest -> prev (best-effort)
+        # v1.66 — a run stopped in the middle of a save (V 1.085 ended
+        # this way at tick 751,434) leaves a partial tmp*.tmp behind.
+        # It is never read; remove it so they cannot pile up.
         try:
-            if os.path.exists(self.path):
-                os.replace(self.path, self.prev)
+            for fn in os.listdir(self.dir):
+                if fn.startswith("tmp") and fn.endswith(".tmp"):
+                    try:
+                        os.remove(os.path.join(self.dir, fn))
+                    except OSError:
+                        pass
         except OSError:
             pass
+
+    def save(self, state):
+        # v1.66 — write the new snapshot COMPLETELY first, then rotate
+        # latest -> prev, then move the new one into place. Before, the
+        # rotation came first, so a stop mid-write left no snapshot.json
+        # at all (only prev + a partial tmp).
         fd, tmp = tempfile.mkstemp(dir=self.dir, suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(state, f, separators=(",", ":"))
                 f.flush()
                 os.fsync(f.fileno())
+            try:
+                if os.path.exists(self.path):
+                    os.replace(self.path, self.prev)
+            except OSError:
+                pass
             os.replace(tmp, self.path)
         finally:
             if os.path.exists(tmp):

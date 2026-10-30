@@ -20,12 +20,13 @@ import glob
 import threading
 
 from .engine import (Engine, NxEr, make_params, _params_to_dict,
+                     NAS_FUNCTION_ARMS, FROZEN_ARMS,
                       RANK_METRICS, _AGE_CKPTS)
 from .names import NameAllocator
 from .persistence import Persistence
 
 
-SERVER_VERSION = "GoL Server V 1.085"   # bumped each release
+SERVER_VERSION = "GoL Server V 1.087"   # bumped each release
 
 class GameServer:
     def __init__(self, config_path, state_dir):
@@ -299,15 +300,24 @@ class GameServer:
             nx.last_move_tick = eng.tick
             if isinstance(nd.get("nas_trial"), dict):
                 nx.nas_trial = nd["nas_trial"]
+            # v1.66 — innate reflex genes (pre-v1.66 snapshots: fresh draw)
+            nx.reflex = (nd.get("reflex") if isinstance(nd.get("reflex"), dict)
+                         else eng._random_reflex())
             # rebuild the brain inside its pool worker: load the saved
             # brain if present, else build fresh from params.
+            # v1.67 — a saved brain is ONLY loaded. Until v1.66 it was also
+            # sent to a builder (pool.add) whose fresh brain reached the same
+            # worker ~0.25 s later and replaced the restored one (parallel
+            # mode). A wired NxEr with no saved brain is rebuilt with its
+            # sensorimotor projection.
             if nd.get("brain"):
-                eng.pool.add(nx.id, nd.get("params", {}))
                 eng.pool.load(nx.id, nd["brain"])
             else:
-                eng.pool.add(nx.id, nd.get("params", {}))
-            if nx.arm == "frozen" and nx.alive:
-                eng.pool.freeze(nx.id)
+                _wx = ({"sm_genes": dict(nx.reflex)}
+                       if getattr(nx, "_wired", False) and nx.reflex else None)
+                eng.pool.add(nx.id, nd.get("params", {}), _wx)
+            if nx.arm in FROZEN_ARMS and nx.alive:
+                eng.pool.freeze(nx.id, eng._frozen_homeo)
             st = nd.get("stats", {})
             nx.stats.food_found = st.get("food_found", 0)
             nx.stats.food_taken = st.get("food_taken", 0)
@@ -741,7 +751,13 @@ class GameServer:
         # (13 > 10) because it was checked before any pick was added. The
         # brain that lived the whole run (T, 530,815 ticks) was never kept.
         K = max(2, self._elite_n // 4)
-        n_score = max(1, self._elite_n - K)
+        # v1.66 — a third pool: the best OWN-BRAIN FORAGERS. The V1.085
+        # archive held compliance champions and the oldest brains — every
+        # one of the ten oldest a locked rest+steal sitter that found 0-27
+        # food in 751k ticks. Nothing kept the brains that actually fed
+        # themselves.
+        KF = max(2, self._elite_n // 5)
+        n_score = max(1, self._elite_n - K - KF)
         cand.sort(key=lambda t: -t[0])
 
         def _export(a, sc, slot, prev_file=None):
@@ -779,6 +795,8 @@ class GameServer:
                 "verify_m1e": None, "verify_age": None,
                 "slot": slot,
                 "arm": getattr(a, "arm", None),            # v1.65
+                "forage_rate": round(a.stats.food_found / max(1, age) * 1000.0, 3),
+                "reflex": getattr(a, "reflex", None),      # v1.66
                 "motor_frac": round(a._mot_n / max(1, a._dec_n), 4),
                 "lock_frac": round(a._same_n / max(1, a._dec_n), 4),
                 "arch": (a.nas_trial or {}).get("arch"),
@@ -796,7 +814,8 @@ class GameServer:
                     prev["verify_m1e"] = (a.m_last or {}).get("M1_E")
                     prev["verify_age"] = eng.tick - getattr(a, "born_tick", 0)
                 continue
-            pool = [r for r in self._elite.values() if r.get("slot") != "age"]
+            pool = [r for r in self._elite.values()
+                    if r.get("slot") not in ("age", "forage")]
             if len(pool) >= n_score:
                 worst = min(pool, key=lambda r: r.get("score") or 0.0)
                 if (worst.get("score") or 0.0) >= sc:
@@ -831,6 +850,34 @@ class GameServer:
             rec = _export(a, sc, "age")
             if rec is not None:
                 self._elite[a.name] = rec
+
+        # ---- forage pool: own-brain foragers by food found per 1000 ticks
+        fcand = []
+        for _, a in cand:
+            if getattr(a, "arm", None) not in NAS_FUNCTION_ARMS:
+                continue
+            age = eng.tick - getattr(a, "born_tick", 0)
+            if age < 5000:
+                continue
+            fcand.append((a.stats.food_found / age * 1000.0, a))
+        fcand.sort(key=lambda t: -t[0])
+        for rate, a in fcand[:KF]:
+            sc = float(getattr(a, "m_fit_w", 0.0) or 0.0)
+            prev = self._elite.get(a.name)
+            if prev is not None:
+                if prev.get("slot") == "forage":
+                    prev["forage_rate"] = round(rate, 3)
+                    prev["age"] = eng.tick - getattr(a, "born_tick", 0)
+                continue
+            fpool = [r for r in self._elite.values() if r.get("slot") == "forage"]
+            if len(fpool) >= KF:
+                worst = min(fpool, key=lambda r: r.get("forage_rate") or 0.0)
+                if (worst.get("forage_rate") or 0.0) >= rate:
+                    continue
+                self._drop_elite(worst)
+            rec = _export(a, sc, "forage")
+            if rec is not None:
+                self._elite[a.name] = rec
         self._write_elite_index()
 
     def _load_elite_index(self):
@@ -859,6 +906,12 @@ class GameServer:
                             rec[k] = None
                         elif k in ("name", "file", "slot", "arm"):
                             rec[k] = v
+                        elif k == "reflex":
+                            try:
+                                rec[k] = {"rfx_" + kv.split("=")[0]: float(kv.split("=")[1])
+                                          for kv in v.split(";") if "=" in kv}
+                            except ValueError:
+                                rec[k] = None
                         else:
                             try:
                                 rec[k] = int(v) if k in num else float(v)
@@ -889,15 +942,22 @@ class GameServer:
                 "M1_E", "M1_N", "M2_gate",
                 "M5_branch", "M6_acw", "W_mean_abs", "W_n",
                 "verify_score", "verify_tick", "verify_m1e", "verify_age",
-                "slot", "arm", "motor_frac", "lock_frac"]
+                "slot", "arm", "motor_frac", "lock_frac", "forage_rate"]
         try:
             rows = sorted(self._elite.values(),
                           key=lambda r: -(r.get("score") or 0))
             with open(os.path.join(self._elite_dir(), "INDEX.csv"), "w") as f:
-                f.write(",".join(cols + ["arch_json"]) + "\n")
+                f.write(",".join(cols + ["reflex", "arch_json"]) + "\n")
                 for r in rows:
                     vals = ["" if r.get(c) is None else str(r.get(c))
                             for c in cols]
+                    # v1.66 — reflex genes as one compact column
+                    rf = r.get("reflex")
+                    if isinstance(rf, dict):
+                        vals.append(";".join("%s=%s" % (k[4:], rf[k])
+                                             for k in sorted(rf)))
+                    else:
+                        vals.append(str(rf or ""))
                     arch = json.dumps(r.get("arch") or {}).replace('"', "'")
                     f.write(",".join(vals) + ',"' + arch + '"\n')
         except OSError:

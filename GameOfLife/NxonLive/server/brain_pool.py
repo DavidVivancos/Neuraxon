@@ -30,6 +30,30 @@ except ValueError:
 _rej_ctr = [0]
 import multiprocessing as mp
 
+# v1.67 — the "living, connected brain" fixes (server/brain_fix.py): exact
+# reload, energy rescue, firing cost, consolidating slow weights, relay
+# input/motor neurons, clean top-down link, phasic reward, the innate
+# sensorimotor projection. The engine calls configure_fix() BEFORE the pool
+# forks its workers and builders, so every process runs the same settings.
+_FIX = None
+
+
+def configure_fix(cfg=None):
+    global _FIX
+    from server import brain_fix as _bf
+    d = dict(_bf.DEFAULTS)
+    for k, v in (cfg or {}).items():
+        if k in d:
+            d[k] = v
+    _FIX = d
+    return d
+
+
+def _fix():
+    if _FIX is None:
+        configure_fix(None)
+    return _FIX
+
 
 # --- worker -------------------------------------------------------
 def _set_affinity(pid, cores):
@@ -81,6 +105,7 @@ def _builder_main(conn):
         architecture._ARCH_PATH = None
     from neuraxon.multisphere import build_brain
     from server.engine import make_params
+    from server import brain_fix as BF
     while True:
         try:
             msg = conn.recv()
@@ -89,11 +114,19 @@ def _builder_main(conn):
         if msg[0] == "stop":
             break
         if msg[0] == "build":
-            _, i, params_dict = msg
+            i, params_dict = msg[1], msg[2]
+            extra = msg[3] if len(msg) > 3 else None
             try:
                 b = build_brain(make_params(params_dict))
             except Exception:
                 b = build_brain(make_params())
+            # v1.67 — wired arms: the innate sensorimotor projection is part
+            # of the brain from birth (it is serialised with the brain)
+            if extra and extra.get("sm_genes"):
+                try:
+                    BF.add_sensorimotor(b, extra["sm_genes"], _fix())
+                except Exception:
+                    pass
             try:
                 conn.send(("built", i, b.to_dict()))
             except (BrokenPipeError, OSError):
@@ -406,6 +439,16 @@ def _brain_science(b, acc, per_brain=None, bid=None):
         m = _m_from_acc(loc)
         if m:
             m["_acc"] = dict(loc)     # v1.62 — raw sums, for live-only rebuild
+            # v1.67 (P10) — health and wiring of this brain: frozen share,
+            # frozen inputs/motor outputs, tonic/phasic DA, the AGMP update
+            # size, kappa, the sensorimotor projection, link endpoints on
+            # their built role, how faithfully fdx/fdy reach the input
+            # neurons
+            try:
+                from server import brain_fix as _bf
+                m["fix"] = _bf.measure(b)
+            except Exception:
+                pass
             per_brain[bid] = m
 
 
@@ -434,7 +477,10 @@ _FROZEN_NET_PARAMS = (("agmp_enabled", False),
                       ("evolution_interval", 10 ** 9))
 
 
-def _freeze_brain(b):
+_HOMEO_PARAMS = ("homeostatic_plasticity_rate", "adaptive_threshold_enabled")
+
+
+def _freeze_brain(b, keep_homeostasis=False):
     """v1.65 — the FROZEN arm ("code frozen during the run"): clamp every
     plastic process of ONE brain at its birth state, from our own code (the
     vendored substrate is not edited). Verified offline over 300 steps:
@@ -453,11 +499,19 @@ def _freeze_brain(b):
     all still run. Each network owns its params object after
     load_multisphere_from_dict, so freezing one brain never touches another
     (also verified). Idempotent."""
+    # v1.66 — keep_homeostasis: leave INTRINSIC threshold homeostasis on and
+    # freeze only synaptic learning, weight decay, pruning, formation and
+    # link plasticity. The V1.085 frozen arm froze homeostasis too; its
+    # brains kept all ~1,200 synapses but ran away into saturation (M1_E
+    # 0.10 -> 0.49 with age, 6% in band), confounding "no learning" with
+    # "no excitability control".
     n = 0
     for sp in b.spheres.values():
         net = sp.network
         pp = net.params
         for attr, val in _FROZEN_NET_PARAMS:
+            if keep_homeostasis and attr in _HOMEO_PARAMS:
+                continue
             if hasattr(pp, attr):
                 setattr(pp, attr, val)
         for s in net.synapses:
@@ -479,6 +533,18 @@ def _freeze_brain(b):
     except Exception:
         pass
     return n
+
+
+def _export(b, fix):
+    """v1.67 — a brain's dict plus the fix settings it ran with, so a later
+    load (snapshot restore, probe) re-applies the non-serialised parts
+    (relay neuron attributes) exactly."""
+    d = b.to_dict()
+    try:
+        d["mngol5_fix"] = dict(fix or {})
+    except Exception:
+        pass
+    return d
 
 
 def _worker_main(conn):
@@ -507,14 +573,34 @@ def _worker_main(conn):
     # output all-zero, branching pinned at the 1.0 default). In parallel
     # mode every brain comes through this path, so the whole world ran
     # on the behavioural floors with dead brains until this was wired.
+    # v1.67 — and it must keep each sphere's shape: the substrate's own
+    # rebuilder re-sizes every sphere to >=10 inputs / >=7 outputs and then
+    # restores neurons and synapses by id, so ids changed role (motor mvx/mvy
+    # read the neurons built as give/rest). brain_fix.rebuild_fn() returns
+    # the exact-shape loader (exact_reload: false = the V 1.086 behaviour).
+    from server import brain_fix as BF
+    F = _fix()
     try:
-        from neuraxon.network import _rebuild_net_from_dict as _rebuild_net
+        _rebuild_net = BF.rebuild_fn(F)
     except Exception:
         _rebuild_net = None
 
     brains = {}          # id -> NeuraxonMultiSphere
     inputs = {}          # id -> [input_neuron_id, ...] (cached)
-    frozen = set()       # v1.65 — ids whose brain must be (and stay) frozen
+    frozen = {}          # v1.65 — id -> keep_homeostasis, for frozen brains
+    motor_ids = {}       # v1.66 — id -> motor output neuron ids (reflex arc)
+    nlist = {}           # v1.67 — id -> all neurons (energy rescue)
+    rlist = {}           # v1.67 — id -> relay neurons (held each step)
+    _rescue = bool(F.get("energy_rescue"))
+    _phasic = bool(F.get("reward_phasic"))
+    _pcap = float(F.get("reward_phasic_cap", 1.0))
+    _same = bool(F.get("sm_same_step", True))
+
+    def _fix_lists(i, b):
+        if i not in nlist:
+            nlist[i] = BF.neuron_list(b)
+            rlist[i] = BF.relay_list(b, F)
+        return nlist[i], rlist[i]
 
     def _ensure_inputs(i, b):
         if i not in inputs:
@@ -536,30 +622,41 @@ def _worker_main(conn):
             # inline here never stalls this shard's step loop.
             _, i, bdict = msg
             try:
-                brains[i] = load_multisphere_from_dict(
+                b_ = load_multisphere_from_dict(
                     bdict, rebuild_net_fn=_rebuild_net)
+                try:
+                    BF.apply_living(b_, F)       # v1.67 — after EVERY load
+                except Exception:
+                    pass
+                brains[i] = b_
                 if i in frozen:                  # v1.65 — frozen arm
-                    _freeze_brain(brains[i])
+                    _freeze_brain(brains[i], frozen[i])
             except Exception:
                 pass
             inputs.pop(i, None)
+            motor_ids.pop(i, None)
+            nlist.pop(i, None)
+            rlist.pop(i, None)
         elif op == "freeze":
             # v1.65 — usually arrives BEFORE the builder's load (same pipe,
             # FIFO); the mark makes the load apply it. Applied at once if
             # the brain is already here (snapshot restore path).
-            frozen.add(msg[1])
+            frozen[msg[1]] = bool(msg[2]) if len(msg) > 2 else False
             if msg[1] in brains:
                 try:
-                    _freeze_brain(brains[msg[1]])
+                    _freeze_brain(brains[msg[1]], frozen[msg[1]])
                 except Exception:
                     pass
         elif op == "del":
             brains.pop(msg[1], None)
             inputs.pop(msg[1], None)
-            frozen.discard(msg[1])
+            motor_ids.pop(msg[1], None)
+            frozen.pop(msg[1], None)
+            nlist.pop(msg[1], None)
+            rlist.pop(msg[1], None)
         elif op == "export":
             b = brains.get(msg[1])
-            conn.send(b.to_dict() if b is not None else None)
+            conn.send(_export(b, F) if b is not None else None)
         elif op == "step":
             # v1.63 — TIMESCALE REJUVENATION: tests the last standing
             # hypothesis for the mortality wall. The substrate grows each
@@ -585,7 +682,9 @@ def _worker_main(conn):
                             pass
             smods = msg[2] if len(msg) > 2 else None   # v1.52 id->dopamine
             out = []
-            for i, sens in msg[1]:
+            for item in msg[1]:
+                i, sens = item[0], item[1]
+                rd = item[2] if len(item) > 2 else None   # v1.66 reflex drive
                 b = brains.get(i)
                 if b is None:
                     out.append((i, [0] * 7, 1.0))   # brain not loaded yet
@@ -595,14 +694,33 @@ def _worker_main(conn):
                     ext = {"sensory": {
                         ids[k]: (sens[k] if k < len(sens) else 0.0)
                         for k in range(len(ids))}}
+                    if rd is not None:
+                        oi = motor_ids.get(i)
+                        if oi is None:
+                            oi = motor_ids[i] = [n.id for n in
+                                            b.motor_sphere.network.output_neurons]
+                        if len(oi) >= 6:
+                            ext["motor"] = {oi[0]: rd[0], oi[1]: rd[1],
+                                            oi[5]: rd[2]}
                     if smods is not None and i in smods:
-                        # v1.52 — raise phasic dopamine so the AGMP rule
-                        # consolidates this NxEr's eligibility traces.
+                        # v1.52 — reward dopamine for the AGMP rule.
+                        # v1.67 — written into PHASIC dopamine (the pool
+                        # AGMP reads); set_global_modulator lands in tonic.
                         try:
-                            b.set_global_modulator("dopamine", smods[i])
+                            if _phasic:
+                                BF.reward_phasic(b, smods[i], _pcap)
+                            else:
+                                b.set_global_modulator("dopamine", smods[i])
                         except Exception:
                             pass
-                    b.simulate_step(ext)
+                    # v1.67 — energy rescue (P1) and the relays held at
+                    # their own thresholds, before the substrate step
+                    nl_, rl_ = _fix_lists(i, b)
+                    if _rescue:
+                        BF.rescue_energy(nl_)
+                    if rl_:
+                        BF.hold_relays(rl_)
+                    BF.step_brain(b, ext, _same)
                     outs = b.motor_sphere.network.get_output_states()
                     br = getattr(b.motor_sphere.network,
                                  "branching_ratio", 1.0)
@@ -634,6 +752,10 @@ def _worker_main(conn):
                     _brain_science(b, acc, per_brain, i)
                 except Exception:
                     pass
+            # v1.67 — refresh the neuron caches at this low cadence, in case
+            # structural plasticity ever adds neurons
+            nlist.clear()
+            rlist.clear()
             conn.send(("sci", acc, per_brain))
         elif op == "btopo":
             # v1.48 — single-brain topology for the NxonKaleido viewer.
@@ -694,7 +816,7 @@ class BrainPool:
         self._pumps = []
         self._step_timeout = float(step_timeout)
         self._closing = False
-        self._frozen_ip = set()       # v1.65 — frozen ids (in-process mode)
+        self._frozen_ip = {}          # v1.65 — frozen id -> keep_homeostasis (in-process)
         self._load_q = []
         import threading as _th
         self._load_lock = _th.Lock()
@@ -776,8 +898,11 @@ class BrainPool:
             # see the worker note above — the loader needs the network
             # rebuilder or brains load empty (inert). Bind it here so the
             # in-process path (and any dict-loaded brain) is correct too.
+            # v1.67 — the exact-shape loader (see the worker)
+            from server import brain_fix as BF
+            self._BF = BF
             try:
-                from neuraxon.network import _rebuild_net_from_dict as _rn
+                _rn = BF.rebuild_fn(_fix())
             except Exception:
                 _rn = None
             self._bb = build_brain
@@ -785,6 +910,7 @@ class BrainPool:
                 bd, rebuild_net_fn=_rn))
             self._brains = {}
             self._inputs = {}
+            self._fixl = {}           # v1.67 — id -> (neurons, relays)
 
     def mode_info(self):
         """Diagnostic snapshot for the admin console so the operator can
@@ -821,7 +947,8 @@ class BrainPool:
         while not self._closing:
             try:
                 msg = builder_parent.recv()
-            except (EOFError, OSError, BrokenPipeError, ValueError):
+            except (EOFError, OSError, BrokenPipeError, ValueError,
+                    TypeError):          # v1.67 — pipe closed at shutdown
                 break
             if not msg or msg[0] != "built":
                 continue
@@ -874,7 +1001,9 @@ class BrainPool:
         except (BrokenPipeError, OSError, ValueError):
             pass
 
-    def add(self, i, params_dict):
+    def add(self, i, params_dict, extra=None):
+        """extra (v1.67): {"sm_genes": {...}} builds the innate sensorimotor
+        projection into the brain (wired arms)."""
         if self.parallel:
             # fire to the next builder (round-robin); it builds in
             # parallel and its pump thread loads the result into the
@@ -885,41 +1014,62 @@ class BrainPool:
                 bp = self._builder_parents[
                     self._builder_rr % len(self._builder_parents)]
                 self._builder_rr += 1
-                bp.send(("build", i, params_dict))
+                bp.send(("build", i, params_dict, extra))
             except (BrokenPipeError, OSError, ValueError):
                 pass
         else:
             from server.engine import make_params
             try:
-                self._brains[i] = self._bb(make_params(params_dict))
+                b = self._bb(make_params(params_dict))
             except Exception:
-                self._brains[i] = self._bb(make_params())
+                b = self._bb(make_params())
+            # the same brain the parallel path ends with: the projection
+            # (builder), then the living fixes (worker, after the load)
+            if extra and extra.get("sm_genes"):
+                try:
+                    self._BF.add_sensorimotor(b, extra["sm_genes"], _fix())
+                except Exception:
+                    pass
+            try:
+                self._BF.apply_living(b, _fix())
+            except Exception:
+                pass
+            self._brains[i] = b
             self._inputs.pop(i, None)
+            self._fixl.pop(i, None)
+            if i in self._frozen_ip:
+                _freeze_brain(b, self._frozen_ip[i])
 
     def load(self, i, bdict):
         if self.parallel:
             self._fire(i, ("load", i, bdict))
         else:
             try:
-                self._brains[i] = self._lb(bdict)
+                b_ = self._lb(bdict)
+                try:
+                    self._BF.apply_living(b_, _fix())
+                except Exception:
+                    pass
+                self._brains[i] = b_
                 self._inputs.pop(i, None)
+                self._fixl.pop(i, None)
                 if i in self._frozen_ip:
-                    _freeze_brain(self._brains[i])
+                    _freeze_brain(self._brains[i], self._frozen_ip[i])
             except Exception:
                 pass
 
-    def freeze(self, i):
+    def freeze(self, i, keep_homeostasis=False):
         """v1.65 — put brain i in the FROZEN arm (see _freeze_brain). In
         parallel mode the worker remembers the id and applies the freeze
         when the builder's brain lands, so order never matters."""
         if self.parallel:
-            self._fire(i, ("freeze", i))
+            self._fire(i, ("freeze", i, bool(keep_homeostasis)))
         else:
-            self._frozen_ip.add(i)
+            self._frozen_ip[i] = bool(keep_homeostasis)
             b = self._brains.get(i)
             if b is not None:
                 try:
-                    _freeze_brain(b)
+                    _freeze_brain(b, self._frozen_ip[i])
                 except Exception:
                     pass
 
@@ -929,13 +1079,14 @@ class BrainPool:
         else:
             self._brains.pop(i, None)
             self._inputs.pop(i, None)
-            self._frozen_ip.discard(i)
+            self._frozen_ip.pop(i, None)
+            self._fixl.pop(i, None)
 
     def export(self, i):
         if self.parallel:
             return self._safe_call(i, ("export", i), default=None)
         b = self._brains.get(i)
-        return b.to_dict() if b is not None else None
+        return _export(b, _fix()) if b is not None else None
 
     # ---- the hot path: parallel brain step ----
     def step(self, batch, mods=None):
@@ -947,9 +1098,10 @@ class BrainPool:
         if self.parallel:
             shards = [[] for _ in range(self.n)]
             smods = [None] * self.n
-            for i, sens in batch:
+            for item in batch:
+                i = item[0]
                 k = i % self.n
-                shards[k].append((i, sens))
+                shards[k].append(item)
                 if mods is not None and i in mods:
                     if smods[k] is None:
                         smods[k] = {}
@@ -983,12 +1135,14 @@ class BrainPool:
                         pass
                 # worker unreachable/slow → safe defaults (idle this
                 # tick); the world keeps running, anti-extinction holds
-                for i, _ in sh:
-                    res[i] = ([0] * 7, 1.0)
+                for item in sh:
+                    res[item[0]] = ([0] * 7, 1.0)
             return res
         # in-process fallback
         res = {}
-        for i, sens in batch:
+        for item in batch:
+            i, sens = item[0], item[1]
+            rd = item[2] if len(item) > 2 else None    # v1.66 reflex drive
             b = self._brains.get(i)
             if b is None:
                 res[i] = ([0] * 7, 1.0)
@@ -1002,12 +1156,28 @@ class BrainPool:
                 ext = {"sensory": {
                     ids[k]: (sens[k] if k < len(sens) else 0.0)
                     for k in range(len(ids))}}
-                if mods is not None and i in mods:   # v1.52
+                if rd is not None:
+                    oi = [n.id for n in b.motor_sphere.network.output_neurons]
+                    if len(oi) >= 6:
+                        ext["motor"] = {oi[0]: rd[0], oi[1]: rd[1], oi[5]: rd[2]}
+                F = _fix()
+                if mods is not None and i in mods:   # v1.52 / v1.67 phasic
                     try:
-                        b.set_global_modulator("dopamine", mods[i])
+                        if F.get("reward_phasic"):
+                            self._BF.reward_phasic(b, mods[i], F.get("reward_phasic_cap", 1.0))
+                        else:
+                            b.set_global_modulator("dopamine", mods[i])
                     except Exception:
                         pass
-                b.simulate_step(ext)
+                fl = self._fixl.get(i)
+                if fl is None:
+                    fl = self._fixl[i] = (self._BF.neuron_list(b),
+                                          self._BF.relay_list(b, F))
+                if F.get("energy_rescue"):
+                    self._BF.rescue_energy(fl[0])
+                if fl[1]:
+                    self._BF.hold_relays(fl[1])
+                self._BF.step_brain(b, ext, bool(F.get("sm_same_step", True)))
                 outs = b.motor_sphere.network.get_output_states()
                 br = getattr(b.motor_sphere.network,
                              "branching_ratio", 1.0)

@@ -74,7 +74,54 @@ RANK_METRICS = ("food_found", "food_taken", "explored",
 
 # v1.65 — experimental arms (see Engine._init_runtime). Order is fixed so
 # the cumulative share table is deterministic.
-ARMS = ("script", "mixed", "brain", "frozen", "sham")
+ARMS = ("script", "mixed", "brain", "frozen", "sham", "shaped",
+        "reflex", "reflex_sham", "wired", "wired_sham", "wired_frozen")
+# v1.66 — arms whose own brain drives its own body with its own senses: only
+# their explorers' foraging trains the NAS sampler (see Engine._nas_scored)
+NAS_FUNCTION_ARMS = ("brain", "frozen", "shaped", "reflex", "wired",
+                     "wired_frozen")
+# v1.66 — arms that receive another NxEr's exteroception (yoked control)
+YOKED_ARMS = ("sham", "reflex_sham", "wired_sham")
+# v1.67 — WIRED arms: the brain is built with an innate sensorimotor
+# projection (brain_fix.add_sensorimotor): the fdx/fdy INPUT neurons of the
+# sensory sphere drive the mvx/mvy OUTPUT neurons of the motor sphere through
+# a substrate SphereLink whose weights are the NxEr's inherited reflex genes
+# (rfx_xx/xy/yx/yy, gain rfx_gain). The body executes the brain's motor output
+# only — food direction has to pass through the brain's own neurons.
+#   wired        — the projection, plastic brain, phasic eating reward
+#   wired_sham   — the same brain, but its exteroception is another NxEr's
+#   wired_frozen — the projection, all plasticity clamped at birth
+WIRED_ARMS = ("wired", "wired_sham", "wired_frozen")
+# v1.67 — arms whose plasticity is clamped at birth (brain_pool._freeze_brain)
+FROZEN_ARMS = ("frozen", "wired_frozen")
+# v1.67 — arms whose body executes the brain's motor command alone (no
+# script, no body reflex). After a decision whose step was blocked they turn
+# the command 90 degrees (DETOUR, as the v1.66 reflex arc did), and a step
+# that lands on food ends the decision's movement (FOOD STOP).
+BRAIN_BODY_ARMS = ("brain", "frozen", "sham", "wired", "wired_sham",
+                   "wired_frozen")
+# v1.66 — arms in which the innate reflex arc is EXPRESSED
+REFLEX_ARMS = ("reflex", "reflex_sham")
+# v1.66 — INNATE REFLEX ARC genes. Every NxEr carries them (explorers draw
+# them from the NAS sampler, children inherit the genetic parent's with
+# additive mutation), but only the reflex arms express them. Each brain
+# decision computes, from the senses that brain received,
+#   Rx    = gain * (xx*fdx + xy*fdy)
+#   Ry    = gain * (yx*fdx + yy*fdy)
+#   Rrest = gain * rest_w * (2*smell - 1)      (> 0 only on the food cell)
+# reflex_mode "body" (default): the executed command is sign(brain + R) per
+# axis beyond +-0.5 — a spinal-style arc summed with the brain's own output.
+# reflex_mode "brain": R is an external current into the motor OUTPUT
+# neurons instead. In a closed loop (tools/learn_test.py) the body arc ate
+# 771 food per 3,000 steps at cosine +0.98; the in-brain current ate 4-8,
+# then the motor neurons locked opposite to the drive (cosine -1.00).
+# After a blocked decision, (Rx, Ry) turns 90 degrees to a random side
+# (detour), so the arc does not pin itself to an obstacle.
+# The weights start random, so evolution must FIND the chemotactic wiring
+# (xx, yy > 0, gain > ~0.5).
+REFLEX_GENES = {"rfx_xx": (-1.0, 1.0), "rfx_xy": (-1.0, 1.0),
+                "rfx_yx": (-1.0, 1.0), "rfx_yy": (-1.0, 1.0),
+                "rfx_rest": (-1.0, 1.0), "rfx_gain": (0.0, 2.0)}
 # Metrics that start at 0 and only grow — when a NxEr's value is 0
 # here it has literally not scored anything, so "#N" is meaningless;
 # the rank is reported as None and the client shows "—". g is excluded
@@ -246,11 +293,26 @@ class NxEr:
         self._same_n = 0              # decision identical to the previous one
         self._prev_out = None
         self._hold = False            # brain's replayed step stopped by an obstacle
+        self._rep_n = 0               # v1.66 brain steps executed since the decision
         self._rested = False          # brain chose rest this tick (cheaper metabolism)
         self._forced_n = 0            # ticks on which the script drove the body
         self._bmove_n = 0             # executed steps chosen by the brain
         self._smove_n = 0             # executed steps chosen by the script
         self._coll_wall = 0; self._coll_nx = 0
+        self._cx_sum = 0.0; self._cx_n = 0   # v1.66 executed-step chemotaxis
+        self._appr_n = 0                     # v1.66 executed steps that approached food
+        self._food_xy = None                 # v1.66 nearest food at last sensing
+        self._shape_da = 0.0                 # v1.66 approach dopamine (shaped arm)
+        self._yoked = False                  # v1.66 receives another NxEr's senses
+        self._rfx_on = False                 # v1.66 reflex arc expressed
+        self.reflex = None                   # v1.66 innate reflex genes (dict)
+        self._rfx_cmd = None                 # v1.66 body reflex (rx, ry, rrest) of this decision
+        self._wired = False                  # v1.67 brain carries the sensorimotor projection
+        self._bbody = False                  # v1.67 body executes the brain's command alone
+        self._bumped = False                 # v1.67 this decision's step hit an obstacle
+        self._rot = 0                        # v1.67 detour of this decision (+1/-1 = +-90 deg)
+        self._fd_prev = None                 # v1.67 food direction sensed at the previous decision
+        self._cxl_sum = 0.0; self._cxl_n = 0 # v1.67 executed step vs that direction
         # v1.65 — ENERGY LEDGER: where every unit of food came from and went.
         self.e_eat = 0.0; self.e_bonus = 0.0       # bites (+ M-selection bonus part)
         self.e_stin = 0.0; self.e_stout = 0.0      # stolen from others / by others
@@ -344,6 +406,8 @@ class NxEr:
             "params": _params_to_dict(self.params),
             "brain": brain_dict,
             "stats": self.stats.as_dict(),
+            "arm": getattr(self, "arm", None),          # v1.66
+            "reflex": getattr(self, "reflex", None),    # v1.66 innate reflex genes
         }
 
 
@@ -373,7 +437,7 @@ USER_TUNABLE = {
     "resting_potential_decay":     (0.05, 0.4,  float),
     "refractory_period_ticks":     (0,    8,    int),
     "post_spike_mp_reset":         (0.0,  1.0,  float),
-    "cross_sphere_coupling":       (0.1,  3.0,  float),
+    "cross_sphere_coupling":       (0.5,  2.0,  float),   # v1.67 (P12) was 0.1-3.0
     "cryst_capacity":              (0.3,  3.0,  float),
     "free_energy_beta":            (0.5,  2.5,  float),
     "symmetric_stdp":              (0,    1,    bool),
@@ -417,7 +481,7 @@ _MUTABLE = {
     # second-strongest, and the only other knob above |r| = 0.05
     "firing_threshold_excitatory": (0.12, 0.80),
     # weak but repeatedly significant (t = +3.8 / -3.7 in v1.077)
-    "sensorimotor_coupling": (0.1, 3.0),
+    "sensorimotor_coupling": (0.5, 2.0),   # v1.67 (P12): at <= 0.25 no link passes the +-0.25 port rounding
     "post_spike_mp_reset": (0.0, 1.0),
     # direct M1_E levers: small effects (t = +3.5 / +3.2) but they act on
     # exactly the claim that fails most, so they stay in the search
@@ -662,6 +726,15 @@ def make_params(overrides=None):
                 setattr(p, attr, float(max(lo, min(hi, float(overrides[k])))))
             except (TypeError, ValueError):
                 pass
+    # v1.67 (P12) — the coupling floor/ceiling applies whatever the source
+    # (arch file, NAS sample, inheritance, user): every SphereLink payload is
+    # rounded to a trinary value at |x| > 0.25 by the substrate, so at
+    # kappa <= 0.25 no link can ever deliver a signal (12 of 47 archived
+    # V 1.086 brains had every port at 0)
+    try:
+        p.cross_sphere_coupling = float(max(0.5, min(2.0, float(p.cross_sphere_coupling))))
+    except (AttributeError, TypeError, ValueError):
+        pass
     p.sphere_topology = "chc6"   # never overridable
     return p
 
@@ -854,6 +927,13 @@ class Engine:
         self._m_sel_floor = float(cfg.get("m_selection_floor", 0.70))
         self._autopilot = float(cfg.get("autopilot", 0.2))          # v1.64
         self._coll_cost = float(cfg.get("collision_cost", 0.1))     # v1.64/v1.65
+        # v1.66 — a brain decision moves the body at most this many cells
+        # (the brain decides every brain_step_every ticks). V1.085 replayed
+        # the step for all 8 ticks, and with 8-step replay an IDEAL
+        # sign-steering forager eats 0.2-0.4x what a random walker eats
+        # (it orbits the food without landing on it); with 1-2 steps it
+        # eats 4-19x more. 0 = replay for the whole interval (V1.085).
+        self._brain_move_steps = int(cfg.get("brain_move_steps", 2))
         self._death_redesign = bool(cfg.get("death_redesign", True))  # v1.64
         # v1.65 — WITHIN-RUN CONTROLLED EXPERIMENT. Every NxEr is randomly
         # assigned at birth to one arm (not inherited, so all arms share
@@ -867,8 +947,12 @@ class Engine:
         #            output statistics, input decoupled from its world)
         self._arms_on = bool(cfg.get("arms_enabled", True))
         _sh = cfg.get("arm_shares") or {}
-        _def = {"script": 0.20, "mixed": 0.20, "brain": 0.30,
-                "frozen": 0.15, "sham": 0.15}
+        # v1.67 defaults: the wired arms carry the experiment; frozen and
+        # reflex_sham are answered (V 1.086) and off
+        _def = {"script": 0.10, "mixed": 0.0, "brain": 0.15,
+                "frozen": 0.0, "sham": 0.10, "shaped": 0.0,
+                "reflex": 0.10, "reflex_sham": 0.0,
+                "wired": 0.30, "wired_sham": 0.15, "wired_frozen": 0.10}
         _sh = {k: float(_sh.get(k, _def[k])) for k in ARMS}
         _tot = sum(v for v in _sh.values() if v > 0) or 1.0
         self._arm_cum = []
@@ -878,7 +962,37 @@ class Engine:
                 _c += _sh[k] / _tot
                 self._arm_cum.append((_c, k))
         self._arm_auto = {"script": 1.0, "mixed": self._autopilot,
-                          "brain": 0.0, "frozen": 0.0, "sham": 0.0}
+                          "brain": 0.0, "frozen": 0.0, "sham": 0.0,
+                          "shaped": 0.0, "reflex": 0.0, "reflex_sham": 0.0,
+                          "wired": 0.0, "wired_sham": 0.0,
+                          "wired_frozen": 0.0}
+        # v1.67 (P11) — keep the experiment running at the population cap.
+        # V 1.086 reached max_nxers at tick 1,031,851; from then on births
+        # equalled deaths, NAS explorers fell from 1,201 to ~0 per window and
+        # the immortal script grew to 757 of 1,000 slots (it is born at 10%
+        # but lives ~38x longer than a brain-driven NxEr).
+        #   script_max_share: a newborn drawn into the script arm is redrawn
+        #     among the other arms while the script holds this share of
+        #     max_nxers (0 = no limit)
+        #   mate_reserve: matings stop at max_nxers * (1 - mate_reserve), so
+        #     the explorer trickle always finds a slot
+        self._script_max = float(cfg.get("script_max_share", 0.10))
+        self._mate_reserve = float(cfg.get("mate_reserve", 0.05))
+        # v1.67 — body rules of the BRAIN_BODY_ARMS (see the constant)
+        self._detour_on = bool(cfg.get("brain_detour", True))
+        self._food_stop = bool(cfg.get("brain_food_stop", True))
+        self._shape_da_cfg = float(cfg.get("shape_dopamine", 0.3))   # v1.66
+        self._rfx_mut = float(cfg.get("reflex_mutation_sd", 0.10))   # v1.66
+        # v1.66 — where the innate reflex acts. "body" (default): a
+        # spinal-style arc summed with the brain's motor command per axis,
+        # step = sign(brain + reflex) beyond +-0.5. "brain": an external
+        # current into the motor OUTPUT neurons. Offline, the in-brain
+        # current steered poorly once the food direction changed (cosine
+        # +0.03..+0.53, with lock-in at high gain: the substrate caps any
+        # external input at tanh(x) <= 1 and its dendritic gate freezes a
+        # neuron under sustained input), so "body" is the default.
+        self._rfx_mode = str(cfg.get("reflex_mode", "body"))
+        self._frozen_homeo = bool(cfg.get("frozen_keep_homeostasis", True))
         # resting halves metabolism for that tick and is exempt from the
         # idle-atrophy ramp (v1.64 charged EXTRA for resting and skipped
         # eating, so a resting brain could only lose)
@@ -904,6 +1018,8 @@ class Engine:
         self._nas_elite_frac = float(cfg.get("nas_elite_frac", 0.25))
         self._nas_sd_inflate = float(cfg.get("nas_sd_inflate", 1.5))
         self._nas_min_hist = int(cfg.get("nas_min_history", 60))
+        self._nas_objective = str(cfg.get("nas_objective", "composite"))   # v1.66
+        self._nas_fw = float(cfg.get("nas_function_weight", 0.5))          # v1.66
         self._brain_smpl = int(cfg.get("brain_sample_n", 12))
         if not isinstance(getattr(self, "_last_per_brain", None), dict):
             self._last_per_brain = {}      # v1.58 — W audit source
@@ -1024,7 +1140,10 @@ class Engine:
             self._g_cache = {"pc1": 0.0, "pos_manifold": 0.0,
                              "mean_r": 0.0, "lambda_ratio": 1.0,
                              "n": 0}
-        from .brain_pool import BrainPool
+        from .brain_pool import BrainPool, configure_fix
+        # v1.67 — the brain fixes (server/brain_fix.py), set BEFORE the pool
+        # forks its workers and builders so every process shares them
+        self._fix_cfg = configure_fix(cfg.get("brain_fix") or {})
         ew = cfg.get("engine_workers", 0)
         if not ew or int(ew) <= 0:
             # Auto-detect. os.cpu_count() reports SYSTEM cpus which can
@@ -1173,7 +1292,7 @@ class Engine:
 
     def _spawn_nxer(self, params=None, owner_token=None,
                     password_hash=None, parents=(None, None),
-                    name=None, terrain_caps=None):
+                    name=None, terrain_caps=None, reflex=None):
         if len([a for a in self.nxers.values() if a.alive]) \
                 >= int(self.cfg["max_nxers"]):
             return None
@@ -1205,10 +1324,20 @@ class Engine:
         # all 233 idle deaths of the V1.084 run were newborns under 1,250
         # ticks old.
         nx.last_move_tick = self.tick
+        # v1.67 — the reflex genes are known BEFORE the brain is built: the
+        # wired arms build them into the brain (v1.66 set an explorer's or a
+        # child's genes after the build request, which was harmless while the
+        # reflex lived in the engine)
+        if reflex:
+            nx.reflex = dict(reflex)
+        if nx.reflex is None:
+            nx.reflex = self._random_reflex()    # v1.66 (founders / respawns)
         self._assign_arm(nx)
-        self.pool.add(nid, _params_to_dict(nx.params))
-        if nx.arm == "frozen":
-            self.pool.freeze(nid)        # applied when the brain lands
+        _extra = ({"sm_genes": dict(nx.reflex)}
+                  if nx.arm in WIRED_ARMS and nx.reflex else None)
+        self.pool.add(nid, _params_to_dict(nx.params), _extra)
+        if nx.arm in FROZEN_ARMS:
+            self.pool.freeze(nid, self._frozen_homeo)   # applied when the brain lands
         self._alive_count += 1
         self.nxers[nid] = nx
         self._nxer_names[nid] = nx.name
@@ -1227,16 +1356,45 @@ class Engine:
             if not self._arms_on or nx.is_managed or not self._arm_cum:
                 arm = "mixed"
             else:
-                u = random.random()
-                arm = self._arm_cum[-1][1]
-                for c, k in self._arm_cum:
-                    if u < c:
-                        arm = k
-                        break
+                arm = self._draw_arm()
+                # v1.67 (P11) — script quota of the living
+                if (arm == "script" and self._script_max > 0
+                        and self._script_alive() >= self._script_max
+                        * int(self.cfg["max_nxers"])):
+                    for _ in range(20):
+                        arm = self._draw_arm()
+                        if arm != "script":
+                            break
+                    if arm == "script":
+                        arm = "brain"
         if arm not in ARMS:
             arm = "mixed"
         nx.arm = arm
         nx._auto = self._arm_auto.get(arm, self._autopilot)
+        nx._yoked = arm in YOKED_ARMS
+        nx._rfx_on = arm in REFLEX_ARMS
+        nx._wired = arm in WIRED_ARMS                 # v1.67
+        nx._bbody = arm in BRAIN_BODY_ARMS            # v1.67
+        nx._shape_da = self._shape_da_cfg if arm == "shaped" else 0.0
+
+    def _mate_cap(self):
+        """v1.67 (P11) — population size at which matings stop, leaving
+        mate_reserve of max_nxers for the NAS explorer trickle."""
+        mx = int(self.cfg["max_nxers"])
+        return max(2, int(mx * (1.0 - max(0.0, min(0.5, self._mate_reserve)))))
+
+    def _draw_arm(self):
+        u = random.random()
+        arm = self._arm_cum[-1][1]
+        for c, k in self._arm_cum:
+            if u < c:
+                return k
+        return arm
+
+    def _script_alive(self):
+        """v1.67 — living script NxErs (O(N), only at birth)."""
+        return sum(1 for a in self.nxers.values()
+                   if a.alive and getattr(a, "arm", None) == "script")
 
     def _nas_sample(self):
         """Draw one architecture from the search space.
@@ -1258,16 +1416,29 @@ class Engine:
         """
         if (not self._nas_adaptive
                 or len(self._nas_hist) < self._nas_min_hist
+                or (self._nas_objective == "composite"
+                    and sum(1 for t in self._nas_hist
+                            if len(t) == 3 and t[1] is not None) < self._nas_min_hist)
                 or random.random() >= self._nas_elite_prob):
-            return {k: round(random.uniform(lo, hi), 5)
-                    for k, (lo, hi) in _MUTABLE.items()}
+            out = {k: round(random.uniform(lo, hi), 5)
+                   for k, (lo, hi) in _MUTABLE.items()}
+            out.update(self._random_reflex())          # v1.66
+            return out
         # elite set: best nas_elite_frac of the rolling history
-        hist = sorted(self._nas_hist, key=lambda t: -t[0])
+        hist = self._nas_scored()
         k_elite = max(8, int(len(hist) * self._nas_elite_frac))
         elite = hist[:k_elite]
         out = {}
-        for k, (lo, hi) in _MUTABLE.items():
-            vals = [a.get(k) for _, a in elite if a.get(k) is not None]
+        for k, (lo, hi) in list(_MUTABLE.items()) + list(REFLEX_GENES.items()):
+            if k in REFLEX_GENES:
+                # v1.66 — reflex genes are only under selection where they
+                # were EXPRESSED (reflex arm; v1.67 also wired, wired_frozen);
+                # a brain-arm trial ranked high carries them unexpressed,
+                # i.e. as noise
+                vals = [a.get(k) for _, a in elite
+                        if a.get("_rfx_expr") and a.get(k) is not None]
+            else:
+                vals = [a.get(k) for _, a in elite if a.get(k) is not None]
             if len(vals) < 4:
                 out[k] = round(random.uniform(lo, hi), 5)
                 continue
@@ -1280,19 +1451,90 @@ class Engine:
             out[k] = round(lo if v < lo else (hi if v > hi else v), 5)
         return out
 
-    def _nas_record(self, arch, score):
-        """v1.58 — feed a finished trial back into the sampler's history."""
+    def _nas_record(self, arch, score, bites=None):
+        """v1.58 — feed a finished trial back into the sampler's history.
+        v1.66 — entries are (m_fit, bites_per_1000_ticks, arch); bites is
+        None for trials whose body was not driven by their own brain."""
         if arch and score is not None:
             try:
-                self._nas_hist.append((float(score), arch))
+                self._nas_hist.append(
+                    (float(score), (None if bites is None else float(bites)), arch))
             except (TypeError, ValueError):
                 pass
+
+    def _nas_scored(self):
+        """v1.66 — the sampler's ranking of its history, best first.
+
+        objective "m_fit" (v1.58-v1.65): rank by M-compliance alone. V1.084
+        and V1.085 showed what that buys: m_fit is strongly heritable
+        (+0.70) yet predicts nothing the brain does, and its pull on the
+        excitatory threshold is part of the M1 slide out of band.
+
+        objective "composite" (v1.66 default): only trials that drove their
+        own body with their own senses (brain / frozen / shaped / reflex
+        arms) are ranked, by (1-w)·percentile(m_fit) + w·percentile(bites per 1000
+        ticks of OWN eating, theft and gifts excluded). So the search keeps
+        the M-claims and adds function. Sham and script trials never train
+        the sampler: their foraging is not their brain's work."""
+        rows = []
+        for t in self._nas_hist:
+            if len(t) == 2:                     # legacy (score, arch)
+                rows.append((t[0], None, t[1]))
+            else:
+                rows.append(t)
+        if self._nas_objective != "composite":
+            return [(m, a) for m, _b, a in sorted(rows, key=lambda r: -r[0])]
+        rows = [r for r in rows if r[1] is not None]
+        n = len(rows)
+        if n == 0:
+            return []
+
+        def pct(vals):
+            order = sorted(range(n), key=lambda i: vals[i])
+            p = [0.0] * n
+            i = 0
+            while i < n:
+                j = i
+                while j + 1 < n and vals[order[j + 1]] == vals[order[i]]:
+                    j += 1
+                for k in range(i, j + 1):
+                    p[order[k]] = (i + j) / 2.0 / max(1, n - 1)
+                i = j + 1
+            return p
+        pm = pct([r[0] for r in rows])
+        pb = pct([r[1] for r in rows])
+        w = self._nas_fw
+        sc = [((1.0 - w) * pm[i] + w * pb[i], rows[i][2]) for i in range(n)]
+        sc.sort(key=lambda t: -t[0])
+        return sc
+
+    @staticmethod
+    def _random_reflex():
+        return {k: round(random.uniform(lo, hi), 5)
+                for k, (lo, hi) in REFLEX_GENES.items()}
+
+    def _mutate_reflex(self, r):
+        """v1.66 — additive Gaussian mutation (the multiplicative scheme used
+        for neural params can never flip a weight's sign near zero)."""
+        out = {}
+        for k, (lo, hi) in REFLEX_GENES.items():
+            v = (r or {}).get(k)
+            if not isinstance(v, (int, float)):
+                v = random.uniform(lo, hi)
+            v += random.gauss(0.0, self._rfx_mut * (hi - lo) / 2.0)
+            out[k] = round(lo if v < lo else (hi if v > hi else v), 5)
+        return out
 
     def _spawn_explorer(self):
         """System-spawned NxEr carrying a sampled architecture, tagged so
         its lifetime outcome is logged at death for the NAS dataset."""
         arch = self._nas_sample()
-        nx = self._spawn_nxer(params=make_params(arch))
+        # v1.66 — the sampled reflex genes travel in the arch dict, so the
+        # NAS sampler models them like any other knob. v1.67 — passed to the
+        # spawn so a wired explorer's brain is built with them.
+        rfx = ({k: float(arch[k]) for k in REFLEX_GENES if k in arch}
+               or self._random_reflex())
+        nx = self._spawn_nxer(params=make_params(arch), reflex=rfx)
         if nx is not None:
             self._nas_trial_seq += 1
             nx.nas_trial = {"id": self._nas_trial_seq, "arch": arch}
@@ -1365,12 +1607,14 @@ class Engine:
         N = world._N
         fg_get = self._food_grid.get
         ng_get = self._nxer_grid.get
+        occ_get = self._occupied.get
         can_sea = nx.can_sea
         can_land = nx.can_land
         my_id = nx.id
         # nearest food: scan only the 3x3 neighbouring buckets, and
         # skip food on terrain this NxEr cannot enter.
         best_d, fdx, fdy = 1e9, 0.0, 0.0
+        best_xy = None
         for gx in (cx - 1, cx, cx + 1):
             for gy in (cy - 1, cy, cy + 1):
                 bucket = fg_get((gx, gy))
@@ -1386,9 +1630,18 @@ class Engine:
                     dx = fx - x; dy = fy - y
                     d = dx * dx + dy * dy
                     if d < best_d:
+                        # v1.66 — food another NxEr is standing on is not
+                        # reachable: steering at it means bumping forever
+                        # (pilot: reflex foragers ~100 collisions per 1000
+                        # ticks, mostly at occupied food)
+                        occ = occ_get((fx, fy))
+                        if occ is not None and occ != my_id:
+                            continue
                         best_d = d
+                        best_xy = (fx, fy)
                         fdx = (1 if dx > 0 else -1 if dx < 0 else 0)
                         fdy = (1 if dy > 0 else -1 if dy < 0 else 0)
+        nx._food_xy = best_xy          # v1.66 — for executed-step metrics
         sight = 1.0 if best_d < 25 else 0.0
         smell = 1.0 / (1.0 + math.sqrt(best_d)) if best_d < 1e8 else 0.0
         # terrain channel — inline the lookup
@@ -1457,32 +1710,60 @@ class Engine:
         return ((0 if ddx == 0 else (1 if ddx > 0 else -1)),
                 (0 if ddy == 0 else (1 if ddy > 0 else -1)))
 
+    def _step_free(self, nx, x, y):
+        """v1.66 — a cell the body can actually step into now: enterable
+        terrain and not held by another living NxEr."""
+        if not self._can_enter(nx, x, y):
+            return False
+        occ = self._occupied.get((x, y))
+        if occ is None or occ == nx.id:
+            return True
+        o = self.nxers.get(occ)
+        return o is None or not o.alive
+
+    def _toward_free(self, nx, gx, gy):
+        """v1.66 — the free neighbouring step that best heads toward
+        (gx, gy) (positive progress only), or None. Replaces the v1.65
+        scripted forage/court step that rammed the same occupied cell every
+        tick: in V1.085 script NxErs paid 0.49 collisions per tick, mostly
+        against NxErs sitting on the food, and died at a median 5,011 ticks."""
+        px, py = nx.pos[0], nx.pos[1]
+        ddx, ddy = gx - px, gy - py
+        best, bscore = None, 0.0
+        for d in DIR_OFFSETS:
+            sc = d[0] * ddx + d[1] * ddy
+            if sc > bscore and self._step_free(nx, px + d[0], py + d[1]):
+                best, bscore = d, sc
+        return best
+
     def _explore_dir(self, nx):
         """v1.36 — momentum + novelty exploration. Prefer continuing in
         the current heading (so excursions cover ground instead of
         oscillating), but steer toward a not-recently-visited enterable
         cell; fall back to any enterable cell. Returns (dx, dy) or None.
         This is the 'exploration is rewarded' drive for well-fed NxErs
-        and the search behaviour for hungry NxErs with no food in sight."""
+        and the search behaviour for hungry NxErs with no food in sight.
+        v1.66 — only free cells (terrain AND occupancy), so the script
+        never walks into another NxEr."""
         px, py = nx.pos[0], nx.pos[1]
         ld = nx._last_move_dir
         # 65% of the time, keep heading if it leads somewhere novel
         if (ld != (0, 0) and random.random() < 0.65):
             tx, ty = px + ld[0], py + ld[1]
-            if self._can_enter(nx, tx, ty) and (tx, ty) not in nx.visited:
+            if self._step_free(nx, tx, ty) and (tx, ty) not in nx.visited:
                 return ld
         # otherwise prefer a novel (unvisited) enterable neighbour
         dirs = list(DIR_OFFSETS)
         random.shuffle(dirs)
         for d in dirs:
             tx, ty = px + d[0], py + d[1]
-            if self._can_enter(nx, tx, ty) and (tx, ty) not in nx.visited:
+            if self._step_free(nx, tx, ty) and (tx, ty) not in nx.visited:
                 return d
         # all neighbours visited/blocked — keep heading, else any open cell
-        if ld != (0, 0) and self._can_enter(nx, px + ld[0], py + ld[1]):
+        if ld != (0, 0) and self._step_free(nx, px + ld[0], py + ld[1]):
             return ld
         for d in dirs:
-            if self._can_enter(nx, px + d[0], py + d[1]):
+            if self._step_free(nx, px + d[0], py + d[1]):
                 return d
         return None
 
@@ -1558,9 +1839,20 @@ class Engine:
         # inflating chemo_n ~8x and weighting stale sensory frames.
         bmx = int(max(-1, min(1, mvx))); bmy = int(max(-1, min(1, mvy)))
         nx._tick_n += 1
+        _dec_tick = False                 # v1.66 — first tick of a decision
         if nx._fresh:
+            _dec_tick = True
             nx._fresh = False
             nx._hold = False              # a new decision releases the brake
+            nx._rep_n = 0
+            # v1.67 — DETOUR (brain-body arms): the last decision's step was
+            # blocked, so this decision's command turns 90 degrees to a random
+            # side instead of pushing into the obstacle again (the v1.66
+            # reflex arc's rule, now for every body the brain drives alone)
+            nx._rot = 0
+            if nx._bumped and nx._bbody and self._detour_on:
+                nx._rot = 1 if random.random() < 0.5 else -1
+            nx._bumped = False
             nx._dec_n += 1
             if bmx or bmy:
                 nx._mot_n += 1
@@ -1583,6 +1875,23 @@ class Engine:
                 nx._chemo_sum += ((bmx * _fx + bmy * _fy)
                                   / math.sqrt((bmx*bmx + bmy*bmy) * (_fx*_fx + _fy*_fy)))
                 nx._chemo_n += 1
+        # v1.66 — BODY REFLEX (reflex arms, reflex_mode "body"): the innate
+        # arc of this decision is summed with the brain's command per axis.
+        # The markers above measured the BRAIN alone; everything below
+        # (and chemo_exec) sees the executed command.
+        rc = nx._rfx_cmd
+        if rc is not None:
+            v_ = mvx + rc[0]
+            mvx = 1 if v_ > 0.5 else (-1 if v_ < -0.5 else 0)
+            v_ = mvy + rc[1]
+            mvy = 1 if v_ > 0.5 else (-1 if v_ < -0.5 else 0)
+            v_ = rest + rc[2]
+            rest = 1 if v_ > 0.5 else (-1 if v_ < -0.5 else 0)
+        if nx._rot:                       # v1.67 — detour of this decision
+            if nx._rot > 0:
+                mvx, mvy = -mvy, mvx
+            else:
+                mvx, mvy = mvy, -mvx
         hungry = nx.food < (self.bio_start_food * self.bio_hunger_threshold)
         food_sensed = li is not None and (li[1] or li[2])
         # v1.65 — THE SCRIPT ONLY ACTS ON AN AUTOPILOT TICK. In v1.64 the
@@ -1595,31 +1904,44 @@ class Engine:
         if _auto:
             if hungry:
                 if food_sensed and self.tick >= nx.wander_until_tick:
-                    mvx, mvy = int(li[1]), int(li[2])  # forage to food
+                    # v1.66 — forage via a FREE cell; wait if none
+                    fxy = nx._food_xy
+                    st_ = (self._toward_free(nx, fxy[0], fxy[1]) if fxy
+                           else None)
+                    mvx, mvy = st_ if st_ is not None else (0, 0)
                     rest = 0
                     forced = True
                 else:
                     ed = self._explore_dir(nx)         # search for food
-                    if ed is not None:
-                        mvx, mvy = ed
-                        rest = 0
-                        forced = True
+                    # v1.66 — boxed in: the script waits (it never hands
+                    # the tick to the brain)
+                    mvx, mvy = ed if ed is not None else (0, 0)
+                    rest = 0
+                    forced = True
             else:
                 md = None
+                # v1.66 — no courtship at the population cap (no child can
+                # be born, v1.65): the script used to stand or push against
+                # the mate there every tick
                 if (self.tick >= nx.mate_cooldown_until
-                        and nx.food >= self._mate_gate(nx)):
+                        and nx.food >= self._mate_gate(nx)
+                        and self._alive_count < self._mate_cap()):
                     md = self._nearest_mate_dir(nx)
                 if md is not None:
-                    mvx, mvy = md                      # court: move to mate
+                    # court: move to mate — v1.66: only into a free cell
+                    # (adjacent is close enough to mate; never ram the mate)
+                    if self._step_free(nx, nx.pos[0] + md[0], nx.pos[1] + md[1]):
+                        mvx, mvy = md
+                    else:
+                        mvx, mvy = 0, 0
                     nx.mating_intent_until_tick = self.tick + 60
                     rest = 0
                     forced = True
                 else:
                     ed = self._explore_dir(nx)         # explore
-                    if ed is not None:
-                        mvx, mvy = ed
-                        rest = 0
-                        forced = True
+                    mvx, mvy = ed if ed is not None else (0, 0)
+                    rest = 0
+                    forced = True
         if forced:
             nx._forced_n += 1             # v1.65 — ticks driven by the script
         else:
@@ -1632,6 +1954,20 @@ class Engine:
                 mvx = mvy = 0
             elif nx._hold:
                 mvx = mvy = 0             # replayed step already hit an obstacle
+            elif mvx or mvy:
+                # v1.66 — a decision moves the body at most brain_move_steps
+                # cells; then the NxEr stands until its brain decides again.
+                # Standing out the rest of a MOVING decision is not idling:
+                # without this the idle-atrophy ramp (+10.4x per second idle
+                # at metabolic_ramp_scale 1, capped at 5x) charged every
+                # brain-driven NxEr ~4x base metabolism (pilot: drain 14 per
+                # 1000 ticks, everyone dead at ~5k ticks). v1.66 also ships
+                # metabolic_ramp_scale 0 (no idle ramp at all).
+                if 0 < self._brain_move_steps <= nx._rep_n:
+                    mvx = mvy = 0
+                    nx.last_move_tick = self.tick
+                else:
+                    nx._rep_n += 1
         dx = int(max(-1, min(1, mvx)))
         dy = int(max(-1, min(1, mvy)))
         if dx or dy:
@@ -1664,6 +2000,7 @@ class Engine:
                     nx._coll_wall += 1
                 if not forced:
                     nx._hold = True
+                    nx._bumped = True     # v1.67 — detour next decision
                 if self._coll_cost > 0.0:
                     nx.food -= self._coll_cost
                     nx.e_coll += self._coll_cost
@@ -1675,6 +2012,52 @@ class Engine:
                     nx._smove_n += 1
                 else:
                     nx._bmove_n += 1
+                    # v1.66 — EXECUTED-step chemotaxis and approach. The
+                    # intended-step cosine (chemotaxis) went NEGATIVE in
+                    # V1.085 (-0.24 brain, -0.24 sham) because locked brains
+                    # push into walls: it measured blocking, not sensing.
+                    # These two count only steps that actually happened,
+                    # against the TRUE food position, and ONLY the first
+                    # step of each decision: the food position is sensed
+                    # once per decision, and scoring the 7 replayed steps
+                    # against that stale point is biased for any straight
+                    # walker (it passes the point and recedes). Measured in
+                    # a sense-blind walker simulation: stale-point cosine
+                    # -0.41 to -0.58, first-step cosine +0.00 to +0.11.
+                    fxy = nx._food_xy if _dec_tick else None
+                    if fxy is not None:
+                        ox_, oy_ = fxy[0] - nx.pos[0], fxy[1] - nx.pos[1]
+                        if ox_ or oy_:
+                            sx_ = 1 if ox_ > 0 else (-1 if ox_ < 0 else 0)
+                            sy_ = 1 if oy_ > 0 else (-1 if oy_ < 0 else 0)
+                            c_ = ((dx * sx_ + dy * sy_)
+                                  / math.sqrt((dx*dx + dy*dy) * (sx_*sx_ + sy_*sy_)))
+                            nx._cx_sum += c_
+                            nx._cx_n += 1
+                            d0 = ox_ * ox_ + oy_ * oy_
+                            d1 = (ox_ - dx) ** 2 + (oy_ - dy) ** 2
+                            if d1 < d0:
+                                nx._appr_n += 1
+                            # v1.66 — SHAPED arm: dopamine for a step that
+                            # really approached the food (banked, applied on
+                            # the next brain step like the eating reward)
+                            if nx._shape_da > 0.0 and c_ > 0.0:
+                                nx._da_accum += nx._shape_da * c_
+                    # v1.67 — the same first step against the food direction
+                    # sensed at the PREVIOUS decision. The substrate's links
+                    # carry the previous step's states (one step of conduction
+                    # delay between spheres), so any pathway through the
+                    # association spheres answers an earlier direction; the
+                    # wired arms' innate projection is delivered in the same
+                    # step (brain_fix.step_brain), so for them chemo_exec is
+                    # the measure and chemo_lag the control.
+                    pf = nx._fd_prev if _dec_tick else None
+                    if pf is not None and (pf[0] or pf[1]):
+                        _px = 1 if pf[0] > 0 else (-1 if pf[0] < 0 else 0)
+                        _py = 1 if pf[1] > 0 else (-1 if pf[1] < 0 else 0)
+                        nx._cxl_sum += ((dx * _px + dy * _py)
+                                        / math.sqrt((dx*dx + dy*dy) * (_px*_px + _py*_py)))
+                        nx._cxl_n += 1
             if (not blocked) and _passable:
                 # vacate the old cell and claim the new one
                 old = (nx.pos[0], nx.pos[1])
@@ -1682,6 +2065,14 @@ class Engine:
                     del self._occupied[old]
                 nx.pos = [nxp, nyp]
                 self._occupied[target] = nx.id
+                # v1.67 — FOOD STOP (brain-body arms): a step that lands on
+                # food ends this decision's movement, so the body eats instead
+                # of walking over the food on the decision's second step
+                if (nx._bbody and self._food_stop and not forced
+                        and target in self._food_at):
+                    _ff = self.foods.get(self._food_at[target])
+                    if _ff is not None and _ff.get("remaining", 0) > 0:
+                        nx._hold = True
                 nx.heading = _dir_index(dx, dy)
                 nx._last_move_dir = (dx, dy)
                 nx.last_move_tick = self.tick
@@ -1802,7 +2193,11 @@ class Engine:
                         o.e_gvin += 1.0
                         nx.n_give += 1
                         nx.last_steal_tick = self.tick
-                    elif social == 1 and o.food > 1:
+                    elif social == 1 and o.food > 1 and not nx._rested:
+                        # v1.66 — no theft while resting: V1.085's longest
+                        # lives (>200k ticks) were brains locked on rest +1
+                        # AND social +1, living on theft from passers-by with
+                        # half metabolism (0-27 food found in 751k ticks).
                         o.food -= 1
                         nx.food += 1
                         nx.stats.food_taken += 1
@@ -1870,7 +2265,7 @@ class Engine:
         # v1.65 — no room, no mating. v1.64 charged both parents food and a
         # 30,000-tick cooldown BEFORE _spawn_nxer refused the child at the
         # population cap: ~22% of V1.084 matings produced nobody.
-        if self._alive_count >= int(self.cfg["max_nxers"]):
+        if self._alive_count >= self._mate_cap():     # v1.67 (P11) reserve
             return
         a.stats.mates_performed += 1
         a.last_sing_level = 1.0          # courtship/celebration song
@@ -1932,10 +2327,16 @@ class Engine:
             _apply_heritable(child_params, child_pd)
         else:
             child_params = make_params(child_pd)
+        # v1.66 — the reflex genes come from the same (genetic) parent whose
+        # neural genome was cloned, with additive mutation. v1.67 — drawn
+        # before the spawn so a wired child's brain is built with them.
+        _gp = a if base_parent is a.params else b
+        _rfx = self._mutate_reflex(getattr(_gp, "reflex", None))
         child = self._spawn_nxer(
             params=child_params,
             parents=(a.id, b.id),
-            terrain_caps=(c_land, c_sea))
+            terrain_caps=(c_land, c_sea),
+            reflex=_rfx)
         if child:
             a.offspring_ids.append(child.id)
             b.offspring_ids.append(child.id)
@@ -1979,6 +2380,7 @@ class Engine:
                     "parent_arms": [a.arm, b.arm],
                     "genetic_parent": (a.id if base_parent is a.params
                                        else b.id),
+                    "reflex": child.reflex,                 # v1.66
                 })
 
     # ---- per-tick ---------------------------------------------------
@@ -2070,24 +2472,41 @@ class Engine:
         learning = self._learning
         da_base, da_max = self._da_base, self._da_max
         shams = None
+        rfx_idx = None
+        wired_idx = None                 # v1.67
+        phasic_rw = bool((getattr(self, "_fix_cfg", None) or {}).get("reward_phasic", False))
         for nx in order:
             nx.stats.time_lived_s += self.dt
             if K == 1 or (self.tick + (nx.id // n_shards)) % K == 0:
                 sens = self._sense(nx)
+                _ps = nx._last_sensory   # v1.67 — direction one decision ago
+                nx._fd_prev = ((_ps[1], _ps[2]) if _ps is not None
+                               and len(_ps) > 2 else None)
                 nx._last_sensory = sens  # used by _act's hunger floor
                 nx._fresh = True         # v1.65 — a new brain decision is due
                 batch.append((nx.id, sens))
                 due.append(nx)
-                if nx.arm == "sham":
+                if nx._yoked:
                     if shams is None:
                         shams = []
                     shams.append(len(batch) - 1)
+                if nx._rfx_on:
+                    if rfx_idx is None:
+                        rfx_idx = []
+                    rfx_idx.append(len(batch) - 1)
+                if nx._wired:                    # v1.67 body rest arc
+                    if wired_idx is None:
+                        wired_idx = []
+                    wired_idx.append(len(batch) - 1)
                 # v1.52 — if this NxEr banked reward since its last brain
                 # step, raise phasic dopamine for THIS step so AGMP
                 # consolidates the eligibility traces, then clear the bank.
+                # v1.67 — with reward_phasic the worker adds the banked
+                # amount to PHASIC dopamine (the pool AGMP reads); the old
+                # path set the total level, which landed in tonic.
                 if learning and nx._da_accum > 0.0:
-                    mods[nx.id] = da_base + (nx._da_accum if nx._da_accum
-                                             < da_max else da_max)
+                    _amt = (nx._da_accum if nx._da_accum < da_max else da_max)
+                    mods[nx.id] = _amt if phasic_rw else da_base + _amt
                     nx._da_accum = 0.0
 
         # v1.65 — SHAM (yoked control): a sham brain receives the
@@ -2106,6 +2525,54 @@ class Engine:
                 own = batch[bi][1]
                 other = due[j]._last_sensory
                 batch[bi] = (batch[bi][0], [own[0]] + list(other[1:]))
+        # v1.66 — INNATE REFLEX ARC (reflex arms), computed from the input
+        # THIS brain gets (so a reflex_sham NxEr reflexes on its yoked
+        # partner's senses). reflex_mode "body": stored on the NxEr and summed
+        # with the brain's command in _act. "brain": sent with the step as an
+        # external current into the motor output neurons.
+        if rfx_idx:
+            _in_brain = self._rfx_mode == "brain"
+            for bi in rfx_idx:
+                g = due[bi].reflex
+                if not g:
+                    continue
+                sv = batch[bi][1]
+                fdx_, fdy_, smell_ = sv[1], sv[2], sv[5]
+                gn = g["rfx_gain"]
+                rx_ = gn * (g["rfx_xx"] * fdx_ + g["rfx_xy"] * fdy_)
+                ry_ = gn * (g["rfx_yx"] * fdx_ + g["rfx_yy"] * fdy_)
+                if due[bi]._hold:
+                    # v1.66 — DETOUR: the last decision's step was blocked,
+                    # so this decision the arc turns 90 degrees (random
+                    # side) instead of pushing into the obstacle again. A
+                    # pure taxis reflex otherwise pins itself to any wall
+                    # or NxEr between it and the food.
+                    if random.random() < 0.5:
+                        rx_, ry_ = -ry_, rx_
+                    else:
+                        rx_, ry_ = ry_, -rx_
+                rd_ = (rx_, ry_, gn * g["rfx_rest"] * (2.0 * smell_ - 1.0))
+                if _in_brain:
+                    batch[bi] = (batch[bi][0], sv, rd_)
+                else:
+                    due[bi]._rfx_cmd = rd_       # summed in _act
+
+        # v1.67 — WIRED arms: the food direction reaches the body only through
+        # the brain (the sensorimotor projection inside it). Stopping on food
+        # stays a body arc, as in v1.66: Rrest = gain * rest_w * (2*smell - 1),
+        # > 0 only on the food cell. It reads the body's OWN smell in every
+        # wired arm (it is not part of the brain), so wired and wired_sham
+        # differ only in what the brain receives.
+        if wired_idx:
+            for bi in wired_idx:
+                nx_ = due[bi]
+                g = nx_.reflex
+                own = nx_._last_sensory
+                if not g or not own or len(own) < 6:
+                    nx_._rfx_cmd = None
+                    continue
+                nx_._rfx_cmd = (0.0, 0.0, g["rfx_gain"] * g["rfx_rest"]
+                                * (2.0 * own[5] - 1.0))
 
         # --- Phase B: brains in PARALLEL across worker processes -----
         # While this blocks on pipe.recv() the GIL is free, so the
@@ -2311,6 +2778,7 @@ class Engine:
                 "lifespan_ticks": self.tick - born,
                 "cause": cause,        # v1.47 — "starved" | "idle" | "collision"
                 "arm": nx.arm,         # v1.65 — experimental arm
+                "reflex": nx.reflex,   # v1.66 — innate reflex genes
                 "explorer": nx.nas_trial is not None,   # v1.65
                 "managed": nx.is_managed, "is_male": nx.is_male,
                 "n_offspring": len(nx.offspring_ids),
@@ -2354,7 +2822,19 @@ class Engine:
                 _sc = nx.m_score_ema
             if _sc is None:
                 _sc = _fitness_hi(nx.stats)
-            self._nas_record(nt.get("arch"), _sc)
+            # v1.66 — own-brain foraging, shrunk for short lives (a 300-tick
+            # life with one lucky bite must not top the table)
+            _bt = None
+            if nx.arm in NAS_FUNCTION_ARMS:
+                _bt = (nx.stats.food_found
+                       / max(self.tick - getattr(nx, "born_tick", 0), 2000) * 1000.0)
+            _ar = nt.get("arch")
+            # v1.67 — the wired arms express the reflex genes too (as the
+            # weights of the brain's sensorimotor projection); wired_sham's
+            # genes act on another NxEr's senses, so it is not tagged
+            if _ar and nx.arm in ("reflex", "wired", "wired_frozen"):
+                _ar = dict(_ar, _rfx_expr=True)   # sampler-only tag
+            self._nas_record(_ar, _sc, _bt)
         if nt is not None and self.history is not None:
             st = nx.stats
             born = getattr(nx, "born_tick", 0)
@@ -2485,6 +2965,20 @@ class Engine:
                                       getattr(self, "_arm_cum", [])],
             "arm_autopilot": dict(getattr(self, "_arm_auto", {})),
             "metric_units": "brain markers counted per fresh decision",
+            "nas_objective": getattr(self, "_nas_objective", "m_fit"),
+            "nas_function_weight": getattr(self, "_nas_fw", 0.0),
+            "nas_function_arms": list(NAS_FUNCTION_ARMS),
+            "reflex_arms": list(REFLEX_ARMS),
+            "reflex_genes": {k: list(v) for k, v in REFLEX_GENES.items()},
+            "frozen_keep_homeostasis": bool(getattr(self, "_frozen_homeo", False)),
+            "reflex_mode": getattr(self, "_rfx_mode", None),
+            "brain_move_steps": getattr(self, "_brain_move_steps", 0),
+            # v1.67
+            "brain_fix": dict(getattr(self, "_fix_cfg", None) or {}),
+            "script_max_share": getattr(self, "_script_max", None),
+            "mate_reserve": getattr(self, "_mate_reserve", None),
+            "brain_detour": getattr(self, "_detour_on", None),
+            "brain_food_stop": getattr(self, "_food_stop", None),
         }
         self.history.provenance(rec)
 
@@ -2515,6 +3009,11 @@ class Engine:
                 "out_sing": round(nx._sing1 / d, 4),
                 "lock_frac": round(nx._same_n / d, 4),
                 "brain_move_frac": round(nx._bmove_n / mv, 4) if mv else None,
+                "chemo_exec": (round(nx._cx_sum / nx._cx_n, 4) if nx._cx_n else None),
+                "chemo_exec_n": nx._cx_n,
+                "chemo_lag": (round(nx._cxl_sum / nx._cxl_n, 4) if nx._cxl_n else None),
+                "chemo_lag_n": nx._cxl_n,
+                "approach_frac": (round(nx._appr_n / nx._cx_n, 4) if nx._cx_n else None),
                 "script_tick_frac": round(nx._forced_n / max(1, nx._tick_n), 4),
                 "moves": mv,
                 "coll_wall": nx._coll_wall, "coll_nx": nx._coll_nx,
@@ -2729,6 +3228,9 @@ class Engine:
                         "W_n": _m.get("W_n"),
                         "W_n_syn_total": _m.get("W_n_syn_total"),
                         **Engine.behav(_a),     # v1.64
+                        # v1.67 (P10) — brain health and wiring
+                        **{("fx_" + _k): _v for _k, _v in
+                           (_m.get("fix") or {}).items()},
                     })
         except Exception:
             pass
@@ -3061,7 +3563,11 @@ class Engine:
                     s = _arms[a.arm] = {"n": 0, "food": 0.0, "ages": [],
                                         "mot": 0.0, "soc": 0.0, "lock": 0.0,
                                         "bmf": 0.0, "bmf_n": 0,
-                                        "chemo": 0.0, "chemo_n": 0}
+                                        "chemo": 0.0, "chemo_n": 0,
+                                        "cx": 0.0, "cx_n": 0, "rest": 0.0,
+                                        "cxl": 0.0, "cxl_n": 0,
+                                        "bites": 0.0, "rfx_ok": 0,
+                                        "rfx_xx": 0.0, "rfx_yy": 0.0, "rfx_gain": 0.0}
                 s["n"] += 1
                 s["food"] += a.food
                 s["ages"].append(self.tick - a.born_tick)
@@ -3076,6 +3582,22 @@ class Engine:
                 if a._chemo_n >= 50:
                     s["chemo"] += a._chemo_sum / a._chemo_n
                     s["chemo_n"] += 1
+                # v1.66 — executed-step chemotaxis, rest, own foraging, and
+                # the reflex genome (share already wired chemotactically)
+                if a._cx_n >= 20:
+                    s["cx"] += a._cx_sum / a._cx_n
+                    s["cx_n"] += 1
+                if a._cxl_n >= 20:                 # v1.67
+                    s["cxl"] += a._cxl_sum / a._cxl_n
+                    s["cxl_n"] += 1
+                s["rest"] += a._rest1 / d_
+                s["bites"] += a.stats.food_found / max(1, self.tick - a.born_tick) * 1000.0
+                g_ = a.reflex or {}
+                if g_.get("rfx_xx", 0) > 0 and g_.get("rfx_yy", 0) > 0:
+                    s["rfx_ok"] += 1
+                s["rfx_xx"] += g_.get("rfx_xx", 0.0)
+                s["rfx_yy"] += g_.get("rfx_yy", 0.0)
+                s["rfx_gain"] += g_.get("rfx_gain", 0.0)
             arms_out = {}
             for k, s in _arms.items():
                 ag = sorted(s["ages"])
@@ -3092,6 +3614,16 @@ class Engine:
                                         if s["bmf_n"] else None),
                     "chemotaxis": (round(s["chemo"] / s["chemo_n"], 4)
                                    if s["chemo_n"] else None),
+                    "chemo_exec": (round(s["cx"] / s["cx_n"], 4)
+                                   if s["cx_n"] else None),
+                    "chemo_lag": (round(s["cxl"] / s["cxl_n"], 4)
+                                  if s["cxl_n"] else None),
+                    "out_rest": round(s["rest"] / n_, 4),
+                    "bites_per_1k": round(s["bites"] / n_, 3),
+                    "rfx_chemotactic_share": round(s["rfx_ok"] / n_, 4),
+                    "rfx_xx": round(s["rfx_xx"] / n_, 4),
+                    "rfx_yy": round(s["rfx_yy"] / n_, 4),
+                    "rfx_gain": round(s["rfx_gain"] / n_, 4),
                 }
             rec["arms"] = arms_out
         # v1.44 — offline-GoL M-metrics (M1/M2/M5/M6/M7/M8/M10 + heritability)
@@ -3329,6 +3861,7 @@ class Engine:
                 # v1.65 — explorers kept their NAS identity only until a
                 # reboot; now the trial (id + arch) survives it.
                 "nas_trial": (dict(a.nas_trial) if a.nas_trial else None),
+                "reflex": getattr(a, "reflex", None),     # v1.66
                 # v1.59 — COPY, don't reference. These are mutated by the
                 # engine (food_by_age at the age checkpoints, offspring_ids on
                 # mating) while the snapshot JSON-encodes on a daemon thread,

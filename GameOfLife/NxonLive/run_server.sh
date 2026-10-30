@@ -24,6 +24,8 @@
 set -e
 cd "$(dirname "$0")"
 export NEURAXON_HEADLESS=1
+# v1.67 (P13) — unbuffered output: the V 1.086 log lagged the archive by days
+export PYTHONUNBUFFERED=1
 
 if command -v pypy3 >/dev/null 2>&1; then
     PY="pypy3"

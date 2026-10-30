@@ -27,8 +27,11 @@ import random
 import argparse
 from collections import defaultdict
 
-ARMS = ("script", "mixed", "brain", "frozen", "sham")
-BRAINY = ("brain", "frozen", "sham")
+ARMS = ("script", "mixed", "brain", "frozen", "sham", "shaped", "reflex", "reflex_sham",
+        "wired", "wired_sham", "wired_frozen")
+BRAINY = ("brain", "frozen", "sham", "shaped", "reflex", "reflex_sham",
+          "wired", "wired_sham", "wired_frozen")
+OWN = ("brain", "frozen", "shaped", "reflex")      # own senses drive own body
 
 
 def _jsonl(path):
@@ -153,10 +156,11 @@ def main():
         o["net_theft"] = ((o.get("e_stin") or 0) - (o.get("e_stout") or 0)) / L * 1000
         o["coll_per_dec"] = (o.get("collisions") or 0) / max(1, o.get("dec_n") or 0)
         o["off_rate"] = o.get("n_offspring", 0) / L * 100000
+        o["bites"] = o.get("food_found", 0) / L * 1000
 
     print("\n== 1. DEATHS AND SURVIVAL (censoring-aware)")
     ages = (2000, 5000, 20000, 50000, 100000, 200000)
-    print("%-7s %6s %8s %8s %8s %8s  " % ("arm", "deaths", "starved", "collis", "idle", "medL")
+    print("%-11s %6s %8s %8s %8s %8s  " % ("arm", "deaths", "starved", "collis", "idle", "medL")
           + " ".join("S(%dk)" % (x // 1000) for x in ages))
     for arm in ARMS:
         v = by.get(arm, [])
@@ -174,7 +178,7 @@ def main():
             ok = sum(1 for o in elig_d if o["lifespan_ticks"] >= A) + len(elig_a)
             surv.append(_fmt(ok / tot if tot else None, 3))
         n = len(v)
-        print("%-7s %6d %7.1f%% %7.1f%% %7.1f%% %8s  " % (
+        print("%-11s %6d %7.1f%% %7.1f%% %7.1f%% %8s  " % (
             arm, n, 100.0 * c["starved"] / n, 100.0 * c["collision"] / n,
             100.0 * c["idle"] / n, _med([o["lifespan_ticks"] for o in v]))
             + " ".join("%6s" % s for s in surv))
@@ -193,8 +197,8 @@ def main():
         print("%-7s " % arm + " ".join("%8s" % x for x in row))
 
     print("\n== 3. BRAIN MARKERS (dead, lived >= %d)" % a.min_life)
-    print("%-7s %6s %7s %8s %8s %6s %6s %6s %6s %6s %7s %7s %7s" % (
-        "arm", "n", "motor", "chemo", "t(chemo)", "lock", "soc", "give", "mate", "rest",
+    print("%-11s %6s %7s %8s %8s %8s %6s %6s %6s %6s %6s %6s %7s %7s %7s" % (
+        "arm", "n", "motor", "chemo", "t(chemo)", "chemoEx", "appr", "bites", "lock", "soc", "give", "rest",
         "brainmv", "scripT", "coll/d"))
     for arm in ARMS:
         v = [o for o in by.get(arm, []) if o["lifespan_ticks"] >= a.min_life]
@@ -207,13 +211,16 @@ def main():
             m = sum(ch) / len(ch)
             sd = math.sqrt(sum((x - m) ** 2 for x in ch) / (len(ch) - 1))
             t = m / (sd / math.sqrt(len(ch))) if sd > 0 else None
-        print("%-7s %6d %7s %8s %8s %6s %6s %6s %6s %6s %7s %7s %7s" % (
+        cx = [o["chemo_exec"] for o in v if o.get("chemo_exec") is not None
+              and (o.get("chemo_exec_n") or 0) >= 20]
+        print("%-11s %6d %7s %8s %8s %8s %6s %6s %6s %6s %6s %6s %7s %7s %7s" % (
             arm, len(v), _fmt(_mean([o.get("motor_frac") for o in v])),
-            _fmt(_mean(ch), 4), _fmt(t, 2),
+            _fmt(_mean(ch), 4), _fmt(t, 2), _fmt(_mean(cx), 4),
+            _fmt(_mean([o.get("approach_frac") for o in v if (o.get("chemo_exec_n") or 0) >= 20])),
+            _fmt(_mean([o["bites"] for o in v]), 2),
             _fmt(_mean([o.get("lock_frac") for o in v])),
             _fmt(_mean([o.get("out_soc") for o in v])),
             _fmt(_mean([o.get("out_give") for o in v])),
-            _fmt(_mean([o.get("out_mate") for o in v])),
             _fmt(_mean([o.get("out_rest") for o in v])),
             _fmt(_mean([o.get("brain_move_frac") for o in v])),
             _fmt(_mean([o.get("script_tick_frac") for o in v])),
@@ -248,11 +255,20 @@ def main():
     print("\n== 5. CONTRASTS (bootstrap 95% CI of the difference in means)")
     def col(arm, f):
         return [f(o) for o in by.get(arm, []) if o["lifespan_ticks"] >= a.min_life]
-    for x, y, why in (("brain", "sham", "does the brain USE its senses?"),
+    for x, y, why in (("wired", "wired_sham", "v1.67: does the brain's sensorimotor pathway use the senses?"),
+                      ("wired", "wired_frozen", "v1.67: does within-life plasticity add to the wired brain?"),
+                      ("wired", "reflex", "v1.67: in-brain pathway vs the body reflex arc"),
+                      ("wired", "brain", "v1.67: innate projection vs the bare living brain"),
+                      ("reflex", "reflex_sham", "does the evolved REFLEX use the senses?"),
+                      ("brain", "sham", "does the brain USE its senses?"),
+                      ("reflex", "brain", "does the reflex arc beat the bare brain?"),
                       ("brain", "frozen", "does within-life plasticity help?"),
+                      ("reflex", "script", "does the reflex brain beat the scripted body?"),
                       ("brain", "script", "does the brain beat the scripted body?"),
                       ("mixed", "script", "does 80% brain control cost or help?")):
-        for lab, f in (("eat/1000t", lambda o: o["eat_rate"]),
+        for lab, f in (("bites/1000t", lambda o: o["bites"]),
+                       ("chemo_exec", lambda o: o.get("chemo_exec") if (o.get("chemo_exec_n") or 0) >= 20 else None),
+                       ("chemo_lag", lambda o: o.get("chemo_lag") if (o.get("chemo_lag_n") or 0) >= 20 else None),
                        ("log life", lambda o: math.log(max(1, o["lifespan_ticks"]))),
                        ("offspring/100kt", lambda o: o["off_rate"]),
                        ("chemotaxis", lambda o: o.get("chemotaxis") if (o.get("chemo_n") or 0) >= 50 else None)):
@@ -262,10 +278,13 @@ def main():
                 print("  %-6s - %-6s %-16s %+.4f  [%+.4f, %+.4f] %s  (%s)" % (
                     x, y, lab, r[0], r[1], r[2], sig, why))
 
+    reflex_section(obits, lineage, t_end)
     print("\n== 6. HERITABILITY in brain-driven arms (genetic parent -> child)")
     for trait, f in (("eat_rate", lambda o: o["eat_rate"]),
                      ("log life", lambda o: math.log(max(1, o["lifespan_ticks"]))),
                      ("chemotaxis", lambda o: o.get("chemotaxis") if (o.get("chemo_n") or 0) >= 50 else None),
+                     ("chemo_exec", lambda o: o.get("chemo_exec") if (o.get("chemo_exec_n") or 0) >= 20 else None),
+                     ("bites", lambda o: o["bites"]),
                      ("motor_frac", lambda o: o.get("motor_frac")),
                      ("m_fit", lambda o: o.get("m_fit"))):
         xs, ys, xo, yo = [], [], [], []
@@ -287,6 +306,56 @@ def main():
                     xo.append(vo); yo.append(vc)
         print("  %-11s genetic r=%s (n=%d)   other-parent r=%s (n=%d)" % (
             trait, _fmt(_pearson(xs, ys)), len(xs), _fmt(_pearson(xo, yo)), len(xo)))
+
+
+def reflex_section(obits, lineage, t_end):
+    rows = [o for o in obits.values() if isinstance(o.get("reflex"), dict)]
+    if not rows:
+        return
+    print("\n== 7. REFLEX GENOME EVOLUTION (all NxErs carry the genes; reflex arms express them)")
+    W = 6
+    print("  %-14s %6s %8s %8s %8s %8s %10s | reflex arm bites  chemoEx | reflex_sham bites" % (
+        "born (k ticks)", "n", "xx", "yy", "gain", "rest", "chemo-share"))
+    for w in range(W):
+        lo, hi = t_end * w / W, t_end * (w + 1) / W
+        g = [o for o in rows if lo <= o["born_tick"] < hi]
+        if len(g) < 10:
+            continue
+        m = lambda k: sum(o["reflex"].get(k, 0.0) for o in g) / len(g)
+        share = sum(1 for o in g if o["reflex"].get("rfx_xx", 0) > 0 and o["reflex"].get("rfx_yy", 0) > 0) / len(g)
+        rf = [o for o in g if o.get("arm") == "reflex" and o["lifespan_ticks"] >= 2000]
+        rs = [o for o in g if o.get("arm") == "reflex_sham" and o["lifespan_ticks"] >= 2000]
+        cx = [o["chemo_exec"] for o in rf if o.get("chemo_exec") is not None and (o.get("chemo_exec_n") or 0) >= 20]
+        _f = "%6.1f-%-7.1f" if t_end < 60000 else "%6.0f-%-7.0f"
+        print(("  " + _f + " %6d %+8.3f %+8.3f %8.3f %+8.3f %10.3f | %8s %8s | %8s") % (
+            lo / 1000, hi / 1000, len(g), m("rfx_xx"), m("rfx_yy"), m("rfx_gain"), m("rfx_rest"), share,
+            _fmt(_mean([o["bites"] for o in rf]), 2), _fmt(_mean(cx), 3), _fmt(_mean([o["bites"] for o in rs]), 2)))
+    # does a chemotactic genome pay in the reflex arm, and NOT in reflex_sham?
+    for arm in ("reflex", "reflex_sham"):
+        v = [o for o in rows if o.get("arm") == arm and o["lifespan_ticks"] >= 2000]
+        if len(v) < 20:
+            continue
+        sc = [(o["reflex"].get("rfx_gain", 0) * (o["reflex"].get("rfx_xx", 0) + o["reflex"].get("rfx_yy", 0)), o["bites"],
+               math.log(max(1, o["lifespan_ticks"]))) for o in v]
+        print("  %-11s genome chemotaxis score vs bites r=%s, vs log life r=%s (n=%d)" % (
+            arm, _fmt(_pearson([a for a, b, c in sc], [b for a, b, c in sc])),
+            _fmt(_pearson([a for a, b, c in sc], [c for a, b, c in sc])), len(v)))
+    # does the BRAIN add anything on top of the reflex? its own (raw output)
+    # chemotaxis against bites, inside the reflex arm
+    v = [o for o in rows if o.get("arm") == "reflex" and o["lifespan_ticks"] >= 2000
+         and o.get("chemotaxis") is not None and (o.get("chemo_n") or 0) >= 50]
+    if len(v) >= 20:
+        print("  reflex arm: BRAIN's own chemotaxis vs bites r=%s (n=%d)  [> 0: the brain helps the reflex]" % (
+            _fmt(_pearson([o["chemotaxis"] for o in v], [o["bites"] for o in v])), len(v)))
+    # gene heritability (genetic parent -> child)
+    xs, ys = [], []
+    for l in lineage:
+        c = l.get("reflex"); gp = obits.get(l.get("genetic_parent"))
+        if c and gp and isinstance(gp.get("reflex"), dict):
+            xs.append(gp["reflex"]["rfx_xx"]); ys.append(c["rfx_xx"])
+    if xs:
+        print("  rfx_xx parent -> child r=%s (n=%d)  [genes are copied with additive mutation]" % (
+            _fmt(_pearson(xs, ys)), len(xs)))
 
 
 if __name__ == "__main__":
