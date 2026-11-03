@@ -488,8 +488,8 @@ cunxonStatus_t allocate_sphere(SphereDev& sd,
         if (s_ > 0.f) for (int k = 0; k < K; ++k) h_kernel[i*K + k] /= s_;
     }
     if (cudaMalloc(&N.dsn_kernel, n*K*sizeof(float)) != cudaSuccess) return CUNXON_ERR_OUT_OF_MEMORY;
-    cudaMemcpyAsync(N.dsn_kernel, h_kernel.data(), n*K*sizeof(float),
-                    cudaMemcpyHostToDevice, stream);
+    CUNXON_CUDA_CHECK(cudaMemcpyAsync(N.dsn_kernel, h_kernel.data(), n*K*sizeof(float),
+                    cudaMemcpyHostToDevice, stream));
     N.dsn_buffer  = cu_malloc_init<float>(n * K, 0.f, stream);     CHKM(N.dsn_buffer);
     N.dsn_head    = cu_malloc_init<int>(n, 0, stream);             CHKM(N.dsn_head);
     N.dsn_alpha   = cu_malloc_init<float>(n, 0.5f, stream);        CHKM(N.dsn_alpha);
@@ -516,7 +516,7 @@ cunxonStatus_t allocate_sphere(SphereDev& sd,
     for (int i = 0; i < sd.n_in;            ++i) h_type[i] = (int8_t)CUNXON_NEURON_INPUT;
     for (int i = sd.n_in; i < sd.n_in + sd.n_hid; ++i) h_type[i] = (int8_t)CUNXON_NEURON_HIDDEN;
     for (int i = sd.n_in + sd.n_hid; i < n; ++i)      h_type[i] = (int8_t)CUNXON_NEURON_OUTPUT;
-    cudaMemcpyAsync(N.type, h_type.data(), n*sizeof(int8_t), cudaMemcpyHostToDevice, stream);
+    CUNXON_CUDA_CHECK(cudaMemcpyAsync(N.type, h_type.data(), n*sizeof(int8_t), cudaMemcpyHostToDevice, stream));
 
     /* ---- Synapses --------------------------------------------------------- */
     SynapseArraysDev& S = sd.S;
@@ -591,7 +591,7 @@ cunxonStatus_t allocate_sphere(SphereDev& sd,
     /* ---- Params on device ------------------------------------------------- */
     if (cudaMalloc(&sd.p_dev, sizeof(cunxonNetworkParameters_t)) != cudaSuccess)
         return CUNXON_ERR_OUT_OF_MEMORY;
-    cudaMemcpyAsync(sd.p_dev, &p, sizeof(p), cudaMemcpyHostToDevice, stream);
+    CUNXON_CUDA_CHECK(cudaMemcpyAsync(sd.p_dev, &p, sizeof(p), cudaMemcpyHostToDevice, stream));
 
     /* ---- External input buffer (length n_total: input ports occupy slot 0..n_in) */
     sd.ext_in = cu_malloc_init<float>(n, 0.f, stream); CHKM(sd.ext_in);
@@ -605,7 +605,7 @@ cunxonStatus_t allocate_sphere(SphereDev& sd,
     sd.port_out_relay  = nullptr;   sd.n_port_out_relay  = 0;
     sd.port_out_readout= nullptr;   sd.n_port_out_readout= 0;
 
-    cudaStreamSynchronize(stream);
+    CUNXON_CUDA_CHECK(cudaStreamSynchronize(stream));
     return CUNXON_OK;
 }
 
@@ -685,20 +685,20 @@ cunxonStatus_t allocate_link(LinkDev& ld,
                 for (int s_p = 0; s_p < n_src_ports; ++s_p) hW[d*n_src_ports + s_p] /= s;
         }
     }
-    cudaMemcpy(ld.W, hW.data(), W_count*sizeof(float), cudaMemcpyHostToDevice);
+    CUNXON_CUDA_CHECK(cudaMemcpy(ld.W, hW.data(), W_count*sizeof(float), cudaMemcpyHostToDevice));
 
     int depth = std::max(1, p.delay_steps + 1);
     ld.delay_head = 0;
     if (cudaMalloc(&ld.delay_ring, (size_t)depth * n_src_ports * sizeof(int8_t)) != cudaSuccess)
         return CUNXON_ERR_OUT_OF_MEMORY;
-    cudaMemset(ld.delay_ring, 0, (size_t)depth * n_src_ports * sizeof(int8_t));
+    CUNXON_CUDA_CHECK(cudaMemset(ld.delay_ring, 0, (size_t)depth * n_src_ports * sizeof(int8_t)));
 
     if (cudaMalloc(&ld.g_ctc, sizeof(float)) != cudaSuccess) return CUNXON_ERR_OUT_OF_MEMORY;
     float one = 1.f;
-    cudaMemcpy(ld.g_ctc, &one, sizeof(float), cudaMemcpyHostToDevice);
+    CUNXON_CUDA_CHECK(cudaMemcpy(ld.g_ctc, &one, sizeof(float), cudaMemcpyHostToDevice));
 
     if (cudaMalloc(&ld.contrib, n_dst_ports * sizeof(float)) != cudaSuccess) return CUNXON_ERR_OUT_OF_MEMORY;
-    cudaMemset(ld.contrib, 0, n_dst_ports * sizeof(float));
+    CUNXON_CUDA_CHECK(cudaMemset(ld.contrib, 0, n_dst_ports * sizeof(float)));
 
     return CUNXON_OK;
 }
@@ -808,19 +808,19 @@ cunxonStatus_t cunxonNetworkAddLink(cunxonNetwork_t net,
         SphereDev& sd = net->spheres[dst];
         std::vector<int> h_ids(n_dst);
         if (sd.n_port_in_relay > 0)
-            cudaMemcpy(h_ids.data(), sd.port_in_relay,
+            CUNXON_CUDA_CHECK(cudaMemcpy(h_ids.data(), sd.port_in_relay,
                        sd.n_port_in_relay * sizeof(int),
-                       cudaMemcpyDeviceToHost);
+                       cudaMemcpyDeviceToHost));
         if (sd.n_port_in_sensory > 0)
-            cudaMemcpy(h_ids.data() + sd.n_port_in_relay, sd.port_in_sensory,
+            CUNXON_CUDA_CHECK(cudaMemcpy(h_ids.data() + sd.n_port_in_relay, sd.port_in_sensory,
                        sd.n_port_in_sensory * sizeof(int),
-                       cudaMemcpyDeviceToHost);
+                       cudaMemcpyDeviceToHost));
         if (cudaMalloc(&ld.dst_port_ids, n_dst * sizeof(int)) != cudaSuccess) {
             cunxon_internal::free_link(ld);
             return CUNXON_ERR_OUT_OF_MEMORY;
         }
-        cudaMemcpy(ld.dst_port_ids, h_ids.data(), n_dst * sizeof(int),
-                   cudaMemcpyHostToDevice);
+        CUNXON_CUDA_CHECK(cudaMemcpy(ld.dst_port_ids, h_ids.data(), n_dst * sizeof(int),
+                   cudaMemcpyHostToDevice));
     }
 
     *out_id = (int)net->links.size();
@@ -880,13 +880,13 @@ static cunxonStatus_t step_impl(cunxonNetworkImpl_* net,
     /* (A) clear scratch buffers and copy external inputs ------------------ */
     for (size_t s = 0; s < net->spheres.size(); ++s) {
         SphereDev& sd = net->spheres[s];
-        cudaMemsetAsync(sd.N.branch_sum, 0,
-                        sd.n_total * sd.n_branches * sizeof(float), sd.stream);
-        cudaMemsetAsync(sd.N.modulatory_pot, 0,
-                        sd.n_total * sizeof(float), sd.stream);
-        cudaMemsetAsync(sd.ext_in, 0, sd.n_total * sizeof(float), sd.stream);
+        CUNXON_CUDA_CHECK(cudaMemsetAsync(sd.N.branch_sum, 0,
+                        sd.n_total * sd.n_branches * sizeof(float), sd.stream));
+        CUNXON_CUDA_CHECK(cudaMemsetAsync(sd.N.modulatory_pot, 0,
+                        sd.n_total * sizeof(float), sd.stream));
+        CUNXON_CUDA_CHECK(cudaMemsetAsync(sd.ext_in, 0, sd.n_total * sizeof(float), sd.stream));
         /* clear per-step energy accumulator */
-        cudaMemsetAsync(sd.d_energy, 0, sizeof(float), sd.stream);
+        CUNXON_CUDA_CHECK(cudaMemsetAsync(sd.d_energy, 0, sizeof(float), sd.stream));
         /* Place external inputs onto the SENSORY input port slots */
         if (ext_inputs && ext_inputs[s] && sd.n_port_in_sensory > 0) {
             /* host_data is dense [n_port_in_sensory] -> scatter via a tiny kernel */
