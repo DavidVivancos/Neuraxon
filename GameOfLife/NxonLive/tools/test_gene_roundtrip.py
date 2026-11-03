@@ -1,5 +1,10 @@
-import os, sys, json, random, functools
-print=functools.partial(__builtins__.print, flush=True)
+import os, sys, json, random, functools, builtins
+# builtins, not __builtins__: the latter is a module only while this file
+# runs as __main__, and a dict once it is imported -- which is what any
+# test runner does. Collecting this file used to raise
+#   AttributeError: dict object has no attribute print
+# and that aborted collection for the WHOLE repository.
+print=functools.partial(builtins.print, flush=True)
 os.environ["NEURAXON_HEADLESS"]="1"; sys.path.insert(0, os.getcwd())
 from server import np_fallback; np_fallback.install()
 import architecture; architecture.load_architecture("architecture_files/nas_best.json", verbose=False)
