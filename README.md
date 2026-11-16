@@ -1,278 +1,179 @@
-# Neuraxon
+# 🪼 Multi Neuraxon V 2.0 Released + Cuda library 🚀
 
 <div align="center">
-<a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.7+-1f425f.svg?color=purple"></a>
+<a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.8+-1f425f.svg?color=purple"></a>
 <a href="https://opensource.org/licenses/MIT"><img alt="License" src="https://img.shields.io/badge/License-MIT-blue"></a>
-<a href="https://huggingface.co/spaces/DavidVivancos/Neuraxon"><img src="https://img.shields.io/badge/🤗%20Demo-HuggingFace-yellow"></a>
-<a href="https://www.researchgate.net/publication/397331336_Neuraxon"><img src="https://img.shields.io/badge/Paper-ResearchGate-00CCBB.svg"></a>
-<a href="https://huggingface.co/spaces/DavidVivancos/NxonARCAGI3Play"><img src="https://img.shields.io/badge/🤗%20ARC--AGI--3%20Demo-HuggingFace-orange"></a>
-<a href="https://huggingface.co/datasets/DavidVivancos/Nxon2ArcAGI3Brains"><img src="https://img.shields.io/badge/🤗%20Brains%20Dataset-155k%20brains-orange"></a>
+<a href="https://huggingface.co/spaces/DavidVivancos/Neuraxon"><img src="https://img.shields.io/badge/🤗%20Demo-HuggingFace-yellow">(Network Builder)</a>
+<a href="https://huggingface.co/spaces/DavidVivancos/NeuraxonLife"><img src="https://img.shields.io/badge/🤗%20Demo-HuggingFace-yellow"> (Game Of Life Lite 3D)</a>
+<a href="https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint"><img src="https://img.shields.io/badge/Paper-ResearchGate-00CCBB.svg"> (v2.0)</a>
+<a href="https://github.com/DavidVivancos/Neuraxon/blob/main/neuraxon2.py"><img src="https://img.shields.io/badge/Code-neuraxon2.py-blue"></a>
 <a href="https://github.com/DavidVivancos/Neuraxon"><img alt="GitHub stars" src="https://img.shields.io/github/stars/DavidVivancos/Neuraxon?style=social"></a>
+<a href="https://huggingface.co/datasets/DavidVivancos/NeuraxonLife2-1M"><img src="https://img.shields.io/badge/🤗%20Dataset-NeuraxonLife2--1M-orange"></a>
+<a href="https://huggingface.co/datasets/DavidVivancos/NeuraxonLife2.5-100K-TimeSeries"><img src="https://img.shields.io/badge/🤗%20Dataset-NeuraxonLife2.5_100K_Timeseries-orange"></a>
+<a href="https://huggingface.co/spaces/DavidVivancos/NxonARCAGI3Play"><img src="https://img.shields.io/badge/🤗%20Demo-HuggingFace-yellow"> (ARC-AGI-3 BrainPlayer)</a>
+<a href="https://huggingface.co/datasets/DavidVivancos/Nxon2ArcAGI3Brains"><img src="https://img.shields.io/badge/🤗%20Dataset-Nxon2ArcAGI3Brains-orange"></a>
 </div>
+<br>
 
-Experience Neuraxon's trinary neural dynamics with our **interactive 3D visualization** at [HuggingFace Spaces](https://huggingface.co/spaces/DavidVivancos/Neuraxon).
+**A New Neural Growth & Computation Blueprint By Qubic Open Science David Vivancos & José Sanchez**  
+*Continuous-time • Trinary-state • Multi-timescale • Neuromodulated • Structurally plastic*
 
-### Demo Features:
-- 🧠 **Build Custom Networks**: Configure neurons, synapses, and plasticity parameters
-- 🎯 **Interactive Controls**: Manually set input neuron states (excitatory/neutral/inhibitory)
-- 🔬 **Live Neuromodulation**: Adjust dopamine 🎯, serotonin 😊, acetylcholine 💡, and norepinephrine ⚡ in real-time
-- 📊 **3D Visualization**: Watch neural activity flow through the network with curved synaptic connections
-- ⚙️ **Preset Configurations**: Try small networks, large networks, high plasticity modes, and more
-- ▶️ **Real-time Simulation**: Run continuous processing and observe emergent dynamics
+**Full theoretical foundation:** [Neuraxon v2.0 Paper (ResearchGate)](https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint) preprint soon at IEEE Xplore
 
-No installation required—just open your browser and explore!
+**Core implementation:** [`neuraxon2.py`](https://github.com/DavidVivancos/Neuraxon/blob/main/neuraxon2.py) (pure Python, no external dependencies, backward-compatible with v1).
 
-## 🎮 Neuraxon 2.0 plays ARC-AGI-3
+**CuNxon Cuda Kernels & Library for Multi Neuraxon 2.0:** ([https://github.com/DavidVivancos/Neuraxon/cuNxon](https://github.com/DavidVivancos/Neuraxon/tree/main/cuNxon)) 
 
-Multi-Sphere **Neuraxon 2.0** brains, bred by an architecture search on CPUs (no LLM, no GPU), play the 25 public
-[ARC-AGI-3](https://three.arcprize.org) games, level by level.
-
-- ▶️ **Watch them play**: [Multi Neuraxon 2.0 BrainPlayer of ARCAGI3](https://huggingface.co/spaces/DavidVivancos/NxonARCAGI3Play):
-  the brains run live in your browser, each on its best seed
-- 🧠 **All the brains**: [Nxon2ArcAGI3Brains](https://huggingface.co/datasets/DavidVivancos/Nxon2ArcAGI3Brains): 155,192 trained
-  brains and 245,116 architectures (NAS 1055–1178)
-- 🛠️ **Play and train them yourself**: the [`ARCAGI3`](ARCAGI3) folder (Python 3.12+)
-
-```bash
-cd ARCAGI3
-pip install -r requirements.txt
-python get_games.py                                       # the 25 games
-python get_brains.py get --game tn36 --level 1 --limit 3  # brains from the dataset
-python play_brain.py brains/tn36/<brain>.brain.json.gz --seeds 8
-python train_brain.py evolve brains/tn36/<brain>.brain.json.gz --generations 10
-```
-
-## 📸 Demo Screenshots
-
+**Interactive 3D Network Builder Demo** : [Hugging Face Space](https://huggingface.co/spaces/DavidVivancos/Neuraxon)
 <div align="center">
-  <img src="images/NeuraxonDemoSreenshot.png" alt="Neuraxon 3D Visualization" width="40%"/>
-  <img src="images/NeuraxonDemoSreenshot2.png" alt="Neuraxon 3D Visualization" width="40%"/>
-  <p><i>Interactive 3D visualization showing neural activity and neuromodulator flow</i></p>
+  <img src="images/Neuraxonv2.0DemoSreenshot.png" alt="Neuraxon 2.0 Builder" width="90%"/>  
 </div>
 
-<hr />
+**Multi Neuraxon 2.0  Multi-Sphere 3D Network Builder Demo:** : (https://huggingface.co/spaces/DavidVivancos/MultiNeuraxon2)
+<br> (Update March 31st 2026: Include brain preset for the abstraction of the fruit fly connectome: Drosophila melanogaster.)
+<div align="center">
+  <img src="images/MultiNeuraxon2.0.png" alt="Neuraxon 2.0 Multshpere" width="90%"/>  
+</div>
 
+**Core implementation:** [`MultiNeuraxon2.py`](https://github.com/DavidVivancos/Neuraxon/blob/main/MultiNeuraxon2.py)
+
+**Neuraxon Game of Life 5.1 v196 Research Version Mulit Nxon 2.0 (Based on Neuraxon 2.0)  + First g factor introduced + Evolutionary NAS:** (https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/5)
+
+**Neuraxon Live -> Nxon GoL Server + Client V 1.067 v1087 (oct 30th 2026) Including NxonKaleido Brain viz :** ([https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/NxonLive](https://github.com/DavidVivancos/Neuraxon/tree/main/GameOfLife/NxonLive))
+
+Play online at: https://nxon.online/
+
+**Multi Neuraxon 2.0 BrainPlayer of ARCAGI3 (Nov 2026): 155,192 Multi Neuraxon 2.0 brains bred by an evolutionary NAS on CPUs (no LLM, no GPU) for the 25 public ARC-AGI-3 games.** Python tools to play, train and fetch the brains: ([https://github.com/DavidVivancos/Neuraxon/ARCAGI3](https://github.com/DavidVivancos/Neuraxon/tree/main/ARCAGI3)) · Watch them play live in your browser: [NxonARCAGI3Play Hugging Face Space](https://huggingface.co/spaces/DavidVivancos/NxonARCAGI3Play) · All the brains: [Nxon2ArcAGI3Brains dataset](https://huggingface.co/datasets/DavidVivancos/Nxon2ArcAGI3Brains)
+
+
+**Neuraxon Game of Life 5.0 Lite Demo (Based on Multi Neuraxon 2.0) + First Proto-Language/Audition :** [Neuraxon Game of Life Hugging Face Space](https://huggingface.co/spaces/DavidVivancos/NeuraxonLife)
+<div align="center">
+  <img src="images/NeuraxonGameOfLife4.0-DemoSreenshot.png" alt="Neuraxon Game of Life Visualization" width="90%"/>  
+</div>
+
+---
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=DavidVivancos/Neuraxon&type=date&legend=top-left)](https://www.star-history.com/#DavidVivancos/Neuraxon&type=date&legend=top-left)
 
-## 👋 Overview
+<hr />
 
-**Neuraxon** is a bio-inspired neural network framework that extends beyond traditional perceptrons through **trinary logic** (-1, 0, 1), capturing excitatory, neutral, and inhibitory dynamics found in biological neurons.
 
-Unlike conventional neural networks that use discrete time steps and binary activation, Neuraxon features:
-- **Continuous processing** where inputs flow as constant streams
-- **Multi-timescale computation** at both neuron and synapse levels
-- **Dynamic plasticity** with synaptic formation, collapse, and rare neuron death
-- **Neuromodulation** inspired by dopamine, serotonin, acetylcholine, and norepinephrine
-- **Spontaneous activity** mirroring task-irrelevant yet persistent brain processes
+### What is Neuraxon 2.0?
+Neuraxon is a **bio-inspired computational unit** that goes far beyond the classic perceptron. It uses **trinary logic** (`+1` excitatory, `0` neutral, `-1` inhibitory), operates in **continuous time** (inputs flow as constant streams), and performs computation at **both neuron and synapse levels**. Synapses have three dynamic weights (`w_fast`, `w_slow`, `w_meta`) and can form, collapse, or reconnect; hidden neurons can even die. Spontaneous activity, autoreceptors, homeostatic plasticity, and four neuromodulators (DA, 5-HT, ACh, NA) with nine receptor subtypes make the network intrinsically alive and adaptive.
 
-This implementation includes a hybridization with Qubic's **Aigarth Intelligent Tissue**, demonstrating evolutionary approaches to neural computation.
+**v2.0** introduces a **unified 4-step pipeline** executed every simulation step:  
+1. **Time Warping (ChronoPlasticity)** – adaptive memory horizon per synapse  
+2. **Dynamic Decay (DSN)** – input-conditioned decay via causal convolution  
+3. **CTSN Complemented State** – learnable complement term prevents information loss  
+4. **AGMP (Astrocyte-Gated Multi-timescale Plasticity)** – eligibility × modulator × astrocyte gate  
 
-Check out our [paper](https://www.researchgate.net/publication/397331336_Neuraxon) for complete theoretical foundations and biological inspirations!
+Additional breakthroughs:  
+- **MSTH** (Multi-Scale Temporal Homeostasis) – 4 coordinated regulatory loops (ultrafast → slow)  
+- **Nonlinear dendritic branch integration** with supralinear gamma  
+- **Watts-Strogatz small-world topology** (ring + rewiring)  
+- **Full receptor subtype system** (tonic/phasic, nonlinear activation)  
+- **Oscillator bank** with cross-frequency coupling (PAC)  
+- **Aigarth Intelligent Tissue hybridization** for evolutionary mutation/selection  
 
-## 🧠 Key Innovations
 
-### Trinary State Logic
-Neuraxons operate in three states:
-- **+1 (Excitatory)**: Active firing, promoting downstream activity
-- **0 (Neutral)**: Subthreshold processing, enabling subtle modulation
-- **-1 (Inhibitory)**: Active suppression of downstream activity
 
-This third "neutral" state models:
-- Metabotropic receptor activation
-- Silent synapses that can be "unsilenced"
-- Subthreshold dendritic integration
-- Neuromodulatory influences
+### Why Neuraxon 2.0 Matters – Revolutionary for AI
+Traditional ANNs and even most SNNs suffer from discrete time steps, binary/spiking simplification, static topologies, catastrophic forgetting, and catastrophic rigidity. Neuraxon 2.0 solves these at the architectural level:
 
-### Multi-Component Synapses
-Each synapse maintains three dynamic weights:
+- **Continuous real-time learning** – no separate training/inference phases; adapts instantly to streaming data.  
+- **Temporal richness** – timing, duration, frequency, and sequence of trinary states encode information.  
+- **Biological plausibility** – dendrites, silent synapses, neuromodulation, homeostasis, astrocyte-like gating, spontaneous activity.  
+- **Energy efficiency & robustness** – sparse trinary activity + multi-timescale decay + homeostasis prevent saturation/plasticity loss.  
+- **Evolvability** – Aigarth hybrid enables population-level evolution of network structure and parameters.  
 
-```python
-w_fast   # Ionotropic (AMPA-like), τ ~5ms - rapid signaling
-w_slow   # NMDA-like, τ ~50ms - sustained integration  
-w_meta   # Metabotropic, τ ~1000ms - long-term modulation
-```
+**Applications that become possible:**
+- Embodied / robotic control with proprioception and continuous sensory streams  
+- Real-time temporal pattern recognition (finance, neuroscience, robotics)  
+- Cognitive modeling of consciousness, attention, sleep/wake cycles  
+- Continual lifelong learning without forgetting  
+- Energy-efficient edge AI and neuromorphic hardware targets  
+- Artificial life and open-ended evolution  
+- Pathways toward AGI that respects biological constraints  
 
-### Continuous Time Processing
-Unlike discrete time-step models, Neuraxon processes information continuously:
+v2.0 is not an incremental update — it is a **new blueprint** for neural growth and computation.
 
-```
-τ (ds/dt) = -s + Σ w_i·f(s_i) + I_ext(t)
-```
+---
 
-This enables:
-- Real-time adaptation to streaming inputs
-- Natural temporal pattern recognition
-- Biologically plausible dynamics
-
-## 🚀 Quick Start
-
-### Installation
+### 🚀 Quick Start (neuraxon2.py)
 
 ```bash
-git clone https://github.com/DavidVivancos/Neuraxon.git
-cd Neuraxon
-pip install -r requirements.txt
-```
+from neuraxon2 import (
+    NetworkParameters,
+    NeuraxonNetwork,
+    NeuraxonApplication,
+    NeuraxonAigarthHybrid
+)
 
-### Basic Usage
-
-```python
-from neuraxon import NeuraxonNetwork, NetworkParameters
-
-# Create network with default biologically-plausible parameters
+# 1. Create network with biologically-plausible defaults
 params = NetworkParameters(
     num_input_neurons=5,
-    num_hidden_neurons=20,
-    num_output_neurons=5
+    num_hidden_neurons=30,
+    num_output_neurons=5,
+    # v2.0 new parameters
+    dsn_enabled=True,
+    ctsn_enabled=True,
+    agmp_enabled=True,
+    chrono_enabled=True,
+    msth_ultrafast_tau=5.0,
+    ws_k=8,
+    ws_beta=0.35
 )
+
 network = NeuraxonNetwork(params)
 
-# Set input pattern (trinary states: -1, 0, 1)
+# 2. Set continuous inputs (trinary)
 network.set_input_states([1, -1, 0, 1, -1])
 
-# Run continuous simulation
-for step in range(100):
+# 3. Simulate (continuous time)
+for step in range(200):
     network.simulate_step()
-    
-    if step % 20 == 0:
-        outputs = network.get_output_states()
-        print(f"Step {step}: Outputs = {outputs}")
+    if step % 50 == 0:
+        outs = network.get_output_states()
+        print(f"Step {step:3d} | Outputs: {outs} | Energy: {network.get_energy():.3f}")
 
-# Modulate network behavior via neuromodulators
-network.modulate('dopamine', 0.8)  # Enhance learning
-network.modulate('serotonin', 0.6)  # Adjust plasticity
+# 4. Live neuromodulation
+network.modulate('dopamine', 0.85)      # boost learning
+network.modulate('serotonin', 0.6)      # modulate plasticity
 
-# Save network state
-from neuraxon import save_network
-save_network(network, "my_network.json")
+# 5. Application layer – pattern storage & recall
+app = NeuraxonApplication(params)
+app.store_pattern("A", [1,1,-1,-1,1], steps=50)
+recall = app.recall_pattern("A", steps=30, mask_fraction=0.4)
+print("Recall:", recall)
+
+# 6. Evolutionary Aigarth hybrid
+hybrid = NeuraxonAigarthHybrid(params)
+dataset = [([1,0,0,0,0],[1,0,0,0,0]), ...]  # your task
+hybrid.evolve(dataset, seasons=5, episodes=20)
+print("Best fitness:", hybrid.best().fitness)
+
+# 7. Save / load (full state, backward-compatible with v1)
+from neuraxon2 import save_network, load_network
+save_network(network, "my_net_v2.json")
+loaded = load_network("my_net_v2.json")
 ```
 
-## 📊 Network Architecture
-
-```
-Input Layer (5 neurons)
-    ↓ ↑ (bidirectional ring connectivity)
-Hidden Layer (20 neurons)  
-    ↓ ↑ (with spontaneous activity)
-Output Layer (5 neurons)
-
-Constraints:
-- Small-world connectivity (~5% connection probability)
-- No output → input connections
-- Dynamic topology via structural plasticity
-```
-
-## 🔬 Advanced Features
-
-### Synaptic Plasticity
-
-Neuraxon implements continuous weight evolution inspired by STDP:
-
-```python
-# Weights evolve based on pre/post activity and neuromodulators
-# LTP: pre=1, post=1 → strengthen synapse
-# LTD: pre=1, post=-1 → weaken synapse
-# Neutral state provides nuanced control
-```
-
-### Structural Plasticity
-
-```python
-# Synapses can form, strengthen, weaken, or die
-# Neurons can die if health drops below threshold (hidden layer only)
-# Silent synapses can be "unsilenced" through correlated activity
-```
-
-### Neuromodulation
-
-```python
-# Four neuromodulators with distinct roles:
-neuromodulators = {
-    'dopamine': 0.1,      # Learning & reward
-    'serotonin': 0.1,     # Mood & plasticity
-    'acetylcholine': 0.1, # Attention & arousal
-    'norepinephrine': 0.1 # Alertness & stress response
-}
-```
-
-## 🎯 Use Cases
-
-Neuraxon is particularly suited for:
-
-- **Continuous learning systems** that adapt in real-time
-- **Temporal pattern recognition** in streaming data
-- **Embodied AI and robotics** requiring bio-realistic control
-- **Adaptive signal processing** with non-stationary inputs
-- **Cognitive modeling** of brain-like computation
-- **Energy-efficient AI** leveraging sparse, event-driven processing
-
-## 🖥️ Visualization & Tools
-
-### Interactive Web Demo
-Visit our [HuggingFace Space](https://huggingface.co/spaces/DavidVivancos/Neuraxon) for a fully interactive 3D visualization where you can:
-
-- **Configure** all network parameters through an intuitive GUI
-- **Visualize** neurons color-coded by state:
-  - 🔴 Red = Excitatory (+1)
-  - 🔵 Blue = Inhibitory (-1)
-  - ⚪ Gray = Neutral (0)
-- **Watch** neuromodulator particles (emoji sprites) flow along synaptic pathways
-- **Control** input patterns and observe how they propagate through the network
-- **Experiment** with different neuromodulator levels and see their effects
-- **Compare** preset configurations (minimal, balanced, highly plastic, etc.)
-
-The demo features a  3D sphere layout with curved synaptic connections and real-time particle effects representing neuromodulator dynamics.
-
-
-## 📖 Configuration Parameters
-
-All parameters have biologically plausible default ranges:
-
-```python
-@dataclass
-class NetworkParameters:
-    # Architecture
-    num_input_neurons: int = 5         # [1, 100]
-    num_hidden_neurons: int = 20       # [1, 1000]
-    num_output_neurons: int = 5        # [1, 100]
-    connection_probability: float = 0.05  # [0.0, 1.0]
-    
-    # Neuron dynamics
-    membrane_time_constant: float = 20.0  # ms [5.0, 50.0]
-    firing_threshold_excitatory: float = 1.0  # [0.5, 2.0]
-    firing_threshold_inhibitory: float = -1.0 # [-2.0, -0.5]
-    
-    # Synaptic timescales
-    tau_fast: float = 5.0    # ms [1.0, 10.0]
-    tau_slow: float = 50.0   # ms [20.0, 100.0]
-    tau_meta: float = 1000.0 # ms [500.0, 5000.0]
-    
-    # Plasticity
-    learning_rate: float = 0.01  # [0.0, 0.1]
-    stdp_window: float = 20.0    # ms [10.0, 50.0]
-    
-    # ... see code for complete parameter set
-```
-
-## 🧬 Aigarth Integration
-
-This implementation hybridizes Neuraxon with [Aigarth Intelligent Tissue](https://github.com/Aigarth/aigarth-it), combining:
-
-- **Neuraxon**: Sophisticated synaptic dynamics and continuous processing
-- **Aigarth**: Evolutionary framework with mutation and natural selection
-
-The hybrid creates "living neural tissue" that:
-- Evolves structure through genetic-like mutations
-- Adapts weights through synaptic plasticity
-- Undergoes selection based on task performance
-- Exhibits emergent complexity and self-organization
 
 ## 📚 Citation
 
-If you use Neuraxon in your research, please cite:
-
+If you use Neuraxon v 2.0  in your research, please cite:
+```bibtex
+@article{Vivancos-Sanchez-2026neuraxon2,
+    title={Neuraxon v2.0: A New Neural Growth \& Computation Blueprint},
+    author={David Vivancos and Jose Sanchez},
+    year={2026},
+    journal={ResearchGate Preprint},
+    institution={Artificiology Research, UNIR University, Qubic Science},
+    url={https://www.researchgate.net/publication/400868863_Neuraxon_V20_A_New_Neural_Growth_Computation_Blueprint}
+}
+```
+If you use Neuraxon 1.0 in your research, please cite:
 ```bibtex
 @article{Vivancos-Sanchez-2025neuraxon,
     title={Neuraxon: A New Neural Growth \& Computation Blueprint},
@@ -283,19 +184,52 @@ If you use Neuraxon in your research, please cite:
     url={https://www.researchgate.net/publication/397331336_Neuraxon}
 }
 ```
-
-For the ARC-AGI-3 brains:
-
+If you use the Neuraxon2LifeTS dataset, please also cite:
 ```bibtex
-@dataset{Nxon2ArcAGI3Brains,
-  title     = {Nxon2ArcAGI3Brains: 155,000 Evolved Neuraxon Brains for the ARC-AGI-3 Games},
-  author    = {David Vivancos and Jose Sanchez},
-  year      = {2026},
-  publisher = {Hugging Face},
-  version   = {1.0.0},
-  url       = {https://github.com/DavidVivancos/Neuraxon}
+@dataset{Neuraxon2LifeTS,
+  title={Neuraxon 2.0 Time Series Dataset},
+  author={Vivancos, David and Sanchez, Jose},
+  year={2026},
+  publisher={Hugging Face},
+  url={https://huggingface.co/datasets/DavidVivancos/Neuraxon2LifeTS}
 }
 ```
+
+If you use the NeuraxonLife2-1M dataset, please also cite:
+```bibtex
+@dataset{NeuraxonLife2-1M,
+  title={Neuraxon: Artificial Life 2.0 BioInspired Neural Network Simulation 1M Dataset},
+  author={Vivancos, David and Sanchez, Jose},
+  year={2025},
+  publisher={Hugging Face},
+  url={https://huggingface.co/datasets/DavidVivancos/NeuraxonLife2-1M}
+}
+```
+
+If you use the NeuraxonLife2.5-100K-TimeSeries dataset, please also cite:
+```bibtex
+@dataset{NeuraxonLife2.5-100K-TimeSeries,
+  title={Neuraxon: Artificial Life 2.5 BioInspired Neural Network Simulation 100K-TimeSeries Dataset},
+  author={Vivancos, David and Sanchez, Jose},
+  year={2025},
+  publisher={Hugging Face},
+  url={https://huggingface.co/datasets/DavidVivancos/NeuraxonLife2.5-100K-TimeSeries}
+}
+```
+
+If you use the Nxon2ArcAGI3Brains dataset, please also cite:
+```bibtex
+@dataset{Nxon2ArcAGI3Brains,
+  title={Nxon2ArcAGI3Brains: 155,000 Evolved Neuraxon Brains for the ARC-AGI-3 Games},
+  author={Vivancos, David and Sanchez, Jose},
+  year={2026},
+  publisher={Hugging Face},
+  version={1.0.0},
+  url={https://huggingface.co/datasets/DavidVivancos/Nxon2ArcAGI3Brains}
+}
+```
+
+
 
 ## 🤝 Contributing
 
@@ -307,6 +241,7 @@ We welcome contributions! Areas of interest include:
 - New application domains
 - Visualization tools
 - Performance benchmarks
+- Game of Life extensions and scenarios
 
 Please open an issue to discuss major changes before submitting PRs.
 
@@ -317,13 +252,12 @@ Artificiology Research https://artificiology.com/ , Qubic https://qubic.org/ Sci
 Email: vivancos@vivancos.com
 
 **Jose Sanchez**  
-UNIR University  , Qubic https://qubic.org/ Science Advisor  
+UNIR University, Qubic https://qubic.org/ Science Advisor  
 Email: jose.sanchezgarcia@unir.net
 
 ## 📄 License
 
 MIT License. See `LICENSE` file for details.
-
 
 ## ⚠️ Important License Notice
 
@@ -334,8 +268,6 @@ MIT License. See `LICENSE` file for details.
 - ❌ **NO military use** of any kind
 - ❌ **NO use by military-affiliated entities**
 - ❌ **NO dual-use applications** with military potential
-
-**See [NOTICE](NOTICE) for full details.**
 
 The standalone Neuraxon implementation (without Aigarth integration) has no such restrictions.
 
@@ -354,3 +286,15 @@ Special thanks to the Qubic's Aigarth team for the evolutionary tissue framework
 <div align="center">
 <i>Building brain-inspired AI, one Neuraxon at a time</i> 🧠✨
 </div>
+
+
+
+
+
+
+
+
+
+
+
+
