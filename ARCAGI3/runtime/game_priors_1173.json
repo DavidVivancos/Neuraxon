@@ -1,0 +1,182 @@
+{
+ "version": "1173.1",
+ "source": "game_book_1178.json",
+ "rule": "For each game, the genes of aim and coverage that its book holders (game_book_1173.json: the brains that hold a start of the game, by statistics) carry: the candidate tier (cand_tier), the per-level key sweep (commit_sweep, commit_stall) and the click band (click_mask_min / click_mask_max). Each holder weighs by its Wilson lower bound x (1 + its moves left / 10): a deep, sure holder counts more. Discrete genes take the weighted mode, the band the weighted median. Lab results never enter: these are the NAS's own measured champions -- priors, never actions.",
+ "games": {
+  "ar25": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 32,
+   "holders": 52
+  },
+  "bp35": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 32,
+   "holders": 29
+  },
+  "cd82": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 128,
+   "holders": 11
+  },
+  "cn04": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 2,
+   "click_hi": 2,
+   "holders": 14
+  },
+  "dc22": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 8,
+   "holders": 34
+  },
+  "ft09": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 2,
+   "holders": 10
+  },
+  "g50t": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 8,
+   "holders": 27
+  },
+  "ka59": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 8,
+   "holders": 25
+  },
+  "lf52": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 2,
+   "click_hi": 4,
+   "holders": 36
+  },
+  "lp85": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 32,
+   "holders": 23
+  },
+  "ls20": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 2,
+   "holders": 25
+  },
+  "m0r0": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 2,
+   "click_hi": 8,
+   "holders": 17
+  },
+  "r11l": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 8,
+   "holders": 20
+  },
+  "re86": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 8,
+   "holders": 23
+  },
+  "s5i5": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 32,
+   "holders": 32
+  },
+  "sb26": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 2,
+   "click_hi": 8,
+   "holders": 14
+  },
+  "sc25": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 128,
+   "holders": 26
+  },
+  "sk48": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 2,
+   "holders": 28
+  },
+  "sp80": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 32,
+   "holders": 18
+  },
+  "su15": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 2,
+   "click_hi": 8,
+   "holders": 25
+  },
+  "tn36": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 64,
+   "holders": 15
+  },
+  "tr87": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 8,
+   "holders": 19
+  },
+  "tu93": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 2,
+   "holders": 31
+  },
+  "vc33": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 1,
+   "click_hi": 64,
+   "holders": 31
+  },
+  "wa30": {
+   "cand_tier": 0,
+   "commit_sweep": 0,
+   "click_lo": 2,
+   "click_hi": 8,
+   "holders": 41
+  }
+ }
+}

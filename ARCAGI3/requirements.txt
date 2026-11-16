@@ -1,0 +1,13 @@
+# Python 3.12 or later
+numpy>=2.2
+scipy>=1.15
+arc-agi==0.9.9
+arcengine==0.9.3
+
+# optional
+huggingface_hub>=0.30   # get_brains.py (the brains dataset)
+pyarrow>=15             # get_brains.py
+pillow>=10              # play_brain.py --gif
+# numba                 # --fast (the runtime's faster engine)
+
+# the set the brains were bred with: numpy==2.2.6 scipy==1.15.3 numba==0.62.1 arc-agi==0.9.9 arcengine==0.9.3
